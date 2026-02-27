@@ -5,22 +5,31 @@
   <link rel="stylesheet" href="popup.css">
 </head>
 <body>
-  <h1>TabVacuum</h1>
-  <div class="actions">
-    <button id="btn-dupes">Close Duplicates</button>
-    <button id="btn-merge">Merge Windows</button>
-    <div class="sort-group">
-      <button id="btn-sort">Sort Tabs</button>
-      <select id="sort-criteria">
-        <option value="url">by URL</option>
-        <option value="title">by Title</option>
-        <option value="lastAccessed">by Last Accessed</option>
-        <option value="visitCount">by Visit Count</option>
-      </select>
-      <button id="sort-direction" title="Toggle sort direction">&#x2191;</button>
-    </div>
-    <button id="btn-stale">Close Stale Tabs</button>
-  </div>
+  <header>
+    <span class="logo">TabVacuum</span>
+  </header>
+  <ul class="actions">
+    <li>
+      <button id="btn-dupes">Close Duplicates</button>
+    </li>
+    <li>
+      <button id="btn-merge">Merge Windows</button>
+    </li>
+    <li>
+      <button id="btn-sort">Sort Tabs <span class="chevron">&#x25B8;</span></button>
+      <div class="sort-options" hidden>
+        <button data-criteria="url" data-direction="asc">URL (A&#x2192;Z)</button>
+        <button data-criteria="url" data-direction="desc">URL (Z&#x2192;A)</button>
+        <button data-criteria="title" data-direction="asc">Title (A&#x2192;Z)</button>
+        <button data-criteria="title" data-direction="desc">Title (Z&#x2192;A)</button>
+        <button data-criteria="lastAccessed" data-direction="desc">Last Accessed</button>
+        <button data-criteria="visitCount" data-direction="desc">Most Visited</button>
+      </div>
+    </li>
+    <li>
+      <button id="btn-stale">Close Stale Tabs</button>
+    </li>
+  </ul>
   <div id="status" class="status"></div>
   <script src="browser-polyfill.js"></script>
   <script src="popup.js"></script>

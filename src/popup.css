@@ -1,44 +1,120 @@
 @import "common.css";
 
 body {
-  width: 280px;
-  padding: var(--space-lg);
+  width: 300px;
+  padding: 0;
 }
 
-h1 {
-  font-size: var(--font-size-lg);
-  font-weight: 600;
-  margin-bottom: 10px;
+/* Header */
+header {
+  padding: 14px 16px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.logo {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
   color: var(--accent);
 }
 
+/* Action list */
 .actions {
+  list-style: none;
+  padding: 4px 0;
+}
+
+/* Action buttons — full-width flat rows */
+.actions > li > button {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  height: 36px;
+  padding: 0 16px;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 400;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+
+.actions > li > button:hover {
+  background: var(--bg-hover);
+}
+
+.actions > li > button:active {
+  background: var(--bg-active);
+}
+
+/* Sort chevron */
+.chevron {
+  margin-left: auto;
+  color: var(--text-secondary);
+  font-size: 12px;
+  transition: transform 0.15s;
+}
+
+.sort-options:not([hidden]) ~ button .chevron,
+li:has(.sort-options:not([hidden])) > button .chevron {
+  transform: rotate(90deg);
+}
+
+/* Sort options panel */
+.sort-options {
   display: flex;
   flex-direction: column;
-  gap: var(--space-sm);
+  overflow: hidden;
 }
 
-.sort-group {
-  display: flex;
-  gap: var(--space-xs);
+.sort-options[hidden] {
+  display: none;
 }
 
-.sort-group button {
-  flex: 1;
+.sort-options button {
+  height: 32px;
+  padding: 0 16px 0 32px;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 400;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s;
 }
 
-.sort-group select {
-  flex: 1;
+.sort-options button:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
 }
 
-#sort-direction {
-  flex: 0 0 36px;
-  font-size: 16px;
-  text-align: center;
-  padding: var(--space-sm);
+.sort-options button:active {
+  background: var(--bg-active);
 }
 
+/* Status bar */
 #status {
-  margin-top: 10px;
-  font-size: var(--font-size-sm);
+  margin: 0;
+  padding: 0 16px;
+  border-radius: 0;
+  border-top: 1px solid var(--border);
+  background: transparent;
+  font-size: 12px;
+  color: var(--text-secondary);
+  text-align: center;
+  max-height: 0;
+  overflow: hidden;
+  opacity: 0;
+  transition: max-height 0.2s, opacity 0.2s, padding 0.2s;
+}
+
+#status.visible {
+  max-height: 40px;
+  padding: 8px 16px;
+  opacity: 1;
 }

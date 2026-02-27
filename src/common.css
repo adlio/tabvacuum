@@ -7,15 +7,16 @@
 }
 
 :root {
-  /* Colors - Catppuccin Mocha theme */
-  --bg-primary: #1e1e2e;
-  --bg-secondary: #313244;
-  --bg-hover: #45475a;
-  --bg-active: #585b70;
-  --border: #45475a;
-  --text-primary: #cdd6f4;
-  --text-secondary: #a6adc8;
-  --accent: #cba6f7;
+  /* Colors - Muted dark theme */
+  --bg-primary: #1a1a2e;
+  --bg-secondary: #232340;
+  --bg-hover: #2d2d50;
+  --bg-active: #383860;
+  --border: #2d2d50;
+  --text-primary: #e0e0e0;
+  --text-secondary: #8888a0;
+  --accent: #6688cc;
+  --success: #66aa88;
 
   /* Spacing */
   --space-xs: 4px;

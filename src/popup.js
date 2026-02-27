@@ -5,13 +5,8 @@ const elements = {
   btnDupes: document.getElementById('btn-dupes'),
   btnMerge: document.getElementById('btn-merge'),
   btnSort: document.getElementById('btn-sort'),
-  sortCriteria: document.getElementById('sort-criteria'),
-  sortDirection: document.getElementById('sort-direction'),
+  sortOptions: document.querySelector('.sort-options'),
   btnStale: document.getElementById('btn-stale')
-};
-
-let sortState = {
-  direction: 'asc'
 };
 
 function showStatus(message) {
@@ -29,43 +24,25 @@ async function sendCommand(command, params = {}) {
   }
 }
 
-function updateSortDirectionButton() {
-  const arrow = sortState.direction === 'asc' ? '\u2191' : '\u2193';
-  elements.sortDirection.textContent = arrow;
+function toggleSortOptions() {
+  const isHidden = elements.sortOptions.hidden;
+  elements.sortOptions.hidden = !isHidden;
 }
 
-function toggleSortDirection() {
-  sortState.direction = sortState.direction === 'asc' ? 'desc' : 'asc';
-  updateSortDirectionButton();
-}
-
-// Initialize UI with saved settings
-async function initializeUI() {
-  const settings = await browser.runtime.sendMessage({ command: 'getSettings' });
-
-  if (settings.lastSortCriteria) {
-    elements.sortCriteria.value = settings.lastSortCriteria;
-  }
-
-  if (settings.lastSortDirection) {
-    sortState.direction = settings.lastSortDirection;
-    updateSortDirectionButton();
-  }
-}
-
-// Set up event listeners
+// Action buttons
 elements.btnDupes.addEventListener('click', () => sendCommand('closeDuplicates'));
 elements.btnMerge.addEventListener('click', () => sendCommand('mergeWindows'));
 elements.btnStale.addEventListener('click', () => sendCommand('closeStaleTabs'));
 
-elements.btnSort.addEventListener('click', () => {
+// Sort Tabs toggle
+elements.btnSort.addEventListener('click', toggleSortOptions);
+
+// Sort option buttons — each fires immediately
+elements.sortOptions.addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-criteria]');
+  if (!btn) return;
   sendCommand('sortTabs', {
-    criteria: elements.sortCriteria.value,
-    direction: sortState.direction
+    criteria: btn.dataset.criteria,
+    direction: btn.dataset.direction
   });
 });
-
-elements.sortDirection.addEventListener('click', toggleSortDirection);
-
-// Initialize on load
-initializeUI();
