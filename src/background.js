@@ -106,54 +106,67 @@ async function closeStaleTabs() {
   return { message };
 }
 
-// Message listener — popup and options pages communicate here
-browser.runtime.onMessage.addListener((msg) => {
-  switch (msg.command) {
-    case 'closeDuplicates': return closeDuplicates();
-    case 'mergeWindows': return mergeWindows();
-    case 'sortTabs': return sortTabs(msg.criteria, msg.direction);
-    case 'closeStaleTabs': return closeStaleTabs();
-    case 'getSettings': return getSettings();
-    case 'saveSettings': return saveSettings(msg.settings);
-  }
+// Message handler for popup and options pages
+browser.runtime.onMessage.addListener((message) => {
+  const handlers = {
+    closeDuplicates,
+    mergeWindows,
+    closeStaleTabs,
+    getSettings,
+    sortTabs: () => sortTabs(message.criteria, message.direction),
+    saveSettings: () => saveSettings(message.settings)
+  };
+
+  const handler = handlers[message.command];
+  return handler ? handler() : undefined;
 });
 
-// Context menus — registered on install
+// Register context menus on install
 browser.runtime.onInstalled.addListener(() => {
-  const menuApi = browser.contextMenus;
-  menuApi.create({ id: 'tv-dupes', title: 'Close Duplicate Tabs', contexts: ['tab'] });
-  menuApi.create({ id: 'tv-merge', title: 'Merge All Windows', contexts: ['tab'] });
-  menuApi.create({ id: 'tv-sort', title: 'Sort Tabs', contexts: ['tab'] });
-  menuApi.create({ id: 'tv-sort-url', parentId: 'tv-sort', title: 'by URL', contexts: ['tab'] });
-  menuApi.create({ id: 'tv-sort-title', parentId: 'tv-sort', title: 'by Title', contexts: ['tab'] });
-  menuApi.create({ id: 'tv-sort-last', parentId: 'tv-sort', title: 'by Last Accessed', contexts: ['tab'] });
-  menuApi.create({ id: 'tv-sort-visit', parentId: 'tv-sort', title: 'by Visit Count', contexts: ['tab'] });
-  menuApi.create({ id: 'tv-stale', title: 'Close Stale Tabs', contexts: ['tab'] });
+  const menus = browser.contextMenus;
+  const tabContext = ['tab'];
+
+  menus.create({ id: 'tv-dupes', title: 'Close Duplicate Tabs', contexts: tabContext });
+  menus.create({ id: 'tv-merge', title: 'Merge All Windows', contexts: tabContext });
+  menus.create({ id: 'tv-sort', title: 'Sort Tabs', contexts: tabContext });
+  menus.create({ id: 'tv-sort-url', parentId: 'tv-sort', title: 'by URL', contexts: tabContext });
+  menus.create({ id: 'tv-sort-title', parentId: 'tv-sort', title: 'by Title', contexts: tabContext });
+  menus.create({ id: 'tv-sort-last', parentId: 'tv-sort', title: 'by Last Accessed', contexts: tabContext });
+  menus.create({ id: 'tv-sort-visit', parentId: 'tv-sort', title: 'by Visit Count', contexts: tabContext });
+  menus.create({ id: 'tv-stale', title: 'Close Stale Tabs', contexts: tabContext });
 });
 
-// Context menu click handler
+// Handle context menu clicks
 browser.contextMenus.onClicked.addListener(async (info) => {
-  let result;
-  switch (info.menuItemId) {
-    case 'tv-dupes': result = await closeDuplicates(); break;
-    case 'tv-merge': result = await mergeWindows(); break;
-    case 'tv-sort-url': result = await sortTabs('url', 'asc'); break;
-    case 'tv-sort-title': result = await sortTabs('title', 'asc'); break;
-    case 'tv-sort-last': result = await sortTabs('lastAccessed', 'asc'); break;
-    case 'tv-sort-visit': result = await sortTabs('visitCount', 'asc'); break;
-    case 'tv-stale': result = await closeStaleTabs(); break;
+  const menuActions = {
+    'tv-dupes': closeDuplicates,
+    'tv-merge': mergeWindows,
+    'tv-sort-url': () => sortTabs('url', 'asc'),
+    'tv-sort-title': () => sortTabs('title', 'asc'),
+    'tv-sort-last': () => sortTabs('lastAccessed', 'asc'),
+    'tv-sort-visit': () => sortTabs('visitCount', 'asc'),
+    'tv-stale': closeStaleTabs
+  };
+
+  const action = menuActions[info.menuItemId];
+  if (action) {
+    const result = await action();
+    notify(result.message);
   }
-  if (result) notify(result.message);
 });
 
-// Keyboard shortcut handler
+// Handle keyboard shortcuts
 browser.commands.onCommand.addListener(async (command) => {
-  let result;
-  switch (command) {
-    case 'close-duplicates': result = await closeDuplicates(); break;
-    case 'merge-windows': result = await mergeWindows(); break;
-    case 'sort-tabs': result = await sortTabs(); break; // uses last-selected criteria
-    case 'close-stale': result = await closeStaleTabs(); break;
+  const commandActions = {
+    'close-duplicates': closeDuplicates,
+    'merge-windows': mergeWindows,
+    'sort-tabs': sortTabs,
+    'close-stale': closeStaleTabs
+  };
+
+  const action = commandActions[command];
+  if (action) {
+    const result = await action();
+    notify(result.message);
   }
-  if (result) notify(result.message);
 });
