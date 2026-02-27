@@ -1,0 +1,51 @@
+{
+  "manifest_version": 3,
+  "name": "TabVacuum",
+  "version": "0.1.0",
+  "description": "Power-user tab cleanup: close duplicates, merge windows, sort tabs, prune stale tabs.",
+  "permissions": ["tabs", "history", "notifications", "storage", "contextMenus"],
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "48": "icons/icon-48.png",
+      "96": "icons/icon-96.png"
+    }
+  },
+  "options_ui": {
+    "page": "options.html"
+  },
+  "background": {
+    "scripts": ["browser-polyfill.js", "background.js"]
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "tabvacuum@adlio"
+    }
+  },
+  "commands": {
+    "close-duplicates": {
+      "suggested_key": {
+        "default": "Alt+Shift+D"
+      },
+      "description": "Close duplicate tabs"
+    },
+    "merge-windows": {
+      "suggested_key": {
+        "default": "Alt+Shift+M"
+      },
+      "description": "Merge all windows"
+    },
+    "sort-tabs": {
+      "suggested_key": {
+        "default": "Alt+Shift+S"
+      },
+      "description": "Sort tabs"
+    },
+    "close-stale": {
+      "suggested_key": {
+        "default": "Alt+Shift+X"
+      },
+      "description": "Close stale tabs"
+    }
+  }
+}

@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <h1>TabVacuum</h1>
+  <div class="actions">
+    <button id="btn-dupes">Close Duplicates</button>
+    <button id="btn-merge">Merge Windows</button>
+    <div class="sort-group">
+      <button id="btn-sort">Sort Tabs</button>
+      <select id="sort-criteria">
+        <option value="url">by URL</option>
+        <option value="title">by Title</option>
+        <option value="lastAccessed">by Last Accessed</option>
+        <option value="visitCount">by Visit Count</option>
+      </select>
+      <button id="sort-direction" title="Toggle sort direction">&#x2191;</button>
+    </div>
+    <button id="btn-stale">Close Stale Tabs</button>
+  </div>
+  <div id="status"></div>
+  <script src="browser-polyfill.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

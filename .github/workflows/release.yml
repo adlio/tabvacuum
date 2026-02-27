@@ -1,0 +1,60 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - run: npm ci
+      - run: npx vitest run
+      - run: node scripts/build.js
+      - run: npx web-ext lint --source-dir dist/firefox/
+
+      - name: Package Firefox extension
+        run: cd dist/firefox && zip -r ../../tabvacuum-firefox.zip .
+
+      - name: Package Chrome extension
+        run: cd dist/chrome && zip -r ../../tabvacuum-chrome.zip .
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            tabvacuum-firefox.zip
+            tabvacuum-chrome.zip
+          generate_release_notes: true
+
+      - name: Publish to Firefox Add-ons
+        if: env.WEB_EXT_API_KEY != ''
+        env:
+          WEB_EXT_API_KEY: ${{ secrets.WEB_EXT_API_KEY }}
+          WEB_EXT_API_SECRET: ${{ secrets.WEB_EXT_API_SECRET }}
+        run: npx web-ext sign --source-dir dist/firefox/ --api-key="$WEB_EXT_API_KEY" --api-secret="$WEB_EXT_API_SECRET"
+
+      - name: Publish to Chrome Web Store
+        if: env.CHROME_EXTENSION_ID != ''
+        env:
+          CHROME_EXTENSION_ID: ${{ secrets.CHROME_EXTENSION_ID }}
+          CHROME_CLIENT_ID: ${{ secrets.CHROME_CLIENT_ID }}
+          CHROME_CLIENT_SECRET: ${{ secrets.CHROME_CLIENT_SECRET }}
+          CHROME_REFRESH_TOKEN: ${{ secrets.CHROME_REFRESH_TOKEN }}
+        run: |
+          npx chrome-webstore-upload-cli upload \
+            --source tabvacuum-chrome.zip \
+            --extension-id "$CHROME_EXTENSION_ID" \
+            --client-id "$CHROME_CLIENT_ID" \
+            --client-secret "$CHROME_CLIENT_SECRET" \
+            --refresh-token "$CHROME_REFRESH_TOKEN" \
+            --auto-publish
