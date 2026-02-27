@@ -1,4 +1,5 @@
 // background.js — Wiring layer for TabVacuum
+import './polyfill.js';
 import { findDuplicates, planMerge, planSort, findStaleTabs } from './core.js';
 
 const DEFAULTS = {

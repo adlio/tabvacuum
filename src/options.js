@@ -1,60 +1,75 @@
-// options.js — TabVacuum settings page
+// TabVacuum settings page
 
-const staleValue = document.getElementById('stale-value');
-const staleUnit = document.getElementById('stale-unit');
-const ignoreFragments = document.getElementById('ignore-fragments');
-const ignoreQuery = document.getElementById('ignore-query');
-const skipPinned = document.getElementById('skip-pinned');
-const skipAudible = document.getElementById('skip-audible');
-const status = document.getElementById('status');
+const elements = {
+  staleValue: document.getElementById('stale-value'),
+  staleUnit: document.getElementById('stale-unit'),
+  ignoreFragments: document.getElementById('ignore-fragments'),
+  ignoreQuery: document.getElementById('ignore-query'),
+  skipPinned: document.getElementById('skip-pinned'),
+  skipAudible: document.getElementById('skip-audible'),
+  status: document.getElementById('status')
+};
 
-function msToValueUnit(ms) {
-  const hours = ms / (60 * 60 * 1000);
-  if (hours % 24 === 0 && hours >= 24) {
-    return { value: hours / 24, unit: 'days' };
+const TIME_UNITS = {
+  HOUR_MS: 60 * 60 * 1000,
+  DAY_MS: 24 * 60 * 60 * 1000
+};
+
+function millisecondsToTimeValue(ms) {
+  const hours = ms / TIME_UNITS.HOUR_MS;
+  const days = ms / TIME_UNITS.DAY_MS;
+
+  if (Number.isInteger(days) && days >= 1) {
+    return { value: days, unit: 'days' };
   }
   return { value: hours, unit: 'hours' };
 }
 
-function valueUnitToMs(value, unit) {
-  const multiplier = unit === 'days' ? 24 * 60 * 60 * 1000 : 60 * 60 * 1000;
+function timeValueToMilliseconds(value, unit) {
+  const multiplier = unit === 'days' ? TIME_UNITS.DAY_MS : TIME_UNITS.HOUR_MS;
   return value * multiplier;
 }
 
 function showStatus(message) {
-  status.textContent = message;
-  status.classList.add('visible');
-  setTimeout(() => status.classList.remove('visible'), 2000);
+  elements.status.textContent = message;
+  elements.status.classList.add('visible');
+  setTimeout(() => elements.status.classList.remove('visible'), 2000);
 }
 
-// Load settings
-browser.runtime.sendMessage({ command: 'getSettings' }).then((settings) => {
-  const { value, unit } = msToValueUnit(settings.staleThresholdMs);
-  staleValue.value = value;
-  staleUnit.value = unit;
-  ignoreFragments.checked = settings.ignoreFragments;
-  ignoreQuery.checked = settings.ignoreQueryParams;
-  skipPinned.checked = settings.skipPinned;
-  skipAudible.checked = settings.skipAudible;
+async function loadSettings() {
+  const settings = await browser.runtime.sendMessage({ command: 'getSettings' });
+  const { value, unit } = millisecondsToTimeValue(settings.staleThresholdMs);
+
+  elements.staleValue.value = value;
+  elements.staleUnit.value = unit;
+  elements.ignoreFragments.checked = settings.ignoreFragments;
+  elements.ignoreQuery.checked = settings.ignoreQueryParams;
+  elements.skipPinned.checked = settings.skipPinned;
+  elements.skipAudible.checked = settings.skipAudible;
+}
+
+async function saveSettings() {
+  const settings = {
+    staleThresholdMs: timeValueToMilliseconds(
+      Number(elements.staleValue.value),
+      elements.staleUnit.value
+    ),
+    ignoreFragments: elements.ignoreFragments.checked,
+    ignoreQueryParams: elements.ignoreQuery.checked,
+    skipPinned: elements.skipPinned.checked,
+    skipAudible: elements.skipAudible.checked,
+  };
+
+  await browser.runtime.sendMessage({ command: 'saveSettings', settings });
+  showStatus('Settings saved');
+}
+
+// Set up event listeners
+Object.values(elements).forEach(element => {
+  if (element.id !== 'status') {
+    element.addEventListener('change', saveSettings);
+  }
 });
 
-// Save on change
-function saveSettings() {
-  const settings = {
-    staleThresholdMs: valueUnitToMs(Number(staleValue.value), staleUnit.value),
-    ignoreFragments: ignoreFragments.checked,
-    ignoreQueryParams: ignoreQuery.checked,
-    skipPinned: skipPinned.checked,
-    skipAudible: skipAudible.checked,
-  };
-  browser.runtime.sendMessage({ command: 'saveSettings', settings }).then(() => {
-    showStatus('Settings saved');
-  });
-}
-
-staleValue.addEventListener('change', saveSettings);
-staleUnit.addEventListener('change', saveSettings);
-ignoreFragments.addEventListener('change', saveSettings);
-ignoreQuery.addEventListener('change', saveSettings);
-skipPinned.addEventListener('change', saveSettings);
-skipAudible.addEventListener('change', saveSettings);
+// Load settings on startup
+loadSettings();

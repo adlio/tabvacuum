@@ -62,8 +62,11 @@ Access via the browser's extension settings page (TabVacuum → Preferences/Opti
 npm install           # Install dev dependencies
 npm test              # Run unit tests (Vitest)
 npm run build         # Build dist/firefox/ and dist/chrome/
+npm run package       # Build + create zip files in artifacts/
 npm run lint          # Lint Firefox extension (web-ext lint)
 ```
+
+The `npm run package` command produces upload-ready zip files in `artifacts/`.
 
 See `docs/prd.md` for requirements, `docs/design.md` for architecture, and
 `docs/tasks.md` for the implementation task list.

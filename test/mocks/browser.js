@@ -1,7 +1,7 @@
-// test/mocks/browser.js — Manual browser API mock
+// Browser API mock for testing
 import { vi } from 'vitest';
 
-const browser = {
+export default {
   tabs: {
     query: vi.fn(),
     remove: vi.fn(),
@@ -34,5 +34,3 @@ const browser = {
     sendMessage: vi.fn(),
   },
 };
-
-export default browser;
