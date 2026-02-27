@@ -6,6 +6,7 @@ import {
   planMerge,
   planSort,
   findStaleTabs,
+  computeFrecency,
 } from '../src/core.js';
 
 // ---------------------------------------------------------------------------
@@ -327,6 +328,57 @@ describe('planSort', () => {
     const tabs = [{ id: 1, url: 'https://a.com', pinned: false }];
     const result = planSort(tabs, 'title', 'asc');
     expect(result.message).toBe('Sorted 1 tab by title');
+  });
+
+  it('sorts by frecency (highest first for asc)', () => {
+    const tabs = [
+      { id: 1, frecency: 5, pinned: false },
+      { id: 2, frecency: 70, pinned: false },
+      { id: 3, frecency: 28, pinned: false },
+    ];
+    const result = planSort(tabs, 'frecency', 'asc');
+    expect(result.moves.map((m) => m.tabId)).toEqual([2, 3, 1]);
+    expect(result.message).toBe('Sorted 3 tabs by frecency');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// computeFrecency
+// ---------------------------------------------------------------------------
+describe('computeFrecency', () => {
+  const ONE_HOUR = 1000 * 60 * 60;
+
+  it('returns 0 when visitCount is 0', () => {
+    const now = Date.now();
+    expect(computeFrecency(0, now, now)).toBe(0);
+  });
+
+  it('returns 0 when lastVisitTime is 0', () => {
+    expect(computeFrecency(10, 0, Date.now())).toBe(0);
+  });
+
+  it('uses 1.0 multiplier for visits within 24 hours', () => {
+    const now = Date.now();
+    const lastVisit = now - 12 * ONE_HOUR;
+    expect(computeFrecency(10, lastVisit, now)).toBe(10);
+  });
+
+  it('uses 0.7 multiplier for visits within past week', () => {
+    const now = Date.now();
+    const lastVisit = now - 3 * 24 * ONE_HOUR;
+    expect(computeFrecency(10, lastVisit, now)).toBeCloseTo(7);
+  });
+
+  it('uses 0.4 multiplier for visits within past month', () => {
+    const now = Date.now();
+    const lastVisit = now - 14 * 24 * ONE_HOUR;
+    expect(computeFrecency(10, lastVisit, now)).toBeCloseTo(4);
+  });
+
+  it('uses 0.1 multiplier for visits older than a month', () => {
+    const now = Date.now();
+    const lastVisit = now - 60 * 24 * ONE_HOUR;
+    expect(computeFrecency(10, lastVisit, now)).toBeCloseTo(1);
   });
 });
 

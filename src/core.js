@@ -90,6 +90,20 @@ export function planMerge(windows, targetWindowId) {
   return { moves, emptyWindowIds, message };
 }
 
+export function computeFrecency(visitCount, lastVisitTime, now) {
+  if (!visitCount || !lastVisitTime) return 0;
+  const ageMs = now - lastVisitTime;
+  const ageHours = ageMs / (1000 * 60 * 60);
+
+  let recency;
+  if (ageHours < 24) recency = 1.0;
+  else if (ageHours < 24 * 7) recency = 0.7;
+  else if (ageHours < 24 * 30) recency = 0.4;
+  else recency = 0.1;
+
+  return visitCount * recency;
+}
+
 export function planSort(tabs, criteria, direction) {
   const pinned = tabs.filter(tab => tab.pinned);
   const unpinned = tabs.filter(tab => !tab.pinned);
@@ -107,6 +121,9 @@ export function planSort(tabs, criteria, direction) {
     } else if (criteria === 'visitCount') {
       // Most visited first for ascending
       comparison = (b.visitCount || 0) - (a.visitCount || 0);
+    } else if (criteria === 'frecency') {
+      // Highest frecency first for ascending
+      comparison = (b.frecency || 0) - (a.frecency || 0);
     }
 
     return direction === 'desc' ? -comparison : comparison;
@@ -123,6 +140,7 @@ export function planSort(tabs, criteria, direction) {
     title: 'title',
     lastAccessed: 'last accessed',
     visitCount: 'visit count',
+    frecency: 'frecency',
   };
 
   const count = unpinned.length;

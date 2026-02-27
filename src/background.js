@@ -1,6 +1,6 @@
 // background.js — Wiring layer for TabVacuum
 import './polyfill.js';
-import { findDuplicates, planMerge, planSort, findStaleTabs } from './core.js';
+import { findDuplicates, planMerge, planSort, findStaleTabs, computeFrecency } from './core.js';
 
 const DEFAULTS = {
   staleThresholdMs: 7 * 24 * 60 * 60 * 1000,
@@ -75,17 +75,23 @@ async function sortTabs(criteria, direction) {
 
   const tabs = await browser.tabs.query({ currentWindow: true });
 
-  // Add visit count data when needed
-  if (criteria === 'visitCount') {
+  // Enrich tabs with history data when needed
+  if (criteria === 'visitCount' || criteria === 'frecency') {
+    const now = Date.now();
     for (const tab of tabs) {
       try {
         const results = await browser.history.search({
           text: tab.url,
           maxResults: 1
         });
-        tab.visitCount = results[0]?.visitCount || 0;
+        const item = results[0];
+        tab.visitCount = item?.visitCount || 0;
+        if (criteria === 'frecency') {
+          tab.frecency = computeFrecency(item?.visitCount || 0, item?.lastVisitTime || 0, now);
+        }
       } catch {
         tab.visitCount = 0;
+        tab.frecency = 0;
       }
     }
   }
@@ -134,6 +140,7 @@ browser.runtime.onInstalled.addListener(() => {
   menus.create({ id: 'tv-sort-title', parentId: 'tv-sort', title: 'by Title', contexts: tabContext });
   menus.create({ id: 'tv-sort-last', parentId: 'tv-sort', title: 'by Last Accessed', contexts: tabContext });
   menus.create({ id: 'tv-sort-visit', parentId: 'tv-sort', title: 'by Visit Count', contexts: tabContext });
+  menus.create({ id: 'tv-sort-frecency', parentId: 'tv-sort', title: 'by Frecency', contexts: tabContext });
   menus.create({ id: 'tv-stale', title: 'Close Stale Tabs', contexts: tabContext });
 });
 
@@ -146,6 +153,7 @@ browser.contextMenus.onClicked.addListener(async (info) => {
     'tv-sort-title': () => sortTabs('title', 'asc'),
     'tv-sort-last': () => sortTabs('lastAccessed', 'asc'),
     'tv-sort-visit': () => sortTabs('visitCount', 'asc'),
+    'tv-sort-frecency': () => sortTabs('frecency', 'asc'),
     'tv-stale': closeStaleTabs
   };
 
