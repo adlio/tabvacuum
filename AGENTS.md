@@ -32,8 +32,8 @@ Targets Firefox and Chrome. Minimal build step. No UI frameworks. Vitest for uni
 6. **Async pattern**: all browser API calls use `async/await`.
 7. **Message protocol**: popup/options communicate with background via `browser.runtime.sendMessage({ command, ...params })`. Background returns `{ message: string }`.
 8. **Core vs wiring**: business logic goes in `core.js` as pure functions. Browser API calls go in `background.js`. This separation exists for testability.
-9. **Testing**: run `npx vitest run`. Load extensions manually via `about:debugging` (Firefox) or `chrome://extensions` (Chrome) for integration testing.
-10. **Building**: run `node scripts/build.js`. Output goes to `dist/firefox/` and `dist/chrome/`.
+9. **Testing**: run `npm test`. Load extensions manually via `about:debugging` (Firefox) or `chrome://extensions` (Chrome) for integration testing.
+10. **Building**: run `npm run build`. Output goes to `dist/firefox/` and `dist/chrome/`.
 
 ## Common Pitfalls
 
