@@ -16,9 +16,9 @@ Accessible via toolbar popup, tab right-click menu, and keyboard shortcuts.
 
 ## Install
 
-**Firefox**: Install from [Firefox Add-ons](#) <!-- link updated at publish time -->
+**Firefox**: Install from [Firefox Add-ons](https://addons.mozilla.org/en-US/firefox/addon/tabvacuum/)
 
-**Chrome**: Install from the [Chrome Web Store](#) <!-- link updated at publish time -->
+**Chrome**: Install from the [Chrome Web Store](https://chromewebstore.google.com/detail/tabvacuum/hhhpnpjhdjfhdflffpgnknlmbfogachb)
 
 ### Install from Source
 
