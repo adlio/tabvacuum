@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "TabVacuum",
-  "version": "0.2.0",
-  "description": "Power-user tab cleanup: close duplicates, merge windows, sort tabs, prune stale tabs.",
+  "version": "0.3.0",
+  "description": "Power-user tab cleanup: close duplicates, merge windows, sort tabs, prune stale and blank tabs.",
   "permissions": ["tabs", "history", "notifications", "storage", "contextMenus"],
   "action": {
     "default_popup": "popup.html",
@@ -51,6 +51,12 @@
         "default": "Alt+Shift+X"
       },
       "description": "Close stale tabs"
+    },
+    "close-blank": {
+      "suggested_key": {
+        "default": "Alt+Shift+B"
+      },
+      "description": "Close blank tabs"
     }
   }
 }

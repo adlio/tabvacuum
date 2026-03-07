@@ -43,6 +43,25 @@
       </label>
     </fieldset>
 
+    <fieldset>
+      <legend>Blank Tab Detection</legend>
+      <label>
+        <input type="checkbox" id="blank-newtab" checked>
+        New / Empty / Home Tabs
+      </label>
+      <label>
+        <input type="checkbox" id="blank-welcome" checked>
+        Welcome / First Run Pages
+      </label>
+      <label>
+        <input type="checkbox" id="blank-search" checked>
+        Search Engine Home Pages
+      </label>
+      <label for="blank-custom">Additional URLs (one per line)</label>
+      <textarea id="blank-custom" rows="4" placeholder="https://example.com&#10;/^https?:\/\/intranet\.corp\.com\/?$/">
+      </textarea>
+    </fieldset>
+
     <div id="status" class="status"></div>
   </form>
   <script src="browser-polyfill.js"></script>

@@ -7,6 +7,10 @@ const elements = {
   ignoreQuery: document.getElementById('ignore-query'),
   skipPinned: document.getElementById('skip-pinned'),
   skipAudible: document.getElementById('skip-audible'),
+  blankNewTab: document.getElementById('blank-newtab'),
+  blankWelcome: document.getElementById('blank-welcome'),
+  blankSearchEngines: document.getElementById('blank-search'),
+  blankCustom: document.getElementById('blank-custom'),
   status: document.getElementById('status')
 };
 
@@ -46,6 +50,10 @@ async function loadSettings() {
   elements.ignoreQuery.checked = settings.ignoreQueryParams;
   elements.skipPinned.checked = settings.skipPinned;
   elements.skipAudible.checked = settings.skipAudible;
+  elements.blankNewTab.checked = settings.blankNewTab;
+  elements.blankWelcome.checked = settings.blankWelcome;
+  elements.blankSearchEngines.checked = settings.blankSearchEngines;
+  elements.blankCustom.value = (settings.blankCustomUrls || []).join('\n');
 }
 
 async function saveSettings() {
@@ -58,6 +66,10 @@ async function saveSettings() {
     ignoreQueryParams: elements.ignoreQuery.checked,
     skipPinned: elements.skipPinned.checked,
     skipAudible: elements.skipAudible.checked,
+    blankNewTab: elements.blankNewTab.checked,
+    blankWelcome: elements.blankWelcome.checked,
+    blankSearchEngines: elements.blankSearchEngines.checked,
+    blankCustomUrls: elements.blankCustom.value.split('\n').filter(l => l.trim()),
   };
 
   await browser.runtime.sendMessage({ command: 'saveSettings', settings });
@@ -65,9 +77,18 @@ async function saveSettings() {
 }
 
 // Set up event listeners
+let debounceTimer;
+const debouncedSave = () => {
+  clearTimeout(debounceTimer);
+  debounceTimer = setTimeout(saveSettings, 400);
+};
+
 Object.values(elements).forEach(element => {
   if (element.id !== 'status') {
     element.addEventListener('change', saveSettings);
+    if (element.tagName === 'TEXTAREA') {
+      element.addEventListener('input', debouncedSave);
+    }
   }
 });
 
