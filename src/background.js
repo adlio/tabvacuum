@@ -1,6 +1,6 @@
 // background.js — Wiring layer for TabVacuum
 import './polyfill.js';
-import { findDuplicates, planMerge, planSort, findStaleTabs, computeFrecency } from './core.js';
+import { findDuplicates, planMerge, planSort, findStaleTabs, findBlankTabs, computeFrecency } from './core.js';
 
 const DEFAULTS = {
   staleThresholdMs: 7 * 24 * 60 * 60 * 1000,
@@ -10,6 +10,10 @@ const DEFAULTS = {
   skipAudible: true,
   lastSortCriteria: 'url',
   lastSortDirection: 'asc',
+  blankNewTab: true,
+  blankWelcome: true,
+  blankSearchEngines: true,
+  blankCustomUrls: [],
 };
 
 async function getSettings() {
@@ -31,13 +35,15 @@ function notify(message) {
   });
 }
 
-async function closeDuplicates() {
+async function closeMatchingTabs(findFn) {
   const settings = await getSettings();
   const tabs = await browser.tabs.query({});
-  const { toClose, message } = findDuplicates(tabs, settings);
+  const { toClose, message } = findFn(tabs, settings);
   if (toClose.length) await browser.tabs.remove(toClose);
   return { message };
 }
+
+const closeDuplicates = () => closeMatchingTabs(findDuplicates);
 
 async function mergeWindows() {
   const windows = await browser.windows.getAll({ populate: true });
@@ -105,13 +111,8 @@ async function sortTabs(criteria, direction) {
   return { message };
 }
 
-async function closeStaleTabs() {
-  const settings = await getSettings();
-  const tabs = await browser.tabs.query({});
-  const { toClose, message } = findStaleTabs(tabs, settings);
-  if (toClose.length) await browser.tabs.remove(toClose);
-  return { message };
-}
+const closeStaleTabs = () => closeMatchingTabs(findStaleTabs);
+const closeBlankTabs = () => closeMatchingTabs(findBlankTabs);
 
 // Message handler for popup and options pages
 browser.runtime.onMessage.addListener((message) => {
@@ -119,6 +120,7 @@ browser.runtime.onMessage.addListener((message) => {
     closeDuplicates,
     mergeWindows,
     closeStaleTabs,
+    closeBlankTabs,
     getSettings,
     sortTabs: () => sortTabs(message.criteria, message.direction),
     saveSettings: () => saveSettings(message.settings)
@@ -142,6 +144,7 @@ browser.runtime.onInstalled.addListener(() => {
   menus.create({ id: 'tv-sort-visit', parentId: 'tv-sort', title: 'by Visit Count', contexts: tabContext });
   menus.create({ id: 'tv-sort-frecency', parentId: 'tv-sort', title: 'by Frecency', contexts: tabContext });
   menus.create({ id: 'tv-stale', title: 'Close Stale Tabs', contexts: tabContext });
+  menus.create({ id: 'tv-blank', title: 'Close Blank Tabs', contexts: tabContext });
 });
 
 // Handle context menu clicks
@@ -154,7 +157,8 @@ browser.contextMenus.onClicked.addListener(async (info) => {
     'tv-sort-last': () => sortTabs('lastAccessed', 'asc'),
     'tv-sort-visit': () => sortTabs('visitCount', 'asc'),
     'tv-sort-frecency': () => sortTabs('frecency', 'asc'),
-    'tv-stale': closeStaleTabs
+    'tv-stale': closeStaleTabs,
+    'tv-blank': closeBlankTabs
   };
 
   const action = menuActions[info.menuItemId];
@@ -170,7 +174,8 @@ browser.commands.onCommand.addListener(async (command) => {
     'close-duplicates': closeDuplicates,
     'merge-windows': mergeWindows,
     'sort-tabs': sortTabs,
-    'close-stale': closeStaleTabs
+    'close-stale': closeStaleTabs,
+    'close-blank': closeBlankTabs
   };
 
   const action = commandActions[command];

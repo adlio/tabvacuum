@@ -6,7 +6,13 @@ import {
   planMerge,
   planSort,
   findStaleTabs,
+  findBlankTabs,
+  isBlankTab,
+  parseCustomMatchers,
   computeFrecency,
+  BLANK_NEW_TAB_URLS,
+  BLANK_WELCOME_URLS,
+  SEARCH_ENGINE_HOMEPAGE_RE,
 } from '../src/core.js';
 
 // ---------------------------------------------------------------------------
@@ -478,5 +484,244 @@ describe('findStaleTabs', () => {
     const result = findStaleTabs(tabs, defaultSettings);
     // now - lastAccessed = SEVEN_DAYS - 1, which IS < SEVEN_DAYS, so it skips
     expect(result.toClose).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// isBlankTab
+// ---------------------------------------------------------------------------
+describe('isBlankTab', () => {
+  const allEnabled = {
+    blankNewTab: true,
+    blankWelcome: true,
+    blankSearchEngines: true,
+    blankCustomUrls: [],
+  };
+
+  // New tab URLs
+  it.each(BLANK_NEW_TAB_URLS)('matches new tab URL: %s', (url) => {
+    expect(isBlankTab(url, allEnabled)).toBe(true);
+  });
+
+  it('does not match new tab URLs when blankNewTab is false', () => {
+    const settings = { ...allEnabled, blankNewTab: false };
+    expect(isBlankTab('about:blank', settings)).toBe(false);
+    expect(isBlankTab('about:newtab', settings)).toBe(false);
+  });
+
+  // Welcome URLs
+  it.each(BLANK_WELCOME_URLS)('matches welcome URL: %s', (url) => {
+    expect(isBlankTab(url, allEnabled)).toBe(true);
+  });
+
+  it('does not match welcome URLs when blankWelcome is false', () => {
+    const settings = { ...allEnabled, blankWelcome: false };
+    expect(isBlankTab('about:welcome', settings)).toBe(false);
+    expect(isBlankTab('about:privatebrowsing', settings)).toBe(false);
+  });
+
+  // Search engine homepages — positive matches
+  it.each([
+    'https://www.google.com/',
+    'https://www.google.com',
+    'https://www.google.co.uk/',
+    'https://www.google.com.br/',
+    'https://www.google.de/',
+    'https://www.google.com/?gws_rd=ssl',
+    'https://www.bing.com/',
+    'https://duckduckgo.com/',
+    'https://search.yahoo.com/',
+    'https://www.baidu.com/',
+    'https://yandex.ru/',
+    'https://yandex.com/',
+    'https://www.naver.com/',
+    'https://www.startpage.com/',
+    'https://www.ecosia.org/',
+    'https://search.brave.com/',
+    'https://www.qwant.com/',
+  ])('matches search engine homepage: %s', (url) => {
+    expect(isBlankTab(url, allEnabled)).toBe(true);
+  });
+
+  // Search engine — negative matches (search results)
+  it.each([
+    'https://www.google.com/search?q=test',
+    'https://duckduckgo.com/?q=test',
+    'https://www.bing.com/?q=test',
+    'https://search.yahoo.com/?p=test',
+    'https://www.baidu.com/?wd=test',
+    'https://yandex.ru/?text=test',
+    'https://www.qwant.com/?q=test',
+  ])('does not match search results page: %s', (url) => {
+    expect(isBlankTab(url, allEnabled)).toBe(false);
+  });
+
+  // Search engine — negative matches (subpages)
+  it.each([
+    'https://www.google.com/maps',
+    'https://www.google.com/mail',
+    'https://duckduckgo.com/about',
+    'https://www.bing.com/images',
+  ])('does not match search engine subpage: %s', (url) => {
+    expect(isBlankTab(url, allEnabled)).toBe(false);
+  });
+
+  it('does not match search engines when blankSearchEngines is false', () => {
+    const settings = { ...allEnabled, blankSearchEngines: false };
+    expect(isBlankTab('https://www.google.com/', settings)).toBe(false);
+    expect(isBlankTab('https://duckduckgo.com/', settings)).toBe(false);
+  });
+
+  // Custom URLs
+  it('matches custom exact URL', () => {
+    const matchers = parseCustomMatchers(['https://example.com/start']);
+    expect(isBlankTab('https://example.com/start', allEnabled, matchers)).toBe(true);
+  });
+
+  it('does not match non-matching custom URL', () => {
+    const matchers = parseCustomMatchers(['https://example.com/start']);
+    expect(isBlankTab('https://example.com/other', allEnabled, matchers)).toBe(false);
+  });
+
+  it('matches custom regex pattern', () => {
+    const matchers = parseCustomMatchers(['/^https:\\/\\/intranet\\.corp\\.com\\/?$/']);
+    expect(isBlankTab('https://intranet.corp.com/', allEnabled, matchers)).toBe(true);
+    expect(isBlankTab('https://intranet.corp.com', allEnabled, matchers)).toBe(true);
+  });
+
+  it('skips invalid regex gracefully', () => {
+    const matchers = parseCustomMatchers(['/[invalid/']);
+    expect(isBlankTab('https://example.com', allEnabled, matchers)).toBe(false);
+  });
+
+  it('skips empty lines in custom URLs', () => {
+    const matchers = parseCustomMatchers(['', '  ', 'https://example.com']);
+    expect(isBlankTab('https://example.com', allEnabled, matchers)).toBe(true);
+  });
+
+  it('returns false when all categories disabled', () => {
+    const settings = {
+      blankNewTab: false,
+      blankWelcome: false,
+      blankSearchEngines: false,
+    };
+    expect(isBlankTab('about:blank', settings)).toBe(false);
+    expect(isBlankTab('https://www.google.com/', settings)).toBe(false);
+  });
+
+  it('does not match a regular website', () => {
+    expect(isBlankTab('https://example.com/page', allEnabled)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// findBlankTabs
+// ---------------------------------------------------------------------------
+describe('findBlankTabs', () => {
+  const defaultSettings = {
+    blankNewTab: true,
+    blankWelcome: true,
+    blankSearchEngines: true,
+    blankCustomUrls: [],
+    skipPinned: true,
+    skipAudible: true,
+  };
+
+  const tab = (overrides) => ({
+    active: false, pinned: false, audible: false, windowId: 1,
+    ...overrides,
+  });
+
+  it('closes blank tabs and keeps non-blank', () => {
+    const tabs = [
+      tab({ id: 1, url: 'about:blank' }),
+      tab({ id: 2, url: 'https://example.com/page' }),
+    ];
+    const result = findBlankTabs(tabs, defaultSettings);
+    expect(result.toClose).toEqual([1]);
+  });
+
+  it('closes ALL matching blank tabs (not keeping one)', () => {
+    const tabs = [
+      tab({ id: 1, url: 'about:blank' }),
+      tab({ id: 2, url: 'about:newtab' }),
+      tab({ id: 3, url: 'https://example.com/page' }),
+    ];
+    const result = findBlankTabs(tabs, defaultSettings);
+    expect(result.toClose).toEqual([1, 2]);
+  });
+
+  it('skips active tab', () => {
+    const tabs = [
+      tab({ id: 1, url: 'about:blank', active: true }),
+      tab({ id: 2, url: 'https://example.com/page' }),
+    ];
+    const result = findBlankTabs(tabs, defaultSettings);
+    expect(result.toClose).toEqual([]);
+  });
+
+  it('skips pinned tab', () => {
+    const tabs = [
+      tab({ id: 1, url: 'about:blank', pinned: true }),
+      tab({ id: 2, url: 'https://example.com/page' }),
+    ];
+    const result = findBlankTabs(tabs, defaultSettings);
+    expect(result.toClose).toEqual([]);
+  });
+
+  it('skips audible tab', () => {
+    const tabs = [
+      tab({ id: 1, url: 'about:blank', audible: true }),
+      tab({ id: 2, url: 'https://example.com/page' }),
+    ];
+    const result = findBlankTabs(tabs, defaultSettings);
+    expect(result.toClose).toEqual([]);
+  });
+
+  it('never closes last tab in window', () => {
+    const tabs = [
+      tab({ id: 1, url: 'about:blank', windowId: 1 }),
+    ];
+    const result = findBlankTabs(tabs, defaultSettings);
+    expect(result.toClose).toEqual([]);
+  });
+
+  it('message for 0 tabs', () => {
+    const tabs = [
+      tab({ id: 1, url: 'https://example.com/page' }),
+    ];
+    const result = findBlankTabs(tabs, defaultSettings);
+    expect(result.message).toBe('No blank tabs found');
+  });
+
+  it('message for 1 tab', () => {
+    const tabs = [
+      tab({ id: 1, url: 'about:blank' }),
+      tab({ id: 2, url: 'https://example.com/page' }),
+    ];
+    const result = findBlankTabs(tabs, defaultSettings);
+    expect(result.message).toBe('Closed 1 blank tab');
+  });
+
+  it('message for multiple tabs', () => {
+    const tabs = [
+      tab({ id: 1, url: 'about:blank' }),
+      tab({ id: 2, url: 'about:newtab' }),
+      tab({ id: 3, url: 'https://example.com/page' }),
+    ];
+    const result = findBlankTabs(tabs, defaultSettings);
+    expect(result.message).toBe('Closed 2 blank tabs');
+  });
+
+  it('respects last-tab-in-window across multiple windows', () => {
+    const tabs = [
+      tab({ id: 1, url: 'about:blank', windowId: 1 }),
+      tab({ id: 2, url: 'about:blank', windowId: 2 }),
+      tab({ id: 3, url: 'https://example.com', windowId: 2 }),
+    ];
+    const result = findBlankTabs(tabs, defaultSettings);
+    // Window 1 has only one tab (blank) — must keep it
+    // Window 2 has two tabs — can close the blank one
+    expect(result.toClose).toEqual([2]);
   });
 });

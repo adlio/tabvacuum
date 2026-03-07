@@ -6,7 +6,8 @@ const elements = {
   btnMerge: document.getElementById('btn-merge'),
   btnSort: document.getElementById('btn-sort'),
   sortOptions: document.querySelector('.sort-options'),
-  btnStale: document.getElementById('btn-stale')
+  btnStale: document.getElementById('btn-stale'),
+  btnBlank: document.getElementById('btn-blank')
 };
 
 function showStatus(message) {
@@ -33,6 +34,7 @@ function toggleSortOptions() {
 elements.btnDupes.addEventListener('click', () => sendCommand('closeDuplicates'));
 elements.btnMerge.addEventListener('click', () => sendCommand('mergeWindows'));
 elements.btnStale.addEventListener('click', () => sendCommand('closeStaleTabs'));
+elements.btnBlank.addEventListener('click', () => sendCommand('closeBlankTabs'));
 
 // Sort Tabs toggle
 elements.btnSort.addEventListener('click', toggleSortOptions);

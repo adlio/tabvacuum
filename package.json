@@ -1,6 +1,6 @@
 {
   "name": "tabvacuum",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "description": "Power-user tab cleanup: close duplicates, merge windows, sort tabs, prune stale tabs.",
@@ -11,6 +11,8 @@
     "package": "npm run build && npm run package:firefox && npm run package:chrome",
     "package:firefox": "web-ext build --source-dir dist/firefox/ --artifacts-dir artifacts/ --overwrite-dest",
     "package:chrome": "web-ext build --source-dir dist/chrome/ --artifacts-dir artifacts/ --overwrite-dest --filename tabvacuum-chrome.zip",
+    "start": "npm run build && web-ext run --source-dir dist/firefox/",
+    "start:chrome": "npm run build && web-ext run --source-dir dist/chrome/ --target chromium",
     "lint": "web-ext lint --source-dir dist/firefox/"
   },
   "devDependencies": {

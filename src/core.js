@@ -1,5 +1,93 @@
 // core.js — Pure functions for TabVacuum
 
+export const BLANK_NEW_TAB_URLS = [
+  'about:blank',
+  'about:newtab',
+  'about:home',
+  'chrome://newtab/',
+  'chrome://new-tab-page/',
+  'edge://newtab/',
+];
+
+export const BLANK_WELCOME_URLS = [
+  'about:welcome',
+  'about:privatebrowsing',
+  'chrome://welcome/',
+];
+
+// Matches search engine homepages but not search results or subpages.
+// After the domain, allows only optional "/" then optional query/fragment params.
+// Negative lookahead excludes URLs with search query params (q=, p=, wd=, etc.)
+// so google.com/?gws_rd=ssl matches but google.com/?q=test does not.
+export const SEARCH_ENGINE_HOMEPAGE_RE = new RegExp(
+  '^https?://(' +
+    'www\\.google\\.[a-z]{2,3}(?:\\.[a-z]{2})?' +
+    '|www\\.bing\\.com' +
+    '|duckduckgo\\.com' +
+    '|search\\.yahoo\\.com' +
+    '|www\\.baidu\\.com' +
+    '|yandex\\.[a-z]{2,3}' +
+    '|www\\.naver\\.com' +
+    '|www\\.startpage\\.com' +
+    '|www\\.ecosia\\.org' +
+    '|search\\.brave\\.com' +
+    '|www\\.qwant\\.com' +
+  ')/?(?:[?#](?!(?:q|p|wd|text|query|search_query)=)(?!.*&(?:q|p|wd|text|query|search_query)=).*)?$'
+);
+
+// Parse custom URL lines into matchers: plain strings for exact match, RegExp for /pattern/ syntax.
+export function parseCustomMatchers(lines) {
+  if (!lines) return [];
+  const matchers = [];
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const regexMatch = trimmed.match(/^\/(.+)\/$/);
+    if (regexMatch) {
+      try {
+        matchers.push(new RegExp(regexMatch[1]));
+      } catch {
+        // invalid regex, skip
+      }
+    } else {
+      matchers.push(trimmed);
+    }
+  }
+  return matchers;
+}
+
+export function isBlankTab(url, settings, customMatchers) {
+  if (settings.blankNewTab && BLANK_NEW_TAB_URLS.includes(url)) return true;
+  if (settings.blankWelcome && BLANK_WELCOME_URLS.includes(url)) return true;
+  if (settings.blankSearchEngines && SEARCH_ENGINE_HOMEPAGE_RE.test(url)) return true;
+
+  if (customMatchers) {
+    for (const matcher of customMatchers) {
+      if (typeof matcher === 'string') {
+        if (url === matcher) return true;
+      } else {
+        if (matcher.test(url)) return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+export function findBlankTabs(tabs, settings) {
+  const customMatchers = parseCustomMatchers(settings.blankCustomUrls);
+  const toClose = filterClosableTabs(tabs, settings, tab =>
+    isBlankTab(tab.url, settings, customMatchers)
+  );
+
+  const count = toClose.length;
+  const message = count > 0
+    ? `Closed ${count} blank tab${count === 1 ? '' : 's'}`
+    : 'No blank tabs found';
+
+  return { toClose, message };
+}
+
 export function normalizeUrl(url, settings) {
   try {
     const parsed = new URL(url);
@@ -18,6 +106,33 @@ export function isProtected(tab, settings) {
     (tab.pinned && settings.skipPinned) ||
     (tab.audible && settings.skipAudible)
   );
+}
+
+// Group tabs by window to prevent closing the last tab in any window
+function filterClosableTabs(tabs, settings, shouldClose) {
+  const tabsByWindow = new Map();
+  for (const tab of tabs) {
+    const windowTabs = tabsByWindow.get(tab.windowId) || [];
+    windowTabs.push(tab);
+    tabsByWindow.set(tab.windowId, windowTabs);
+  }
+
+  const toCloseSet = new Set();
+
+  for (const tab of tabs) {
+    if (isProtected(tab, settings)) continue;
+    if (!shouldClose(tab)) continue;
+
+    const windowTabs = tabsByWindow.get(tab.windowId);
+    const remainingTabs = windowTabs.filter(
+      t => !toCloseSet.has(t.id) && t.id !== tab.id
+    );
+    if (remainingTabs.length === 0) continue;
+
+    toCloseSet.add(tab.id);
+  }
+
+  return [...toCloseSet];
 }
 
 export function findDuplicates(tabs, settings) {
@@ -154,29 +269,9 @@ export function findStaleTabs(tabs, settings) {
   const now = Date.now();
   const threshold = settings.staleThresholdMs || 7 * 24 * 60 * 60 * 1000;
 
-  // Group tabs by window to prevent closing the last tab
-  const tabsByWindow = new Map();
-  for (const tab of tabs) {
-    const windowTabs = tabsByWindow.get(tab.windowId) || [];
-    windowTabs.push(tab);
-    tabsByWindow.set(tab.windowId, windowTabs);
-  }
-
-  const toClose = [];
-
-  for (const tab of tabs) {
-    if (isProtected(tab, settings)) continue;
-    if (now - (tab.lastAccessed || 0) < threshold) continue;
-
-    // Ensure at least one tab remains in the window
-    const windowTabs = tabsByWindow.get(tab.windowId);
-    const remainingTabs = windowTabs.filter(
-      t => !toClose.includes(t.id) && t.id !== tab.id
-    );
-    if (remainingTabs.length === 0) continue;
-
-    toClose.push(tab.id);
-  }
+  const toClose = filterClosableTabs(tabs, settings, tab =>
+    now - (tab.lastAccessed || 0) >= threshold
+  );
 
   const days = Math.round(threshold / (24 * 60 * 60 * 1000));
   const count = toClose.length;

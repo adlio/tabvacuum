@@ -10,6 +10,7 @@ A browser extension for power-user tab management. Works in Firefox and Chrome.
 - **Merge All Windows** — consolidate every tab into the current window
 - **Sort Tabs** — by URL, title, last accessed, or visit count (ascending/descending)
 - **Close Stale Tabs** — prune tabs untouched for a configurable period
+- **Close Blank Tabs** — remove new-tab pages, welcome pages, and search engine homepages
 
 Accessible via toolbar popup, tab right-click menu, and keyboard shortcuts.
 
@@ -44,6 +45,7 @@ Accessible via toolbar popup, tab right-click menu, and keyboard shortcuts.
 | Merge Windows | `Alt+Shift+M` |
 | Sort Tabs | `Alt+Shift+S` |
 | Close Stale Tabs | `Alt+Shift+X` |
+| Close Blank Tabs | `Alt+Shift+B` |
 
 **Firefox**: remap in `about:addons` → gear icon → "Manage Extension Shortcuts".
 **Chrome**: remap in `chrome://extensions/shortcuts`.
@@ -62,9 +64,17 @@ Access via the browser's extension settings page (TabVacuum → Preferences/Opti
 npm install           # Install dev dependencies
 npm test              # Run unit tests (Vitest)
 npm run build         # Build dist/firefox/ and dist/chrome/
+npm start             # Build + launch Firefox with extension loaded
+npm run start:chrome  # Build + launch Chromium with extension loaded
 npm run package       # Build + create zip files in artifacts/
 npm run lint          # Lint Firefox extension (web-ext lint)
 ```
+
+`npm start` and `npm run start:chrome` use `web-ext run` to open a
+temporary browser profile with the extension installed. The browser
+auto-reloads when files in the dist directory change, so the workflow is:
+edit source, run `npm run build` in another terminal, and the browser
+picks up the changes.
 
 The `npm run package` command produces upload-ready zip files in `artifacts/`.
 
