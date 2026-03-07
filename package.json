@@ -16,6 +16,7 @@
     "lint": "web-ext lint --source-dir dist/firefox/"
   },
   "devDependencies": {
+    "chrome-webstore-upload-cli": "^3.5.0",
     "vitest": "^3.0.0",
     "web-ext": "^8.0.0",
     "webextension-polyfill": "^0.12.0"
