@@ -1,7 +1,6 @@
 {
   "manifest_version": 3,
   "name": "TabVacuum",
-  "version": "0.3.0",
   "description": "Power-user tab cleanup: close duplicates, merge windows, sort tabs, prune stale and blank tabs.",
   "minimum_chrome_version": "109",
   "permissions": ["tabs", "history", "notifications", "storage", "contextMenus"],

@@ -61,15 +61,21 @@ for (const entry of fs.readdirSync(SRC)) {
   }
 }
 
-// Copy browser-specific manifests
-copyFile(
-  path.join(SRC, 'manifest.firefox.json'),
-  path.join(FIREFOX_DIST, 'manifest.json')
-);
-copyFile(
-  path.join(SRC, 'manifest.chrome.json'),
-  path.join(CHROME_DIST, 'manifest.json')
-);
+// Read version from package.json
+const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+
+// Copy browser-specific manifests with version from package.json
+for (const [srcFile, destDir] of [
+  ['manifest.firefox.json', FIREFOX_DIST],
+  ['manifest.chrome.json', CHROME_DIST],
+]) {
+  const manifest = JSON.parse(fs.readFileSync(path.join(SRC, srcFile), 'utf8'));
+  manifest.version = pkg.version;
+  fs.writeFileSync(
+    path.join(destDir, 'manifest.json'),
+    JSON.stringify(manifest, null, 2) + '\n'
+  );
+}
 
 // Copy webextension-polyfill
 const polyfillPath = path.join(
