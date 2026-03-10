@@ -1,6 +1,6 @@
 {
   "name": "tabvacuum",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "private": true,
   "type": "module",
   "description": "Power-user tab cleanup: close duplicates, merge windows, sort tabs, prune stale tabs.",
