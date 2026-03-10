@@ -231,14 +231,11 @@ export function planSort(tabs, criteria, direction) {
     } else if (criteria === 'title') {
       comparison = (a.title || '').localeCompare(b.title || '');
     } else if (criteria === 'lastAccessed') {
-      // Most recent first for ascending
-      comparison = (b.lastAccessed || 0) - (a.lastAccessed || 0);
+      comparison = (a.lastAccessed || 0) - (b.lastAccessed || 0);
     } else if (criteria === 'visitCount') {
-      // Most visited first for ascending
-      comparison = (b.visitCount || 0) - (a.visitCount || 0);
+      comparison = (a.visitCount || 0) - (b.visitCount || 0);
     } else if (criteria === 'frecency') {
-      // Highest frecency first for ascending
-      comparison = (b.frecency || 0) - (a.frecency || 0);
+      comparison = (a.frecency || 0) - (b.frecency || 0);
     }
 
     return direction === 'desc' ? -comparison : comparison;

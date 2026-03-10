@@ -283,25 +283,47 @@ describe('planSort', () => {
     expect(result.moves.map((m) => m.tabId)).toEqual([2, 3, 1]);
   });
 
-  it('sorts by lastAccessed (most recent first for asc)', () => {
+  it('sorts by lastAccessed ascending (oldest first)', () => {
     const tabs = [
       { id: 1, lastAccessed: 100, pinned: false },
       { id: 2, lastAccessed: 300, pinned: false },
       { id: 3, lastAccessed: 200, pinned: false },
     ];
     const result = planSort(tabs, 'lastAccessed', 'asc');
-    // Most recent first: 300, 200, 100
+    // Ascending: 100, 200, 300
+    expect(result.moves.map((m) => m.tabId)).toEqual([1, 3, 2]);
+  });
+
+  it('sorts by lastAccessed descending (most recent first)', () => {
+    const tabs = [
+      { id: 1, lastAccessed: 100, pinned: false },
+      { id: 2, lastAccessed: 300, pinned: false },
+      { id: 3, lastAccessed: 200, pinned: false },
+    ];
+    const result = planSort(tabs, 'lastAccessed', 'desc');
+    // Descending: 300, 200, 100
     expect(result.moves.map((m) => m.tabId)).toEqual([2, 3, 1]);
   });
 
-  it('sorts by visitCount (most visited first for asc)', () => {
+  it('sorts by visitCount ascending (least visited first)', () => {
     const tabs = [
       { id: 1, visitCount: 5, pinned: false },
       { id: 2, visitCount: 50, pinned: false },
       { id: 3, visitCount: 20, pinned: false },
     ];
     const result = planSort(tabs, 'visitCount', 'asc');
-    // Most visited first: 50, 20, 5
+    // Ascending: 5, 20, 50
+    expect(result.moves.map((m) => m.tabId)).toEqual([1, 3, 2]);
+  });
+
+  it('sorts by visitCount descending (most visited first)', () => {
+    const tabs = [
+      { id: 1, visitCount: 5, pinned: false },
+      { id: 2, visitCount: 50, pinned: false },
+      { id: 3, visitCount: 20, pinned: false },
+    ];
+    const result = planSort(tabs, 'visitCount', 'desc');
+    // Descending: 50, 20, 5
     expect(result.moves.map((m) => m.tabId)).toEqual([2, 3, 1]);
   });
 
@@ -336,13 +358,26 @@ describe('planSort', () => {
     expect(result.message).toBe('Sorted 1 tab by title');
   });
 
-  it('sorts by frecency (highest first for asc)', () => {
+  it('sorts by frecency ascending (lowest first)', () => {
     const tabs = [
       { id: 1, frecency: 5, pinned: false },
       { id: 2, frecency: 70, pinned: false },
       { id: 3, frecency: 28, pinned: false },
     ];
     const result = planSort(tabs, 'frecency', 'asc');
+    // Ascending: 5, 28, 70
+    expect(result.moves.map((m) => m.tabId)).toEqual([1, 3, 2]);
+    expect(result.message).toBe('Sorted 3 tabs by frecency');
+  });
+
+  it('sorts by frecency descending (highest first)', () => {
+    const tabs = [
+      { id: 1, frecency: 5, pinned: false },
+      { id: 2, frecency: 70, pinned: false },
+      { id: 3, frecency: 28, pinned: false },
+    ];
+    const result = planSort(tabs, 'frecency', 'desc');
+    // Descending: 70, 28, 5
     expect(result.moves.map((m) => m.tabId)).toEqual([2, 3, 1]);
     expect(result.message).toBe('Sorted 3 tabs by frecency');
   });

@@ -154,9 +154,9 @@ browser.contextMenus.onClicked.addListener(async (info) => {
     'tv-merge': mergeWindows,
     'tv-sort-url': () => sortTabs('url', 'asc'),
     'tv-sort-title': () => sortTabs('title', 'asc'),
-    'tv-sort-last': () => sortTabs('lastAccessed', 'asc'),
-    'tv-sort-visit': () => sortTabs('visitCount', 'asc'),
-    'tv-sort-frecency': () => sortTabs('frecency', 'asc'),
+    'tv-sort-last': () => sortTabs('lastAccessed', 'desc'),
+    'tv-sort-visit': () => sortTabs('visitCount', 'desc'),
+    'tv-sort-frecency': () => sortTabs('frecency', 'desc'),
     'tv-stale': closeStaleTabs,
     'tv-blank': closeBlankTabs
   };
