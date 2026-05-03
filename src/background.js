@@ -115,7 +115,10 @@ const closeStaleTabs = () => closeMatchingTabs(findStaleTabs);
 const closeBlankTabs = () => closeMatchingTabs(findBlankTabs);
 
 // Message handler for popup and options pages
-browser.runtime.onMessage.addListener((message) => {
+// Uses sendResponse callback pattern for Chrome compatibility.
+// Returning a Promise from onMessage only works in Chrome 144+ natively;
+// older Chrome versions require sendResponse + return true for async responses.
+browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   const handlers = {
     closeDuplicates,
     mergeWindows,
@@ -127,7 +130,12 @@ browser.runtime.onMessage.addListener((message) => {
   };
 
   const handler = handlers[message.command];
-  return handler ? handler() : undefined;
+  if (!handler) return;
+
+  handler()
+    .then(sendResponse)
+    .catch(err => sendResponse({ message: `Error: ${err.message}` }));
+  return true; // keep message channel open for async sendResponse
 });
 
 // Register context menus on install
