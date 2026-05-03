@@ -145,7 +145,8 @@ export function findDuplicates(tabs, settings) {
     groupedByUrl.set(key, group);
   }
 
-  const toClose = [];
+  // Build candidate set: tabs that are duplicates and should be closed
+  const duplicateIds = new Set();
 
   for (const group of groupedByUrl.values()) {
     if (group.length < 2) continue;
@@ -157,12 +158,15 @@ export function findDuplicates(tabs, settings) {
 
     if (protectedTabs.length > 0) {
       // Close all unprotected duplicates when protected tabs exist
-      toClose.push(...unprotectedTabs.map(tab => tab.id));
+      for (const tab of unprotectedTabs) duplicateIds.add(tab.id);
     } else {
       // Keep first unprotected tab, close the rest
-      toClose.push(...unprotectedTabs.slice(1).map(tab => tab.id));
+      for (const tab of unprotectedTabs.slice(1)) duplicateIds.add(tab.id);
     }
   }
+
+  // Apply last-tab-in-window safety via filterClosableTabs (R7.1)
+  const toClose = filterClosableTabs(tabs, settings, tab => duplicateIds.has(tab.id));
 
   const count = toClose.length;
   const message = count > 0
