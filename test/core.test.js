@@ -201,31 +201,33 @@ describe('findDuplicates', () => {
 describe('planMerge', () => {
   it('merges tabs from multiple windows', () => {
     const windows = [
-      { id: 1, tabs: [{ id: 10 }, { id: 11 }] },
-      { id: 2, tabs: [{ id: 20 }, { id: 21 }] },
-      { id: 3, tabs: [{ id: 30 }] },
+      { id: 1, tabs: [{ id: 10, pinned: false }, { id: 11, pinned: false }] },
+      { id: 2, tabs: [{ id: 20, pinned: false }, { id: 21, pinned: false }] },
+      { id: 3, tabs: [{ id: 30, pinned: false }] },
     ];
     const result = planMerge(windows, 1);
     expect(result.moves).toHaveLength(2);
-    expect(result.moves[0]).toEqual({ tabIds: [20, 21], windowId: 1, index: 2 });
-    expect(result.moves[1]).toEqual({ tabIds: [30], windowId: 1, index: 4 });
+    expect(result.moves[0]).toEqual({ tabIds: [20, 21], windowId: 1, index: -1 });
+    expect(result.moves[1]).toEqual({ tabIds: [30], windowId: 1, index: -1 });
     expect(result.emptyWindowIds).toEqual([2, 3]);
+    expect(result.pinnedTabIds).toEqual([]);
     expect(result.message).toContain('Merged 3 windows');
     expect(result.message).toContain('5 tabs');
   });
 
   it('single window returns no-op', () => {
-    const windows = [{ id: 1, tabs: [{ id: 10 }] }];
+    const windows = [{ id: 1, tabs: [{ id: 10, pinned: false }] }];
     const result = planMerge(windows, 1);
     expect(result.moves).toEqual([]);
     expect(result.emptyWindowIds).toEqual([]);
+    expect(result.pinnedTabIds).toEqual([]);
     expect(result.message).toBe('Only one window open');
   });
 
   it('preserves tab order from source windows', () => {
     const windows = [
-      { id: 1, tabs: [{ id: 10 }] },
-      { id: 2, tabs: [{ id: 20 }, { id: 21 }, { id: 22 }] },
+      { id: 1, tabs: [{ id: 10, pinned: false }] },
+      { id: 2, tabs: [{ id: 20, pinned: false }, { id: 21, pinned: false }, { id: 22, pinned: false }] },
     ];
     const result = planMerge(windows, 1);
     expect(result.moves[0].tabIds).toEqual([20, 21, 22]);
@@ -233,19 +235,79 @@ describe('planMerge', () => {
 
   it('returns correct emptyWindowIds', () => {
     const windows = [
-      { id: 1, tabs: [{ id: 10 }] },
-      { id: 2, tabs: [{ id: 20 }] },
-      { id: 3, tabs: [{ id: 30 }] },
+      { id: 1, tabs: [{ id: 10, pinned: false }] },
+      { id: 2, tabs: [{ id: 20, pinned: false }] },
+      { id: 3, tabs: [{ id: 30, pinned: false }] },
     ];
     const result = planMerge(windows, 1);
     expect(result.emptyWindowIds).toEqual([2, 3]);
   });
 
   it('handles target window not found', () => {
-    const windows = [{ id: 1, tabs: [{ id: 10 }] }];
+    const windows = [{ id: 1, tabs: [{ id: 10, pinned: false }] }];
     const result = planMerge(windows, 999);
     expect(result.moves).toEqual([]);
+    expect(result.pinnedTabIds).toEqual([]);
     expect(result.message).toBe('Target window not found');
+  });
+
+  it('separates pinned tabs from unpinned tabs in source windows', () => {
+    const windows = [
+      { id: 1, tabs: [{ id: 10, pinned: false }] },
+      { id: 2, tabs: [
+        { id: 20, pinned: true },
+        { id: 21, pinned: true },
+        { id: 22, pinned: false },
+      ]},
+    ];
+    const result = planMerge(windows, 1);
+    // Pinned tabs moved to index 0, unpinned appended at -1
+    expect(result.moves).toHaveLength(2);
+    expect(result.moves[0]).toEqual({ tabIds: [20, 21], windowId: 1, index: 0 });
+    expect(result.moves[1]).toEqual({ tabIds: [22], windowId: 1, index: -1 });
+  });
+
+  it('returns pinned tab IDs in pinnedTabIds', () => {
+    const windows = [
+      { id: 1, tabs: [{ id: 10, pinned: false }] },
+      { id: 2, tabs: [{ id: 20, pinned: true }, { id: 21, pinned: false }] },
+      { id: 3, tabs: [{ id: 30, pinned: true }, { id: 31, pinned: true }] },
+    ];
+    const result = planMerge(windows, 1);
+    expect(result.pinnedTabIds).toEqual([20, 30, 31]);
+  });
+
+  it('handles source window with only pinned tabs', () => {
+    const windows = [
+      { id: 1, tabs: [{ id: 10, pinned: false }] },
+      { id: 2, tabs: [{ id: 20, pinned: true }, { id: 21, pinned: true }] },
+    ];
+    const result = planMerge(windows, 1);
+    expect(result.moves).toHaveLength(1);
+    expect(result.moves[0]).toEqual({ tabIds: [20, 21], windowId: 1, index: 0 });
+    expect(result.pinnedTabIds).toEqual([20, 21]);
+    expect(result.emptyWindowIds).toEqual([2]);
+  });
+
+  it('handles source window with only unpinned tabs', () => {
+    const windows = [
+      { id: 1, tabs: [{ id: 10, pinned: false }] },
+      { id: 2, tabs: [{ id: 20, pinned: false }, { id: 21, pinned: false }] },
+    ];
+    const result = planMerge(windows, 1);
+    expect(result.moves).toHaveLength(1);
+    expect(result.moves[0]).toEqual({ tabIds: [20, 21], windowId: 1, index: -1 });
+    expect(result.pinnedTabIds).toEqual([]);
+  });
+
+  it('moves pinned tabs to index 0 in target window', () => {
+    const windows = [
+      { id: 1, tabs: [{ id: 10, pinned: true }, { id: 11, pinned: false }, { id: 12, pinned: false }] },
+      { id: 2, tabs: [{ id: 20, pinned: true }, { id: 21, pinned: false }] },
+    ];
+    const result = planMerge(windows, 1);
+    const pinnedMove = result.moves.find(m => m.tabIds.includes(20));
+    expect(pinnedMove.index).toBe(0);
   });
 });
 

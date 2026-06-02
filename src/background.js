@@ -48,13 +48,18 @@ const closeDuplicates = () => closeMatchingTabs(findDuplicates);
 async function mergeWindows() {
   const windows = await browser.windows.getAll({ populate: true });
   const focused = await browser.windows.getCurrent();
-  const { moves, emptyWindowIds, message } = planMerge(windows, focused.id);
+  const { moves, emptyWindowIds, pinnedTabIds, message } = planMerge(windows, focused.id);
 
   for (const move of moves) {
     await browser.tabs.move(move.tabIds, {
       windowId: move.windowId,
       index: move.index
     });
+  }
+
+  // Restore pinned state for tabs that were pinned in their source window
+  for (const tabId of pinnedTabIds) {
+    await browser.tabs.update(tabId, { pinned: true });
   }
 
   for (const windowId of emptyWindowIds) {

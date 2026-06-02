@@ -179,26 +179,37 @@ export function findDuplicates(tabs, settings) {
 export function planMerge(windows, targetWindowId) {
   const targetWindow = windows.find(w => w.id === targetWindowId);
   if (!targetWindow) {
-    return { moves: [], emptyWindowIds: [], message: 'Target window not found' };
+    return { moves: [], emptyWindowIds: [], pinnedTabIds: [], message: 'Target window not found' };
   }
 
   const sourceWindows = windows.filter(w => w.id !== targetWindowId);
   if (sourceWindows.length === 0) {
-    return { moves: [], emptyWindowIds: [], message: 'Only one window open' };
+    return { moves: [], emptyWindowIds: [], pinnedTabIds: [], message: 'Only one window open' };
   }
 
-  let currentIndex = targetWindow.tabs.length;
   const moves = [];
   const emptyWindowIds = [];
+  const pinnedTabIds = [];
   let totalMoved = 0;
 
+  // Collect pinned and unpinned tabs separately from source windows
   for (const sourceWindow of sourceWindows) {
-    const tabIds = sourceWindow.tabs.map(tab => tab.id);
-    if (tabIds.length > 0) {
-      moves.push({ tabIds, windowId: targetWindowId, index: currentIndex });
-      totalMoved += tabIds.length;
-      currentIndex += tabIds.length;
+    const pinned = sourceWindow.tabs.filter(tab => tab.pinned);
+    const unpinned = sourceWindow.tabs.filter(tab => !tab.pinned);
+
+    if (pinned.length > 0) {
+      const ids = pinned.map(tab => tab.id);
+      moves.push({ tabIds: ids, windowId: targetWindowId, index: 0 });
+      pinnedTabIds.push(...ids);
+      totalMoved += ids.length;
     }
+
+    if (unpinned.length > 0) {
+      const ids = unpinned.map(tab => tab.id);
+      moves.push({ tabIds: ids, windowId: targetWindowId, index: -1 });
+      totalMoved += ids.length;
+    }
+
     emptyWindowIds.push(sourceWindow.id);
   }
 
@@ -206,7 +217,7 @@ export function planMerge(windows, targetWindowId) {
   const totalTabs = targetWindow.tabs.length + totalMoved;
   const message = `Merged ${totalWindows} windows (${totalTabs} tabs)`;
 
-  return { moves, emptyWindowIds, message };
+  return { moves, emptyWindowIds, pinnedTabIds, message };
 }
 
 export function computeFrecency(visitCount, lastVisitTime, now) {
