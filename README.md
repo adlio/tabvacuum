@@ -45,7 +45,9 @@ Accessible via toolbar popup, tab right-click menu, and keyboard shortcuts.
 | Merge Windows | `Alt+Shift+M` |
 | Sort Tabs | `Alt+Shift+S` |
 | Close Stale Tabs | `Alt+Shift+X` |
-| Close Blank Tabs | `Alt+Shift+B` |
+| Close Blank Tabs | *(unassigned — set manually)* |
+
+Browsers allow at most four suggested shortcuts per extension, so **Close Blank Tabs** ships without a default. You can assign one yourself:
 
 **Firefox**: remap in `about:addons` → gear icon → "Manage Extension Shortcuts".
 **Chrome**: remap in `chrome://extensions/shortcuts`.
