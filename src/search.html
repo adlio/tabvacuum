@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Search tabs — TabVacuum</title>
+  <link rel="stylesheet" href="search.css">
+</head>
+<body>
+  <main id="palette" class="palette" role="dialog" aria-modal="true" aria-labelledby="dialog-title" data-mode="search">
+    <h1 id="dialog-title" class="sr-only">Search tabs</h1>
+    <header class="search">
+      <svg class="search-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <circle cx="11" cy="11" r="7" fill="none" stroke="currentColor" stroke-width="2"/>
+        <path d="m20 20-3.5-3.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+      </svg>
+      <label for="query" class="sr-only">Search tabs by title or URL</label>
+      <input id="query" type="text" role="combobox" aria-autocomplete="list"
+        aria-controls="results" aria-haspopup="grid" aria-expanded="true" aria-describedby="query-help"
+        placeholder="Search tabs…" autocomplete="off" spellcheck="false" autofocus>
+      <!-- Mode changes are announced through #announcement. -->
+      <span id="mode-indicator" class="mode-indicator" aria-hidden="true" hidden></span>
+      <kbd class="esc-hint" aria-hidden="true">Esc</kbd>
+    </header>
+    <div class="list-heading">
+      <span class="heading-text">
+        <span id="list-label">Recent tabs</span>
+        <span id="result-count"></span>
+        <span id="selection-status" role="status" aria-live="polite"></span>
+      </span>
+      <span class="actions">
+        <button id="select-toggle" class="action" type="button">Select multiple</button>
+        <button id="close-tabs" class="action action-danger" type="button" hidden>Close 0 tabs</button>
+      </span>
+    </div>
+    <div class="scroll" id="scroll">
+      <p id="message" role="status" aria-live="polite" data-state="loading">Loading tabs…</p>
+      <div id="results" role="grid" aria-colcount="2" aria-labelledby="list-label" aria-describedby="tabs-help"
+        tabindex="-1" aria-busy="true"></div>
+    </div>
+    <!-- Visual keycaps only; screen readers get the same help via aria-describedby. -->
+    <footer id="help" aria-hidden="true">
+      <div id="hints-search" class="hint-group">
+        <span class="hint optional"><kbd>↑</kbd><kbd>↓</kbd> Navigate</span>
+        <span class="hint"><kbd>↵</kbd> Switch</span>
+        <span class="hint"><kbd>Tab</kbd> Tab menu</span>
+        <span class="hint"><kbd>Esc</kbd> Close</span>
+      </div>
+      <div id="hints-tabs" class="hint-group" hidden>
+        <span class="hint optional"><kbd>J</kbd><kbd>K</kbd> Move</span>
+        <span class="hint"><kbd>↵</kbd> Switch</span>
+        <span class="hint"><kbd>X</kbd><kbd>Del</kbd> Close tab</span>
+        <span class="hint"><kbd>M</kbd> Select multiple</span>
+        <span class="hint"><kbd>Esc</kbd> Search</span>
+      </div>
+      <div id="hints-select" class="hint-group" hidden>
+        <span class="hint optional"><kbd>J</kbd><kbd>K</kbd> Move</span>
+        <span class="hint"><kbd>Space</kbd> Toggle Selection</span>
+        <span class="hint"><kbd>A</kbd> Select all</span>
+        <span class="hint"><kbd>X</kbd><kbd>Del</kbd> Close selected</span>
+        <span class="hint"><kbd>M</kbd> Done</span>
+        <span class="hint"><kbd>Esc</kbd> Back</span>
+      </div>
+    </footer>
+    <p id="query-help" class="sr-only">Up and Down arrows move through results. Enter switches to the highlighted tab. Tab opens the tab menu, where you can close tabs. Escape closes search.</p>
+    <p id="tabs-help" class="sr-only">Tab menu. Up and Down arrows, or J and K, move. Enter switches to the highlighted tab. X or Delete closes the highlighted tab. M selects multiple tabs. Escape returns to search.</p>
+    <p id="select-help" class="sr-only">Select multiple mode. Up and Down arrows, or J and K, move. Space or Enter toggles selection of the highlighted tab. A, or Control A, selects all listed tabs. X or Delete closes the selected tabs. M or Done returns to the tab menu. Escape clears the selection and returns to the tab menu.</p>
+    <div id="announcement" class="sr-only" role="status" aria-live="polite"></div>
+  </main>
+  <script src="browser-polyfill.js"></script>
+  <script type="module" src="search.js"></script>
+</body>
+</html>

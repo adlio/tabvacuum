@@ -2,7 +2,24 @@
 import './polyfill.js';
 import { findDuplicates, planMerge, planSort, findStaleTabs, findBlankTabs, computeFrecency } from './core.js';
 
+import { createSearchService } from './search-service.js';
+import { createSearchLauncher } from './search-launcher.js';
+
+const search = createSearchService(browser);
+search.installFocusTracking();
+const launcher = createSearchLauncher(browser, search);
+launcher.installCleanup();
+
+function openSearch(tab) {
+  return launcher.launch(tab).catch(() => {
+    const message = 'Could not open Search tabs. Try again from the TabVacuum menu. For private windows, check that TabVacuum is allowed to run there.';
+    notify(message);
+    return { error: message };
+  });
+}
+
 const DEFAULTS = {
+  searchScope: 'all',
   staleThresholdMs: 7 * 24 * 60 * 60 * 1000,
   ignoreFragments: false,
   ignoreQueryParams: false,
@@ -123,8 +140,26 @@ const closeBlankTabs = () => closeMatchingTabs(findBlankTabs);
 // Uses sendResponse callback pattern for Chrome compatibility.
 // Returning a Promise from onMessage only works in Chrome 144+ natively;
 // older Chrome versions require sendResponse + return true for async responses.
-browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+//
+// Search commands authorize themselves by launch token. Everything else is
+// accepted only from the extension's own menu and settings pages, never from
+// content scripts or the search page embedded in websites.
+const trustedPages = new Set(['popup.html', 'options.html'].map(page => browser.runtime.getURL(page)));
+const isTrustedPage = sender => sender.id === browser.runtime.id &&
+  trustedPages.has(String(sender.url ?? '').split(/[?#]/, 1)[0]);
+
+browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  const searching = launcher.handleMessage(message, sender);
+  if (searching) {
+    searching
+      .then(sendResponse)
+      .catch(err => sendResponse({ error: err.message, message: `Error: ${err.message}` }));
+    return true;
+  }
+  if (!isTrustedPage(sender)) return;
+
   const handlers = {
+    launchSearch: () => openSearch(),
     closeDuplicates,
     mergeWindows,
     closeStaleTabs,
@@ -134,19 +169,19 @@ browser.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     saveSettings: () => saveSettings(message.settings)
   };
 
+  if (!Object.hasOwn(handlers, message?.command)) return;
   const handler = handlers[message.command];
-  if (!handler) return;
 
   handler()
     .then(sendResponse)
-    .catch(err => sendResponse({ message: `Error: ${err.message}` }));
+    .catch(err => sendResponse({ error: err.message, message: `Error: ${err.message}` }));
   return true; // keep message channel open for async sendResponse
 });
 
 // Register context menus on install
 browser.runtime.onInstalled.addListener(() => {
   const menus = browser.contextMenus;
-  const tabContext = ['tab'];
+  const tabContext = browser.runtime.getURL('').startsWith('moz-extension:') ? ['tab'] : ['action'];
 
   menus.create({ id: 'tv-dupes', title: 'Close Duplicate Tabs', contexts: tabContext });
   menus.create({ id: 'tv-merge', title: 'Merge All Windows', contexts: tabContext });
@@ -182,7 +217,12 @@ browser.contextMenus.onClicked.addListener(async (info) => {
 });
 
 // Handle keyboard shortcuts
-browser.commands.onCommand.addListener(async (command) => {
+browser.commands.onCommand.addListener(async (command, tab) => {
+  if (command === 'search-tabs') {
+    // The command grants activeTab for the tab that was active when pressed.
+    await openSearch(tab);
+    return;
+  }
   const commandActions = {
     'close-duplicates': closeDuplicates,
     'merge-windows': mergeWindows,

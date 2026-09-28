@@ -2,8 +2,12 @@
   "manifest_version": 3,
   "name": "TabVacuum",
   "description": "Power-user tab cleanup: close duplicates, merge windows, sort tabs, prune stale and blank tabs.",
-  "minimum_chrome_version": "109",
-  "permissions": ["tabs", "history", "notifications", "storage", "contextMenus"],
+  "minimum_chrome_version": "127",
+  "incognito": "split",
+  "permissions": ["tabs", "history", "notifications", "storage", "contextMenus", "activeTab", "scripting"],
+  "web_accessible_resources": [
+    { "resources": ["search.html"], "matches": ["http://*/*", "https://*/*"] }
+  ],
   "action": {
     "default_popup": "popup.html",
     "default_icon": {
@@ -37,10 +41,14 @@
       },
       "description": "Sort tabs"
     },
-    "close-stale": {
+    "search-tabs": {
       "suggested_key": {
-        "default": "Alt+Shift+X"
+        "default": "Alt+Shift+K",
+        "mac": "Command+Shift+Space"
       },
+      "description": "Search tabs"
+    },
+    "close-stale": {
       "description": "Close stale tabs"
     },
     "close-blank": {

@@ -1,4 +1,5 @@
 // TabVacuum popup UI
+import { renderShortcuts } from './shortcuts.js';
 
 const elements = {
   status: document.getElementById('status'),
@@ -28,6 +29,7 @@ async function sendCommand(command, params = {}) {
 function toggleSortOptions() {
   const isHidden = elements.sortOptions.hidden;
   elements.sortOptions.hidden = !isHidden;
+  elements.btnSort.setAttribute('aria-expanded', String(isHidden));
 }
 
 // Action buttons
@@ -48,3 +50,17 @@ elements.sortOptions.addEventListener('click', (e) => {
     direction: btn.dataset.direction
   });
 });
+
+// Opening the menu granted activeTab for this window's page; the background
+// shows search over it (or in a separate window) and this menu gets out of the way.
+document.getElementById('btn-search').addEventListener('click', async () => {
+  try {
+    const result = await browser.runtime.sendMessage({ command: 'launchSearch' });
+    if (result?.error) throw new Error(result.error);
+    window.close();
+  } catch (error) {
+    showStatus(`Error: ${error.message}`);
+  }
+});
+renderShortcuts(document, browser);
+document.body.classList.add('ready');
