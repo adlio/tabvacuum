@@ -39,7 +39,9 @@ export const UI_STATE = `
   for (const hint of group ? group.querySelectorAll('.hint') : []) {
     if (!shown(hint)) continue;
     const keys = [...hint.querySelectorAll('kbd')].map(k => k.textContent).join('+');
-    hints[keys] = [...hint.childNodes].filter(n => n.nodeType === 3).map(n => n.textContent).join('').trim();
+    const caption = hint.cloneNode(true);
+    for (const cap of caption.querySelectorAll('kbd')) cap.remove();
+    hints[keys] = caption.textContent.trim();
   }
   const q = $('query'), m = $('message');
   return {
@@ -148,7 +150,7 @@ function tools(a) {
 
 /**
  * Native focus order with results: query -> results (tab menu) -> highlighted row's X ->
- * Select multiple -> (Close, select mode only) -> query, and the reverse with Shift+Tab.
+ * Select multiple -> (Close, select mode only) -> Search in -> query, and the reverse with Shift+Tab.
  * Starts and ends with the query focused, search open.
  */
 export async function runTabCycle(a, label) {
@@ -165,8 +167,10 @@ export async function runTabCycle(a, label) {
     [['Tab'], 'results', 'tabs', 'Tab: query -> results again'],
     [['Tab'], x, 'tabs', 'Tab: results -> highlighted row X'],
     [['Tab'], 'select-toggle', 'tabs', 'Tab: row X -> Select multiple; Close is hidden'],
-    [['Tab'], 'query', 'search', 'Tab: Select multiple -> query wraps (Close skipped outside select)'],
-    [['Shift_L', 'Tab'], 'select-toggle', 'search', 'Shift+Tab: query -> Select multiple'],
+    [['Tab'], 'search-in', 'tabs', 'Tab: Select multiple -> Search in (Close skipped outside select)'],
+    [['Tab'], 'query', 'search', 'Tab: Search in -> query wraps'],
+    [['Shift_L', 'Tab'], 'search-in', 'search', 'Shift+Tab: query -> Search in'],
+    [['Shift_L', 'Tab'], 'select-toggle', 'search', 'Shift+Tab: Search in -> Select multiple'],
     [['Shift_L', 'Tab'], x, 'search', 'Shift+Tab: Select multiple -> row X'],
     [['Shift_L', 'Tab'], 'results', 'tabs', 'Shift+Tab: row X -> results opens the tab menu'],
     [['m'], 'results', 'select', 'M: tab menu -> select mode with checkboxes, none checked', s => s.checked === 0],
@@ -183,7 +187,8 @@ export async function runTabCycle(a, label) {
     [['Tab'], x, 'select', 'Tab: to row X'],
     [['Tab'], 'select-toggle', 'select', 'Tab: to Done'],
     [['Tab'], 'close-tabs', 'select', 'Tab: to Close'],
-    [['Tab'], 'query', 'search', 'Tab: Close -> query wraps, leaves select mode and clears checks'],
+    [['Tab'], 'search-in', 'select', 'Tab: Close -> Search in keeps select mode and checks', s => s.checked === 1],
+    [['Tab'], 'query', 'search', 'Tab: Search in -> query wraps, leaves select mode and clears checks'],
     [['Tab'], 'results', 'tabs', 'Tab: query -> tab menu, checks still cleared'],
     [['Escape'], 'query', 'search', 'Escape: tab menu -> query, search stays open'],
   ];

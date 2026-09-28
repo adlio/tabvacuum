@@ -25,7 +25,11 @@ const SEARCH = `${EXT}/search.html`;
 // --acceptance-only runs setup plus the privacy/lifecycle checks, skipping the main flow.
 // --closing-only runs setup plus the selection/closing flows (scripts/test-search-closing.mjs).
 const ACCEPTANCE_ONLY = process.argv.includes('--acceptance-only');
-const CLOSING_ONLY = process.argv.includes('--closing-only');
+const EXPANDED_ONLY = process.argv.includes('--expanded-only');
+// --expanded-only runs setup plus the History/Contents flows (scripts/test-expanded-search.mjs).
+const CLOSING_ONLY = EXPANDED_ONLY || process.argv.includes('--closing-only');
+import { runExpandedSearch } from './test-expanded-search.mjs';
+import { nativeClick } from './test-browser-fixtures.mjs';
 const { scratch, directory } = await outputDir('tabvacuum-firefox');
 // geckodriver creates its throwaway profile under TMPDIR; keep it in scratch.
 process.env.TMPDIR = directory;
@@ -158,6 +162,23 @@ try {
     await sleep(400);
     captureDisplay(env, file);
     shots.push({ file, what });
+  }
+  // Private windows. Permission is granted only in this throwaway profile,
+  // through the same extension permission store about:addons' "Run in Private
+  // Windows" toggle writes, followed by the add-on reload that toggle performs.
+  const ADDON = 'tabvacuum@adlio';
+  const privateAllowed = () => chrome('return WebExtensionPolicy.getByID(arguments[0])?.privateBrowsingAllowed === true', ADDON);
+  async function allowPrivate() {
+    const allowed = await privateAllowed();
+    console.log(`INFO add-on allowed in private windows before this step: ${allowed}`);
+    if (allowed) return;
+    await chromeAsync(`const { ExtensionPermissions } = ChromeUtils.importESModule('resource://gre/modules/ExtensionPermissions.sys.mjs');
+      const { AddonManager } = ChromeUtils.importESModule('resource://gre/modules/AddonManager.sys.mjs');
+      await ExtensionPermissions.add(arguments[0], { permissions: ['internal:privateBrowsingAllowed'], origins: [] });
+      await (await AddonManager.getAddonByID(arguments[0])).reload();
+      return true;`, ADDON);
+    await until(privateAllowed, 'private allowed after reload', 10000).catch(() => {});
+    await sleep(1000);
   }
   const setScheme = value => chrome('Services.prefs.setIntPref("layout.css.prefers-color-scheme.content-override", arguments[0]);', value);
 
@@ -541,7 +562,7 @@ try {
     await visit(`${base}/current`);
     await openOverlay();
     check(!(await rows()).includes(TITLES['/remote']), 'current-window scope excludes other window', await rows());
-    check(await inSearch('overlay', 'return document.querySelectorAll("select,input[type=checkbox],input[type=range]").length') === 0, 'no runtime settings controls');
+    check(await inSearch('overlay', 'return [...document.querySelectorAll("select,input[type=checkbox],input[type=range]")].every(el => ["source-history", "source-content"].includes(el.id))'), 'no persistent settings controls in search (only explicit source choices)');
 
     await key('overlay', 'Escape');
     await closed().catch(() => {});
@@ -597,7 +618,6 @@ try {
   if (!CLOSING_ONLY) {
     // ===== Privacy and lifecycle acceptance ====================================
     // Runs after the main flow (or alone with --acceptance-only) from a known state.
-    const ADDON = 'tabvacuum@adlio';
     const go = async url => { await driver.setContext('content'); await driver.switchTo().window(originHandle); await driver.get(url); await driver.setContext('chrome'); };
     const focusOrigin = () => chrome(`for (const w of Services.wm.getEnumerator('navigator:browser')) if (w.gBrowser.selectedBrowser.currentURI.spec === arguments[0]) { w.focus(); w.gBrowser.selectedBrowser.focus(); }`, `${base}/current`);
     if (await count('overlay')) { await key('overlay', 'Escape'); await sleep(300); }
@@ -622,21 +642,8 @@ try {
       return { error: 'no page' };`, url, script);
     console.log(`INFO Firefox fission.autostart: ${await chrome('return Services.appinfo.fissionAutostart')}`);
 
-    // (1) Private windows. Permission is granted only in this throwaway profile,
-    // through the same extension permission store about:addons' "Run in Private
-    // Windows" toggle writes, followed by the add-on reload that toggle performs.
-    const privateAllowed = () => chrome('return WebExtensionPolicy.getByID(arguments[0])?.privateBrowsingAllowed === true', ADDON);
-    const allowedAtInstall = await privateAllowed();
-    console.log(`INFO temporary add-on allowed in private windows at install: ${allowedAtInstall}`);
-    if (!allowedAtInstall) {
-      await chromeAsync(`const { ExtensionPermissions } = ChromeUtils.importESModule('resource://gre/modules/ExtensionPermissions.sys.mjs');
-        const { AddonManager } = ChromeUtils.importESModule('resource://gre/modules/AddonManager.sys.mjs');
-        await ExtensionPermissions.add(arguments[0], { permissions: ['internal:privateBrowsingAllowed'], origins: [] });
-        await (await AddonManager.getAddonByID(arguments[0])).reload();
-        return true;`, ADDON);
-      await until(privateAllowed, 'private allowed after reload', 10000).catch(() => {});
-      await sleep(1000);
-    }
+    // (1) Private windows, allowed through allowPrivate() above.
+    await allowPrivate();
     check(await privateAllowed(), 'private: extension allowed in private windows in throwaway profile only');
 
     const privUrl = `${base}/private-only`, privTwo = `${base}/private-two`;
@@ -802,7 +809,120 @@ try {
     // The 4x narrow check widens the window past the display (500 CSS px minimum); restore it.
     await chrome(`${LOCATE} const w = originWindow(arguments[0]); w.moveTo(0, 0); w.resizeTo(1280, 900);`, ORIGIN);
     await sleep(500);
-    await runSearchClosing(closing);
+    // Expanded-search adapter: history via Places, permissions via a fresh extension
+    // page, and the browser's own permission doorhanger clicked with a real X pointer.
+    const OPT = `${EXT}/options.html?tv=settings`;
+    const extEval = script => chromeAsync(`const [url, origin, script] = arguments;
+      const w = originWindow(origin);
+      const tab = w.gBrowser.addTab(url, { triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal(), inBackground: true });
+      try {
+        for (let i = 0; i < 100 && tab.linkedBrowser.currentURI.spec !== url; i++) await new Promise(r => setTimeout(r, 50));
+        await new Promise(r => setTimeout(r, 300));
+        return await actor(tab.linkedBrowser.browsingContext).sendQuery('MarionetteCommandsParent:executeScript', { args: [], opts: {}, script });
+      } finally { w.gBrowser.removeTab(tab); }`, `${EXT}/options.html`, ORIGIN, script);
+    const inOptions = script => chromeAsync(`${FIXTURE} const [url, script] = arguments; const f = findTab(url);
+      if (!f) return { error: 'no options tab' };
+      return actor(f.t.linkedBrowser.browsingContext).sendQuery('MarionetteCommandsParent:executeScript', { script, args: [], opts: {} });`, OPT, script);
+    const readOptions = () => inOptions('const $ = id => document.getElementById(id); return { state: $("content-access-state").textContent, message: $("content-access-message").textContent };');
+    async function clickOptions(selector) {
+      // Raise the Settings window first: a real pointer click lands on whatever window is on top.
+      nativeKeys(env, ['Shift_L'], 'TabVacuum Settings');
+      await sleep(300);
+      const p = await inOptions(`const button = document.querySelector(${JSON.stringify(selector)}); button.scrollIntoView({ block: 'center' }); const r = button.getBoundingClientRect();
+        return { x: mozInnerScreenX + r.left + r.width / 2, y: mozInnerScreenY + r.top + r.height / 2 };`);
+      nativeClick(env, p.x, p.y);
+    }
+    const doorhanger = decision => chrome(`const w = Services.wm.getMostRecentWindow('navigator:browser'); const panel = w.PopupNotifications.panel;
+      const n = panel.state === 'open' && [...panel.children].find(c => c.getAttribute('popupid') === 'addon-webext-permissions');
+      if (!n) return null;
+      const b = arguments[0] === 'allow' ? n.button : n.secondaryButton;
+      const r = b.getBoundingClientRect();
+      return { x: w.mozInnerScreenX + r.left + r.width / 2, y: w.mozInnerScreenY + r.top + r.height / 2, label: b.label };`, decision);
+    let optionsBaseline = [];
+    const optionTabs = () => chrome(`const out = []; for (const w of Services.wm.getEnumerator('navigator:browser')) for (const t of w.gBrowser.tabs) {
+      const u = t.linkedBrowser.currentURI.spec; if (u.startsWith('about:addons') || (u.startsWith(arguments[0]) && !u.includes('?tv='))) out.push(u); } return out;`, `${EXT}/options.html`);
+    closing.expanded = {
+      historyHas: url => chromeAsync('return (await PlacesUtils.history.fetch(arguments[0])) !== null;', url).then(v => v === true),
+      permitted: async () => (await extEval("return browser.permissions.contains({ origins: ['http://*/*', 'https://*/*'] })")) === true,
+      markOptions: async () => { optionsBaseline = await optionTabs(); },
+      optionsOpened: async () => (await optionTabs()).length > optionsBaseline.length,
+      closeOptions: () => chrome(`for (const w of Services.wm.getEnumerator('navigator:browser')) for (const t of [...w.gBrowser.tabs]) {
+        const u = t.linkedBrowser.currentURI.spec; if (u.startsWith('about:addons')) w.gBrowser.removeTab(t); }`),
+      async settingsOpen() {
+        await closing.addTab('origin', OPT);
+        await closing.focus(OPT);
+        await until(async () => (await readOptions()).state !== 'Checking…', 'settings ready', 5000);
+      },
+      async settingsClose() { await closing.cleanup([OPT], []); await closing.focus(ORIGIN); },
+      async request(decision) {
+        await closing.focus(OPT);
+        await clickOptions('#content-access-allow');
+        let target;
+        await until(async () => (target = await doorhanger(decision)), 'permission doorhanger', 6000).catch(() => {});
+        if (!target) return { ...(await readOptions()), method: 'no browser permission prompt appeared' };
+        await sleep(600);
+        nativeClick(env, target.x, target.y);
+        let method = `native X click on the browser doorhanger button "${target.label}"`;
+        const answered = await until(async () => (await readOptions()).message !== 'Waiting for your browser…', 'prompt answered', 4000).catch(() => false);
+        if (!answered) {
+          // Disclosed fallback: the prompt's own button, activated from browser chrome.
+          await chrome(`const n = [...Services.wm.getMostRecentWindow('navigator:browser').PopupNotifications.panel.children].find(c => c.getAttribute('popupid') === 'addon-webext-permissions');
+            (arguments[0] === 'allow' ? n.button : n.secondaryButton).click();`, decision);
+          method = `FALLBACK chrome-DOM click on the doorhanger button "${target.label}" (native click missed)`;
+          await until(async () => (await readOptions()).message !== 'Waiting for your browser…', 'prompt answered', 4000).catch(() => {});
+        }
+        await sleep(300);
+        return { ...(await readOptions()), method };
+      },
+      async revoke() {
+        await closing.focus(OPT);
+        await clickOptions('#content-access-revoke');
+        await sleep(900);
+        nativeKeys(env, ['Return']);
+        let method = 'native X Return on the tab-modal confirm()';
+        const done = await until(async () => /removed/.test((await readOptions()).message), 'revoked', 4000).catch(() => false);
+        if (!done) method = 'confirm() not accepted by native Return';
+        await sleep(300);
+        return { ...(await readOptions()), method };
+      },
+      discard: url => chrome(`${FIXTURE} const f = findTab(arguments[0]); f.w.__tvSleeping = f.t; f.w.gBrowser.discardBrowser(f.t, true);`, url),
+      isDiscarded: () => chrome(`for (const w of Services.wm.getEnumerator('navigator:browser')) if (w.__tvSleeping) return !w.__tvSleeping.linkedPanel && !w.__tvSleeping.selected; return false;`),
+      async navigate(url, to) {
+        await chrome(`${FIXTURE} const f = findTab(arguments[0]); f.t.linkedBrowser.loadURI(Services.io.newURI(arguments[1]), { triggeringPrincipal: sp });`, url, to);
+        await loaded([to]);
+      },
+      // A real private window from OpenBrowserWindow; the shared adapter already
+      // addresses tabs and extension frames in every window, private ones included.
+      async privateWindow(urls, title) {
+        await chromeAsync(`const [urls] = arguments;
+          const w = OpenBrowserWindow({ private: true });
+          await new Promise(r => w.addEventListener('load', r, { once: true }));
+          await new Promise(r => setTimeout(r, 500));
+          w.moveTo(0, 0); w.resizeTo(1280, 900); w.__tvPrivate = true;
+          const sp = Services.scriptSecurityManager.getSystemPrincipal();
+          w.gBrowser.loadURI(Services.io.newURI(urls[0]), { triggeringPrincipal: sp });
+          for (const url of urls.slice(1)) w.gBrowser.addTab(url, { triggeringPrincipal: sp, inBackground: true });
+          return true;`, urls);
+        await loaded(urls);
+        const isPrivate = await chrome(`${FIXTURE} return arguments[0].every(url => PrivateBrowsingUtils.isWindowPrivate(findTab(url).w));`, urls);
+        check(isPrivate, 'private: fixture tabs are in a real private window');
+        await chromeAsync(`${FIXTURE} const [url, title] = arguments;
+          return actor(findTab(url).t.linkedBrowser.browsingContext).sendQuery('MarionetteCommandsParent:executeScript', { script: 'document.title = arguments[0]', args: [title], opts: {} });`, urls[0], title);
+        await until(async () => (await chrome(`${FIXTURE} return findTab(arguments[0]).t.linkedBrowser.contentTitle;`, urls[0])) === title, 'private title', 5000);
+        return {
+          ...closing,
+          originUrl: urls[0],
+          async close() {
+            await chrome(`for (const w of Services.wm.getEnumerator('navigator:browser')) if (w.__tvPrivate) w.close();`);
+            await sleep(500);
+            await closing.focus(ORIGIN);
+          },
+        };
+      },
+    };
+    if (!EXPANDED_ONLY) await runSearchClosing(closing);
+    await allowPrivate();
+    await runExpandedSearch(closing);
   }
 
   await writeFile(path.join(directory, 'screenshots.json'), JSON.stringify(shots, null, 2));

@@ -3,6 +3,7 @@
   "name": "TabVacuum",
   "description": "Power-user tab cleanup: close duplicates, merge windows, sort tabs, prune stale and blank tabs.",
   "permissions": ["tabs", "history", "notifications", "storage", "contextMenus", "activeTab", "scripting"],
+  "optional_permissions": ["http://*/*", "https://*/*"],
   "web_accessible_resources": [
     { "resources": ["search.html"], "matches": ["http://*/*", "https://*/*"] }
   ],

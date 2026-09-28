@@ -2,6 +2,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { startSearch } from '../src/search.js';
 
+// No module mocks: every test runs the real composeSearchResults.
+
 const html = readFileSync(new URL('../src/search.html', import.meta.url), 'utf8');
 const js = readFileSync(new URL('../src/search.js', import.meta.url), 'utf8');
 
@@ -39,6 +41,10 @@ class El {
     return node ?? null;
   }
   scrollIntoView() {}
+  contains(node) {
+    for (let current = node; current; current = current.parent) if (current === this) return true;
+    return false;
+  }
   // Real focus tracking: the UI routes keys by document.activeElement.
   focus() {
     if (this.owner && this.owner.activeElement !== this) {
@@ -48,8 +54,16 @@ class El {
   }
 }
 
-function setup({ top = false, search = '', noTabsApi = false, platform = 'Linux x86_64', platformInfo, closeResponse, initial } = {}) {
+function setup({ top = false, search = '', noTabsApi = false, platform = 'Linux x86_64', platformInfo, closeResponse, initial, sources } = {}) {
   const elements = new Map([...html.matchAll(/\sid="([^"]+)"/g)].map(([, id]) => [id, Object.assign(new El('div'), { id })]));
+  // Record static nesting (parent links only) so containment checks see the real structure.
+  const stack = [];
+  for (const [, close, tag, attrs] of html.matchAll(/<(\/?)([a-z][\w-]*)([^>]*)>/g)) {
+    if (close) { stack.pop(); continue; }
+    const node = elements.get(attrs.match(/\sid="([^"]+)"/)?.[1]) ?? new El(tag);
+    node.parent = stack.at(-1) ?? null;
+    if (!/^(input|meta|link|br|img|path|circle)$/.test(tag) && !attrs.endsWith('/')) stack.push(node);
+  }
   const document = Object.assign(new El('#document'), {
     activeElement: null,
     getElementById: id => elements.get(id) ?? null,
@@ -67,6 +81,8 @@ function setup({ top = false, search = '', noTabsApi = false, platform = 'Linux 
   const contexts = { good: initial ?? context() };
   const sendMessage = vi.fn(async msg => {
     if (msg.command === 'getSearchContext') return contexts[msg.token] ?? { error: 'Invalid search session' };
+    if (msg.command === 'querySearchSources') return sources ? sources(msg) : { error: 'unexpected' };
+    if (['activateHistoryResult', 'openSearchPermissions'].includes(msg.command)) return msg.token === 'good' ? { ok: true } : { error: 'no' };
     if (msg.command === 'activateSearchTab' || msg.command === 'dismissSearch') return msg.token === 'good' ? { ok: true } : { error: 'no' };
     if (msg.command === 'closeSearchTabs') {
       if (msg.token !== 'good') return { error: 'Invalid search session' };
@@ -92,15 +108,23 @@ function setup({ top = false, search = '', noTabsApi = false, platform = 'Linux 
     return event;
   };
   const keys = (...names) => { for (const name of names) key(name); };
-  const rows = () => $('results').children;
+  // Rows live inside labelled row groups; headings are not rows.
+  const rows = () => $('results').children.flatMap(group => group.children.filter(child => child.getAttribute('role') === 'row'));
   const option = i => rows()[i].children[0];
   const rowX = i => rows()[i].children[1].children[0];
+  // Sources are chosen through the Search in menu: open it, toggle, close it again.
+  const toggleSource = (id, on) => {
+    $('search-in').dispatch('click');
+    $(id).checked = on;
+    $(id).dispatch('change');
+    $('search-in').dispatch('click');
+  };
   const focused = () => document.activeElement?.id;
   const type = text => { $('query').value = text; $('query').dispatch('input'); };
   const mode = () => $('palette').dataset.mode;
   // Clicks dispatch on the list, where the delegated handler lives.
   const click = target => $('results').dispatch('click', { target });
-  return { $, window, parent, document, browser, sendMessage, tabEvents, contexts, init, key, keys, rows, option, rowX, focused, type, mode, click };
+  return { $, window, parent, document, browser, sendMessage, tabEvents, contexts, init, key, keys, rows, option, rowX, toggleSource, focused, type, mode, click };
 }
 
 function context(overrides = {}) {
@@ -130,7 +154,7 @@ const settle = async () => { for (let i = 0; i < 4; i++) await flush(); };
 const commands = sendMessage => sendMessage.mock.calls.map(([msg]) => msg);
 const closes = ui => commands(ui.sendMessage).filter(msg => msg.command === 'closeSearchTabs');
 const activations = ui => commands(ui.sendMessage).filter(msg => msg.command === 'activateSearchTab');
-const ids = ui => ui.rows().map(row => Number(row.children[1].children[0].dataset.closeId));
+const ids = ui => ui.rows().map(row => row.children[1].children[0] ? Number(row.children[1].children[0].dataset.closeId) : row.children[0].children[1].children[1].textContent);
 const checkedIds = ui => ui.rows().filter(row => row.getAttribute('data-checked') === 'true').map(row => Number(row.children[1].children[0].dataset.closeId));
 const activeId = ui => ids(ui)[ui.rows().findIndex(row => row.getAttribute('data-active') === 'true')];
 
@@ -742,10 +766,10 @@ describe('focus and mode transitions', () => {
       expect(ui.key('Tab', { shiftKey }).defaultPrevented).toBe(true);
       return ui.focused();
     });
-    expect(walk(5)).toEqual(['results', 'row-close-0', 'select-toggle', 'query', 'results']);
-    expect(walk(4, true)).toEqual(['query', 'select-toggle', 'row-close-0', 'results']);
+    expect(walk(5)).toEqual(['results', 'row-close-0', 'select-toggle', 'search-in', 'query']);
+    expect(walk(4, true)).toEqual(['search-in', 'select-toggle', 'row-close-0', 'results']);
     ui.keys('m', 'j');
-    expect(walk(5)).toEqual(['row-close-1', 'select-toggle', 'close-tabs', 'query', 'results']);
+    expect(walk(6)).toEqual(['row-close-1', 'select-toggle', 'close-tabs', 'search-in', 'query', 'results']);
     expect(ui.mode()).toBe('tabs'); // Passing through the query cleared select mode.
     expect(commands(ui.sendMessage)).toHaveLength(1);
   });
@@ -754,7 +778,7 @@ describe('focus and mode transitions', () => {
     const ui = await ready({ initial: context({ tabs: [] }) });
     const order = [];
     for (let i = 0; i < 3; i++) { ui.key('Tab'); order.push(ui.focused()); }
-    expect(order).toEqual(['select-toggle', 'query', 'select-toggle']);
+    expect(order).toEqual(['select-toggle', 'search-in', 'query']);
     expect(ui.mode()).toBe('search');
   });
 
@@ -874,6 +898,9 @@ describe('search UI static contract', () => {
     expect(html).toMatch(/<button id="select-toggle"[^>]*type="button"/);
     expect(html).toMatch(/<button id="close-tabs"[^>]*type="button" hidden/);
     expect(html).toMatch(/<footer id="help" aria-hidden="true">/);
+    expect(html).toMatch(/<button id="search-in"[^>]*type="button" aria-expanded="false" aria-controls="source-menu"/);
+    expect(html).toMatch(/id="source-menu"[^>]*hidden/);
+    expect(html).not.toMatch(/source-chip/);
   });
   it('loads no network resources and uses no unsafe DOM or cross-window APIs', () => {
     expect(html).not.toMatch(/(src|href)="(https?:)?\/\//);
@@ -1015,5 +1042,439 @@ describe('release input regressions', () => {
     expect(checkedIds(ui)).toHaveLength(3);
     ui.$('query').focus();
     expect(ui.key('a', modifiers).defaultPrevented).toBe(false);
+  });
+});
+describe('mixed-source search (0.5.0)', () => {
+  const sourceCalls = ui => commands(ui.sendMessage).filter(msg => msg.command === 'querySearchSources');
+  const hist = (url, title = 'Old page') => ({ url, title, lastVisitTime: 5 });
+  const reply = ({ history = [], content = [], content: _c, ...rest } = {}) => msg => ({
+    history: msg.sources.history ? history : [],
+    content: msg.sources.content ? content : [],
+    coverage: {
+      history: msg.sources.history ? { state: 'ready', limited: false } : { state: 'off' },
+      content: msg.sources.content ? { state: 'ready', searched: 2, total: 3, skipped: 0, truncated: 0 } : { state: 'off' },
+      ...rest.coverage,
+    },
+    incognito: false,
+  });
+  const archive = [hist('https://docs.example/plan', 'Duplicate of open tab'), hist('https://old.example/r', 'Roadmap archive'), hist('https://old.example/r', 'Roadmap archive')];
+  const withHistory = async (options = {}) => {
+    const ui = await ready({ sources: reply({ history: archive }), ...options });
+    ui.toggleSource('source-history', true);
+    ui.type('road');
+    vi.advanceTimersByTime(250); await settle();
+    return ui;
+  };
+
+  it('starts with only open tabs, sends nothing until an extra is chosen, then debounces', async () => {
+    const ui = await ready({ sources: reply({ history: archive }) });
+    expect(ui.$('source-history').checked).toBe(false);
+    expect(ui.$('source-content').checked).toBe(false);
+    expect(ui.$('palette').dataset.sources).toBe('tabs');
+    ui.type('road'); vi.advanceTimersByTime(1000); await settle();
+    expect(sourceCalls(ui)).toHaveLength(0);
+    ui.toggleSource('source-history', true);
+    vi.advanceTimersByTime(0); await settle();
+    expect(sourceCalls(ui)).toEqual([{ command: 'querySearchSources', token: 'good', query: 'road', sources: { history: true, content: false } }]);
+    expect(ui.$('palette').dataset.sources).toBe('tabs history');
+    ui.type('roa'); ui.type('road map');
+    expect(ids(ui)).toEqual([3]); // Open-tab matches never wait for sources.
+    expect(ui.$('source-status').textContent).toBe('Searching history…');
+    vi.advanceTimersByTime(249); await settle();
+    expect(sourceCalls(ui)).toHaveLength(1);
+    vi.advanceTimersByTime(1); await settle();
+    expect(sourceCalls(ui).map(msg => msg.query)).toEqual(['road', 'road map']);
+    expect(ui.$('query').value).toBe('road map');
+  });
+
+  it('lists open tabs first, then a labelled, deduplicated History group without close buttons', async () => {
+    const ui = await withHistory();
+    expect(ids(ui)).toEqual([3, 'https://old.example/r']);
+    const groups = ui.$('results').children;
+    expect(groups.map(g => [g.getAttribute('role'), g.getAttribute('aria-label')])).toEqual([['rowgroup', 'Open tabs'], ['rowgroup', 'History']]);
+    expect(groups.map(g => [g.children[0].textContent, g.children[0].getAttribute('aria-hidden'), g.children[0].hidden])).toEqual([['Open tabs', 'true', false], ['History', 'true', false]]);
+    expect(ui.$('results').getAttribute('aria-rowcount')).toBe('2');
+    expect(ui.$('result-count').textContent).toBe('1 tab · 1 history');
+    const history = ui.rows()[1];
+    expect(history.textContent).toBe('ORoadmap archiveHistoryhttps://old.example/r');
+    expect(history.getAttribute('aria-rowindex')).toBe('2');
+    expect(history.children[1].getAttribute('role')).toBe('gridcell');
+    expect(history.children[1].children).toHaveLength(0);
+    expect(ui.$('enter-search').textContent).toBe('Switch');
+    ui.key('ArrowDown');
+    expect(ui.$('query').getAttribute('aria-activedescendant')).toBe('option-1');
+    expect(ui.$('enter-search').textContent).toBe('Open page');
+    ui.key('Enter'); await settle();
+    expect(commands(ui.sendMessage).at(-1)).toEqual({ command: 'activateHistoryResult', token: 'good', url: 'https://old.example/r' });
+  });
+
+  it('opens a clicked history row and never offers it for closing or selection', async () => {
+    const ui = await withHistory();
+    ui.keys('Tab', 'j');
+    expect(ui.$('enter-tabs').textContent).toBe('Open page');
+    ui.keys('x', 'Delete', 'Backspace'); await settle();
+    expect(closes(ui)).toHaveLength(0);
+    expect(ui.rows()).toHaveLength(2);
+    ui.key('m');
+    expect(ids(ui)).toEqual([3]);
+    expect(ui.$('selection-status').textContent).toBe('0 of 1 selected · Only open tabs can be selected');
+    ui.key('a');
+    expect(ui.$('close-tabs').textContent).toBe('Close 1 tab');
+    ui.key('Escape');
+    expect(ids(ui)).toEqual([3, 'https://old.example/r']);
+    ui.click(ui.option(1).children[1]); await settle();
+    expect(commands(ui.sendMessage).at(-1)).toEqual({ command: 'activateHistoryResult', token: 'good', url: 'https://old.example/r' });
+    expect(closes(ui)).toHaveLength(0);
+  });
+
+  it('discards stale responses and keeps the highlighted item as results arrive', async () => {
+    const pending = [];
+    const ui = await ready({ sources: msg => new Promise(resolve => pending.push({ msg, resolve })) });
+    ui.toggleSource('source-history', true);
+    ui.type('e'); vi.advanceTimersByTime(250); await settle();
+    ui.type('ex'); vi.advanceTimersByTime(250); await settle();
+    // The superseded scan is told to stop while the next query waits out its debounce.
+    expect(pending.map(p => p.msg.query)).toEqual(['e', '', 'ex']);
+    const [first, , second] = pending;
+    first.resolve(reply({ history: [hist('https://stale.example')] })(first.msg)); await settle();
+    expect(ids(ui)).not.toContain('https://stale.example');
+    ui.key('ArrowDown');
+    const before = activeId(ui);
+    second.resolve(reply({ history: [hist('https://a.example/x', 'A example')] })(second.msg)); await settle();
+    expect(ids(ui).at(-1)).toBe('https://a.example/x');
+    expect(activeId(ui)).toBe(before);
+  });
+
+  const held = options => {
+    const pending = [];
+    const sources = msg => new Promise(resolve => pending.push({ msg, resolve }));
+    return { pending, options: { sources, ...options } };
+  };
+  const cancel = { command: 'querySearchSources', token: 'good', query: '', sources: { history: false, content: false } };
+  // Content matches carry the URL the tab had when it was read.
+  const urls = new Map([...context().tabs, ...amazon().tabs].map(tab => [tab.id, tab.url]));
+  const planContent = tabIds => tabIds.map(tabId => ({ tabId, url: urls.get(tabId), snippet: `plan amazon ${tabId}` }));
+
+  it('does not arm a different row when a late source drops a content-only highlight', async () => {
+    const { pending, options } = held({ initial: context({ contentPermission: true }) });
+    const ui = await ready(options);
+    ui.toggleSource('source-content', true);
+    ui.type('plan'); vi.advanceTimersByTime(250); await settle();
+    pending[0].resolve(reply({ content: planContent([1, 2]) })(pending[0].msg)); await settle();
+    expect(ids(ui)).toEqual([3, 1, 2]);
+    ui.keys('Tab', 'j');
+    expect(activeId(ui)).toBe(1); // Listed only for its contents.
+    // An unrelated tab opens; the fresh content scan no longer matches tab 1.
+    ui.contexts.good = context({ contentPermission: true, tabs: [...context().tabs, { id: 4, windowId: 10, title: 'Weather', url: 'https://weather.example', lastAccessed: 1 }] });
+    ui.tabEvents.onCreated.fn(); await settle();
+    vi.advanceTimersByTime(250); await settle();
+    pending.at(-1).resolve(reply({ content: planContent([2]) })(pending.at(-1).msg)); await settle();
+    expect(ids(ui)).toEqual([3, 2]);
+    expect(activeId(ui)).toBe(2);
+    ui.key('x'); await settle();
+    expect(closes(ui)).toHaveLength(0);
+    ui.keys('k', 'j', 'x'); await settle();
+    expect(closes(ui).map(msg => msg.tabIds)).toEqual([[2]]);
+  });
+
+  it('moves a focused row X to the list, not a neighbor, when a late source drops its row', async () => {
+    const { pending, options } = held({ initial: context({ contentPermission: true }) });
+    const ui = await ready(options);
+    ui.toggleSource('source-content', true);
+    ui.type('plan'); vi.advanceTimersByTime(250); await settle();
+    pending[0].resolve(reply({ content: planContent([1, 2]) })(pending[0].msg)); await settle();
+    ui.keys('Tab', 'j', 'Tab');
+    expect(Number(ui.document.activeElement.dataset.closeId)).toBe(1);
+    ui.contexts.good = context({ contentPermission: true, tabs: context().tabs.map(tab => ({ ...tab, title: `${tab.title} ` })) });
+    ui.tabEvents.onCreated.fn(); await settle();
+    vi.advanceTimersByTime(250); await settle();
+    pending.at(-1).resolve(reply({ content: planContent([2]) })(pending.at(-1).msg)); await settle();
+    expect(ui.focused()).toBe('results');
+    ui.keys('x', ' '); await settle();
+    expect(closes(ui)).toHaveLength(0);
+  });
+
+  it('drops a source reply that lands mid-close so queued keys replay on the closed list', async () => {
+    let release;
+    const { pending, options } = held({ initial: { ...amazon(), contentPermission: true }, closeResponse: () => new Promise(resolve => { release = resolve; }) });
+    const ui = await ready(options);
+    ui.toggleSource('source-content', true);
+    ui.type('amazon'); vi.advanceTimersByTime(250); await settle();
+    ui.keys('Tab', 'x', 'j', 'x');
+    expect(closes(ui)).toHaveLength(1);
+    pending[0].resolve(reply({ content: planContent([30]) })(pending[0].msg)); await settle();
+    release({ ok: true, closedIds: [11], skipped: [], failedIds: [] }); await settle();
+    expect(closes(ui).map(msg => msg.tabIds)).toEqual([[11], [13]]);
+    expect(ids(ui)).not.toContain(30);
+    release({ ok: true, closedIds: [13], skipped: [], failedIds: [] }); await settle();
+    expect(ids(ui)).toEqual([12, 14, 15, 16]);
+    vi.advanceTimersByTime(0); await settle();
+    expect(pending.at(-1).msg).toEqual({ command: 'querySearchSources', token: 'good', query: 'amazon', sources: { history: false, content: true } });
+    pending.at(-1).resolve(reply({ content: planContent([30]) })(pending.at(-1).msg)); await settle();
+    expect(ids(ui).at(-1)).toBe(30);
+  });
+
+  it('cancels an in-flight scan once per request with an empty query, never the long text', async () => {
+    const { pending, options } = held();
+    const ui = await ready(options);
+    ui.type('road'); vi.advanceTimersByTime(1000); await settle();
+    ui.type(''); ui.type('roadmap'); await settle();
+    expect(sourceCalls(ui)).toHaveLength(0); // Tabs only: no source calls, no cancels.
+    ui.toggleSource('source-history', true); vi.advanceTimersByTime(0); await settle();
+    const long = 'roadmap '.repeat(40).trim();
+    ui.type(long); ui.type(`${long} x`); await settle();
+    expect(sourceCalls(ui)).toEqual([{ ...cancel, query: 'roadmap', sources: { history: true, content: false } }, cancel]);
+    ui.type('road'); vi.advanceTimersByTime(250); await settle();
+    ui.type(''); ui.type(''); await settle();
+    ui.type('roa'); vi.advanceTimersByTime(250); await settle();
+    ui.toggleSource('source-history', false); await settle();
+    expect(sourceCalls(ui).map(msg => msg.query)).toEqual(['roadmap', '', 'road', '', 'roa', '']);
+    expect(sourceCalls(ui).every(msg => msg.query.length <= 256)).toBe(true);
+    // Every reply, cancels included, now arrives; none is shown.
+    for (const { msg, resolve } of pending) resolve(reply({ history: [hist(`https://late.example/${msg.query}`, 'road late')] })({ ...msg, sources: { history: true, content: false } }));
+    await settle();
+    expect(ids(ui)).toEqual([3]);
+    expect(ui.$('source-status').textContent).toBe('');
+  });
+
+  it('drops Contents and every snippet when a reply reports website access is gone', async () => {
+    const coverage = { content: { state: 'permission' } };
+    const ui = await ready({ initial: context({ contentPermission: true }), sources: reply({ content: planContent([1, 2]), coverage }) });
+    ui.toggleSource('source-content', true);
+    ui.type('plan'); vi.advanceTimersByTime(250); await settle();
+    expect(ids(ui)).toEqual([3]);
+    expect(ui.$('results').textContent).not.toContain('plan 1');
+    expect(ui.$('source-content').checked).toBe(false);
+    expect(ui.$('source-content').disabled).toBe(true);
+    expect(ui.$('content-access-note').hidden).toBe(false);
+    expect(ui.$('enable-content').hidden).toBe(false);
+    vi.advanceTimersByTime(1000); await settle();
+    expect(sourceCalls(ui)).toHaveLength(1);
+  });
+
+  it('clears a source the moment it is turned off, ignoring its in-flight reply, and closing never waits', async () => {
+    let release;
+    let calls = 0;
+    const ui = await withHistory({ sources: msg => ++calls === 1 ? reply({ history: archive })(msg) : new Promise(resolve => { release = () => resolve(reply({ history: archive })(msg)); }) });
+    expect(ui.rows()).toHaveLength(2);
+    ui.type('roadm'); vi.advanceTimersByTime(250); await settle();
+    ui.keys('Tab', 'x'); await settle(); // Closes Roadmap while history is still loading.
+    expect(closes(ui).map(msg => msg.tabIds)).toEqual([[3]]);
+    ui.toggleSource('source-history', false);
+    expect(ui.rows()).toHaveLength(0);
+    release(); await settle();
+    expect(ui.rows()).toHaveLength(0);
+    expect(ui.$('query').value).toBe('roadm');
+    expect(ui.$('source-status').textContent).toBe('');
+  });
+
+  it('asks for website access only through Settings and still needs an explicit Contents choice', async () => {
+    const ui = await ready();
+    expect(ui.$('source-content').disabled).toBe(true);
+    expect(ui.$('enable-content').hidden).toBe(false);
+    expect(ui.$('content-access-note').hidden).toBe(false);
+    ui.$('enable-content').dispatch('click'); await settle();
+    expect(commands(ui.sendMessage).at(-1)).toEqual({ command: 'openSearchPermissions', token: 'good' });
+    ui.contexts.good = context({ contentPermission: true });
+    ui.window.dispatch('focus'); await settle();
+    expect(ui.$('source-content').disabled).toBe(false);
+    expect(ui.$('source-content').checked).toBe(false);
+    expect(ui.$('enable-content').hidden).toBe(true);
+    expect(sourceCalls(ui)).toHaveLength(0);
+    expect(js).not.toMatch(/permissions\s*\.\s*request|localStorage|storage\.(local|sync|session)/);
+  });
+
+  it('adds snippets to content matches, reports coverage, and never resurrects a closed tab', async () => {
+    const content = [{ tabId: 1, url: 'https://current.example', snippet: 'quarterly <b>plan</b> notes' }, { tabId: 2, url: 'https://www.evil.example/<b>', snippet: 'plan' }];
+    const coverage = { content: { state: 'ready', searched: 2, total: 3, skipped: 1, truncated: 1 } };
+    const ui = await ready({ initial: context({ contentPermission: true }), sources: reply({ content, coverage }) });
+    ui.toggleSource('source-content', true);
+    expect(ui.$('source-status').textContent).toBe('Type to search contents');
+    expect(sourceCalls(ui)).toHaveLength(0);
+    ui.type('plan'); vi.advanceTimersByTime(250); await settle();
+    expect(ids(ui)).toEqual([3, 1, 2]);
+    expect(ui.rows()[1].children[0].children[1].children[2].textContent).toBe('quarterly <b>plan</b> notes');
+    expect(ui.rows()[0].children[0].children[1].children).toHaveLength(2); // No snippet line without a content match.
+    expect(ui.$('source-status').textContent).toBe('Contents: 2 of 3 tabs searched · Main pages only · 1 skipped · 1 long page partly searched');
+    ui.keys('Tab', 'j', 'j', 'x'); await settle();
+    expect(closes(ui).map(msg => msg.tabIds)).toEqual([[2]]);
+    vi.advanceTimersByTime(0); await settle();
+    expect(sourceCalls(ui)).toHaveLength(2); // One refresh after the close settled.
+    expect(ids(ui)).toEqual([3, 1]);
+    vi.advanceTimersByTime(5000); await settle();
+    expect(sourceCalls(ui)).toHaveLength(2);
+  });
+
+  it('keeps history off in private windows and reports unavailable sources', async () => {
+    const ui = await ready({ initial: context({ incognito: true, contentPermission: true }), sources: () => Promise.reject(new Error('down')) });
+    expect(ui.$('source-history').disabled).toBe(true);
+    expect(ui.$('history-private-note').hidden).toBe(false);
+    ui.toggleSource('source-history', true);
+    expect(ui.$('source-history').checked).toBe(false);
+    ui.toggleSource('source-content', true);
+    ui.type('plan'); vi.advanceTimersByTime(250); await settle();
+    expect(sourceCalls(ui).map(msg => msg.sources)).toEqual([{ history: false, content: true }]);
+    expect(ui.$('source-status').textContent).toBe('Contents: unavailable');
+    expect(ids(ui)).toEqual([3]);
+  });
+
+  it('does not rerun source searches on unchanged Firefox polls', async () => {
+    const ui = await ready({ noTabsApi: true, initial: context({ contentPermission: true }), sources: reply({ content: [] }) });
+    ui.toggleSource('source-content', true);
+    ui.type('plan'); vi.advanceTimersByTime(250); await settle();
+    for (let i = 0; i < 3; i++) {
+      // Focus times change on every poll; the open pages do not.
+      ui.contexts.good = context({ contentPermission: true, tabs: context().tabs.map(tab => ({ ...tab, lastAccessed: tab.lastAccessed + i + 1 })) });
+      vi.advanceTimersByTime(1000); await settle();
+      expect(ui.$('source-status').dataset.busy).toBe('false');
+    }
+    expect(sourceCalls(ui)).toHaveLength(1);
+    ui.contexts.good = context({ contentPermission: true, tabs: [...context().tabs, { id: 4, windowId: 10, title: 'Plan B', url: 'https://b.example/plan', lastAccessed: 1 }] });
+    vi.advanceTimersByTime(1000); await settle();
+    vi.advanceTimersByTime(250); await settle();
+    expect(sourceCalls(ui)).toHaveLength(2); // A page actually opened.
+  });
+});
+
+describe('Search in menu', () => {
+  const sourceCalls = ui => commands(ui.sendMessage).filter(msg => msg.command === 'querySearchSources');
+  const reply = ({ history = [] } = {}) => msg => ({
+    history: msg.sources.history ? history : [],
+    content: [],
+    coverage: {
+      history: msg.sources.history ? { state: 'ready', limited: false } : { state: 'off' },
+      content: msg.sources.content ? { state: 'ready', searched: 3, total: 3, skipped: 0, truncated: 0 } : { state: 'off' },
+    },
+  });
+  const archive = [{ url: 'https://old.example/r', title: 'Roadmap archive', lastVisitTime: 5 }];
+  const open = ui => ui.$('search-in').dispatch('click');
+  const menuShown = ui => !ui.$('source-menu').hidden && ui.$('search-in').getAttribute('aria-expanded') === 'true';
+
+  it('is one closed trigger on launch, with notes only inside the menu', async () => {
+    const ui = await ready({ initial: context({ incognito: true }) });
+    expect(menuShown(ui)).toBe(false);
+    expect(ui.$('source-summary').textContent).toBe('');
+    expect(ui.$('source-status').textContent).toBe('');
+    expect(ui.$('source-menu').contains(ui.$('history-private-note'))).toBe(true);
+    expect(ui.$('source-menu').contains(ui.$('content-access-note'))).toBe(true);
+    expect(ui.$('source-menu').contains(ui.$('enable-content'))).toBe(true);
+    expect(ui.$('source-history').getAttribute('aria-describedby')).toBe('history-private-note');
+    const spoken = [ui.$('announcement').textContent, ui.$('source-status').textContent];
+    open(ui);
+    expect(menuShown(ui)).toBe(true);
+    expect([ui.$('announcement').textContent, ui.$('source-status').textContent]).toEqual(spoken); // Opening announces nothing.
+    expect(sourceCalls(ui)).toHaveLength(0);
+  });
+
+  it('toggles sources in place, keeps the query, and summarizes them on the closed trigger', async () => {
+    const ui = await ready({ initial: context({ contentPermission: true }), sources: reply({ history: archive }) });
+    ui.type('road');
+    open(ui);
+    ui.$('source-history').checked = true; ui.$('source-history').dispatch('change');
+    expect(menuShown(ui)).toBe(true);
+    expect(ui.$('query').value).toBe('road');
+    expect(ui.$('source-summary').textContent).toBe('+ History');
+    ui.$('source-content').checked = true; ui.$('source-content').dispatch('change');
+    expect(ui.$('source-summary').textContent).toBe('+ History · Contents');
+    ui.$('source-history').checked = false; ui.$('source-history').dispatch('change');
+    expect(ui.$('source-summary').textContent).toBe('+ Contents');
+    expect(ui.$('source-history').getAttribute('aria-describedby')).toBeNull();
+    ui.$('search-in').dispatch('click');
+    expect(menuShown(ui)).toBe(false);
+    expect(ui.$('query').value).toBe('road');
+  });
+
+  it('keeps Tab inside the open menu, and Escape closes it first without changing mode', async () => {
+    const ui = await ready();
+    ui.keys('Tab', 'Tab', 'Tab', 'Tab');
+    expect(ui.focused()).toBe('search-in');
+    expect(ui.mode()).toBe('tabs');
+    open(ui);
+    const walk = Array.from({ length: 3 }, () => { ui.key('Tab'); return ui.focused(); });
+    expect(walk).toEqual(['source-history', 'enable-content', 'search-in']); // Contents is disabled here.
+    ui.key('Tab', { shiftKey: true });
+    expect(ui.focused()).toBe('enable-content');
+    ui.$('source-history').focus();
+    for (const name of ['m', 'x', 'a', ' ', 'Enter']) expect(ui.key(name).defaultPrevented).toBe(false); // Native checkbox keys.
+    expect(ui.mode()).toBe('tabs');
+    ui.key('Escape');
+    expect(menuShown(ui)).toBe(false);
+    expect(ui.focused()).toBe('search-in');
+    expect(ui.mode()).toBe('tabs');
+    expect(ui.parent.postMessage).not.toHaveBeenCalled();
+    ui.key('Tab');
+    expect(ui.focused()).toBe('query');
+    await flush();
+    expect(closes(ui)).toEqual([]);
+  });
+
+  it('closes on an outside press inside the palette, but not on presses within the menu', async () => {
+    const ui = await ready();
+    open(ui);
+    ui.$('palette').dispatch('mousedown', { target: ui.$('source-history') });
+    expect(menuShown(ui)).toBe(true);
+    ui.$('palette').dispatch('mousedown', { target: ui.option(0) });
+    expect(menuShown(ui)).toBe(false);
+  });
+
+  it('never truncates a long query: tabs still match, sources wait with a notice', async () => {
+    const ui = await ready({ sources: reply({ history: archive }) });
+    ui.toggleSource('source-history', true);
+    const exact = `road${' '.repeat(251)}r`; // 256 characters.
+    ui.type(exact); vi.advanceTimersByTime(250); await settle();
+    expect(sourceCalls(ui).at(-1).query).toBe(exact);
+    const long = 'roadmap '.repeat(40).trim();
+    ui.type(long); vi.advanceTimersByTime(1000); await settle();
+    expect(sourceCalls(ui)).toHaveLength(1);
+    expect(ids(ui)).toEqual([3]);
+    expect(ui.$('source-status').textContent).toBe('History and contents support queries up to 256 characters');
+    expect(ui.$('source-status').dataset.busy).toBe('false');
+  });
+
+  it('drops a revoked source, returns focus to the trigger, and keeps the query', async () => {
+    const ui = await ready({ initial: context({ contentPermission: true }), sources: reply() });
+    ui.type('plan');
+    open(ui);
+    ui.$('source-content').checked = true; ui.$('source-content').dispatch('change');
+    ui.$('source-content').focus();
+    ui.contexts.good = context({ contentPermission: false });
+    ui.tabEvents.onRemoved.fn(); await settle();
+    expect(ui.$('source-content').checked).toBe(false);
+    expect(ui.$('source-content').disabled).toBe(true);
+    expect(ui.focused()).toBe('search-in');
+    expect(ui.$('source-summary').textContent).toBe('');
+    expect(ui.$('source-status').textContent).toBe('');
+    expect(ui.$('enable-content').hidden).toBe(false);
+    expect(ui.$('query').value).toBe('plan');
+  });
+
+  it('cancels queued j/x keys when a source changes mid-close', async () => {
+    let release;
+    const ui = await ready({ initial: amazon(), sources: reply(), closeResponse: () => new Promise(resolve => { release = resolve; }) });
+    ui.type('amazon');
+    ui.keys('Tab', 'x', 'j', 'x');
+    expect(closes(ui)).toHaveLength(1);
+    ui.toggleSource('source-history', true);
+    release({ ok: true, closedIds: [11], skipped: [], failedIds: [] }); await settle();
+    await settle();
+    expect(closes(ui)).toHaveLength(1);
+  });
+
+  it('ignores m with only history listed, and leaving select restores a history highlight', async () => {
+    const ui = await ready({ sources: reply({ history: [...archive, { url: 'https://old.example/plan', title: 'Plan archive', lastVisitTime: 4 }] }) });
+    ui.toggleSource('source-history', true);
+    ui.type('archive'); vi.advanceTimersByTime(250); await settle();
+    expect(ids(ui)).toEqual(['https://old.example/r', 'https://old.example/plan']);
+    ui.key('Tab');
+    ui.key('m');
+    expect(ui.mode()).toBe('tabs');
+    ui.type('road'); vi.advanceTimersByTime(250); await settle();
+    expect(ids(ui)).toEqual([3, 'https://old.example/r']);
+    ui.$('query').focus();
+    ui.keys('Tab', 'j', 'm');
+    expect(ui.mode()).toBe('select');
+    expect(ids(ui)).toEqual([3]);
+    ui.key('m');
+    expect(activeId(ui)).toBe('https://old.example/r');
   });
 });
