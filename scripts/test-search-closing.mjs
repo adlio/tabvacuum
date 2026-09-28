@@ -289,6 +289,7 @@ async function mainFlow({ a, t, f, state, press, settle, moveTo, toResults, dism
   for (const keys of [['a'], ['Control_L', 'a']]) {
     s = await press(keys);
     check(inMode(s, 'tabs') && s.checked === 0 && (await a.removed()).length === 0, `closing: ${keys.join('+')} in the tab menu selects nothing`, brief(s));
+    check(await a.ui('return String(window.getSelection()) === "";'), `closing: ${keys.join('+')} in the tab menu does not highlight page text`);
   }
   s = await press(['m']);
   check(s.focus === 'results' && inMode(s, 'select') && s.checked === 0 && s.close === 'Close 0 tabs' && s.status === '0 of 5 selected',

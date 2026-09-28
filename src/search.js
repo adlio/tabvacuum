@@ -468,7 +468,9 @@ export function startSearch({ document, window, browser }) {
     const plain = !event.ctrlKey && !event.metaKey && !event.altKey;
     if (busy && plain) {
       event.preventDefault();
-      if (event.repeat) return;
+      // Only a close owns a replay queue. A failed activation must not leave
+      // destructive keystrokes waiting for an unrelated later close.
+      if (!closing || event.repeat) return;
       if (name in MOVES || ['x', 'Delete', 'Backspace'].includes(name)) {
         if (pendingListKeys.length < MAX_PENDING_KEYS) pendingListKeys.push({ key: name, mode, query: query.value });
         else {
@@ -482,6 +484,10 @@ export function startSearch({ document, window, browser }) {
     }
     // Plain A, or the platform's select-all chord as an alias.
     const chord = mac ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey;
+    if (!selecting && name === 'a' && chord && !event.altKey && !event.shiftKey) {
+      event.preventDefault(); // Do not select the palette's page text in tab-menu mode.
+      return;
+    }
     if (selecting && name === 'a' && !event.altKey && !event.shiftKey && (plain || chord)) {
       event.preventDefault();
       if (!event.repeat) checkAll();

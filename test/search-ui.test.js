@@ -989,3 +989,31 @@ describe('three-mode async and focus safeguards', () => {
     expect(ui.mode()).toBe('tabs');
   });
 });
+
+describe('release input regressions', () => {
+  it('never replays a close key pressed during a failed activation', async () => {
+    const ui = await ready();
+    const original = ui.sendMessage.getMockImplementation();
+    let rejectActivation;
+    ui.sendMessage.mockImplementation(msg => msg.command === 'activateSearchTab'
+      ? new Promise((_, reject) => { rejectActivation = reject; }) : original(msg));
+    ui.keys('Tab', 'Enter', 'x');
+    rejectActivation(new Error('Tab switch failed')); await settle();
+    expect(closes(ui)).toHaveLength(0);
+    ui.keys('j', 'x'); await settle();
+    expect(closes(ui).map(msg => msg.tabIds)).toEqual([[3]]);
+  });
+
+  it.each(['mac', 'linux'])('Select All in the %s tab menu neither checks tabs nor selects page text', async os => {
+    const ui = await ready({ platformInfo: async () => ({ os }) });
+    ui.key('Tab');
+    const modifiers = os === 'mac' ? { metaKey: true } : { ctrlKey: true };
+    expect(ui.key('a', modifiers).defaultPrevented).toBe(true);
+    expect(checkedIds(ui)).toEqual([]);
+    ui.key('m');
+    expect(ui.key('a', modifiers).defaultPrevented).toBe(true);
+    expect(checkedIds(ui)).toHaveLength(3);
+    ui.$('query').focus();
+    expect(ui.key('a', modifiers).defaultPrevented).toBe(false);
+  });
+});
