@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createSearchService } from '../src/search-service.js';
 import { createSearchLauncher, placement, newToken, UNCLAIMED_MS, SESSION_MS } from '../src/search-launcher.js';
 import { mountSearchOverlay } from '../src/search-overlay.js';
+import { searchPageContent } from '../src/search-content.js';
 
 const EXT = 'tabvacuum@adlio';
 const BASE = 'moz-extension://uuid/';
@@ -117,7 +118,8 @@ describe('overlay launch', () => {
     expect(context.windowId).toBe(10);
     expect(context.currentTabId).toBe(1);
     expect(context.tabs.map(t => t.id)).toEqual([1, 2, 4]); // No private tab 3.
-    expect(Object.keys(context).sort()).toEqual(['currentTabId', 'tabs', 'windowId']);
+    expect(Object.keys(context).sort()).toEqual(['contentPermission', 'currentTabId', 'incognito', 'tabs', 'windowId']);
+    expect(context).toMatchObject({ incognito: false, contentPermission: false }); // No permissions API: false.
   });
 
   it('launches from the active tab of the last-focused window when none is given', async () => {
@@ -920,5 +922,248 @@ describe('background routing for search closing', () => {
     const reply = await new Promise(resolve => listener({ command: 'closeSearchTabs', token: 'A'.repeat(43), tabIds: [2] }, page(), resolve));
     expect(reply).toHaveProperty('error');
     expect(api.tabs.remove).not.toHaveBeenCalled();
+  });
+});
+
+describe('expanded search sources', () => {
+  function sourcesSetup({ permission = true } = {}) {
+    const env = setup();
+    const { api, tabs } = env;
+    api.permissions = { contains: vi.fn(async () => permission) };
+    api.history = { search: vi.fn(async ({ text }) => [{ url: 'https://h.test/p?q=1#f', title: `H ${text}`, lastVisitTime: 5 }]) };
+    api.runtime.openOptionsPage = vi.fn(async () => {});
+    api.tabs.create = vi.fn(async () => ({ id: 77 }));
+    const overlayExecute = api.scripting.executeScript.getMockImplementation();
+    env.pageScan = vi.fn(async ({ target }) => {
+      const tab = tabs.find(t => t.id === target.tabId);
+      return [{ result: { url: tab.url, match: true, snippet: `in ${tab.title}`, truncated: false } }];
+    });
+    api.scripting.executeScript.mockImplementation(call =>
+      (call.func === searchPageContent ? env.pageScan(call) : overlayExecute(call)));
+    const scans = () => api.scripting.executeScript.mock.calls.filter(([c]) => c.func === searchPageContent);
+    return { ...env, scans };
+  }
+  async function open(env, tabId = 1) {
+    await env.launcher.launch(await env.api.tabs.get(tabId));
+    return env.lastToken();
+  }
+  const both = { history: true, content: true };
+  const privateFrame = () => frame({ tab: { id: 3, windowId: 30, incognito: true } });
+
+  it('reports the host permission in context', async () => {
+    const env = sourcesSetup();
+    const token = await open(env);
+    expect(await env.send({ command: 'getSearchContext', token }, frame())).toMatchObject({ incognito: false, contentPermission: true });
+  });
+
+  it('returns history and page content with consistent coverage', async () => {
+    const env = sourcesSetup();
+    const token = await open(env);
+    const reply = await env.send({ command: 'querySearchSources', token, query: '  report ', sources: both }, frame());
+    expect(reply).toEqual({
+      history: [{ url: 'https://h.test/p?q=1#f', title: 'H report', lastVisitTime: 5 }],
+      content: [
+        { tabId: 1, url: 'https://example.org/', snippet: 'in Origin' },
+        { tabId: 2, url: 'https://other.example/', snippet: 'in Other window' },
+        { tabId: 4, url: 'https://example.org/b', snippet: 'in Background' },
+      ],
+      coverage: {
+        history: { state: 'ready', limited: false },
+        content: { state: 'ready', searched: 3, total: 3, skipped: 0, truncated: 0 },
+      },
+      incognito: false,
+    });
+    expect(env.api.history.search).toHaveBeenCalledWith({ text: 'report', startTime: 0, maxResults: 101 });
+    expect(env.api.history.deleteUrl).toBeUndefined();
+    expect(env.api.storage.session.set.mock.calls.flat().some(item => JSON.stringify(item).includes('report'))).toBe(false);
+  });
+
+  it('honors source toggles', async () => {
+    const env = sourcesSetup();
+    const token = await open(env);
+    const reply = await env.send({ command: 'querySearchSources', token, query: 'x', sources: { history: false, content: false } }, frame());
+    expect(reply.coverage).toEqual({ history: { state: 'off', limited: false },
+      content: { state: 'off', searched: 0, total: 0, skipped: 0, truncated: 0 } });
+    expect(env.api.history.search).not.toHaveBeenCalled();
+    expect(env.scans()).toHaveLength(0);
+  });
+
+  it('does no lookup or injection for an empty query, and rejects an over-long one', async () => {
+    const env = sourcesSetup();
+    const token = await open(env);
+    const reply = await env.send({ command: 'querySearchSources', token, query: ' \t ', sources: both }, frame());
+    expect(reply).toMatchObject({ history: [], content: [] });
+    await expect(env.send({ command: 'querySearchSources', token, query: 'x'.repeat(257), sources: both }, frame())).rejects.toThrow();
+    expect(env.api.history.search).not.toHaveBeenCalled();
+    expect(env.scans()).toHaveLength(0);
+  });
+
+  it('never reads history, or normal pages, from a private search', async () => {
+    const env = sourcesSetup();
+    const token = await open(env, 3);
+    const reply = await env.send({ command: 'querySearchSources', token, query: 'x', sources: both }, privateFrame());
+    expect(reply.incognito).toBe(true);
+    expect(reply.coverage.history).toEqual({ state: 'private', limited: false });
+    expect(reply.content.map(r => r.tabId)).toEqual([3]);
+    expect(env.api.history.search).not.toHaveBeenCalled();
+    expect(env.scans().map(([c]) => c.target.tabId)).toEqual([3]);
+  });
+
+  it('does not read content without the host permission', async () => {
+    const env = sourcesSetup({ permission: false });
+    const token = await open(env);
+    const reply = await env.send({ command: 'querySearchSources', token, query: 'x', sources: both }, frame());
+    expect(reply.coverage.content.state).toBe('permission');
+    expect(reply.content).toEqual([]);
+    expect(env.scans()).toHaveLength(0);
+  });
+
+  it.each([
+    ['forged token', m => ({ ...m, token: 'A'.repeat(43) }), frame()],
+    ['origin page', m => m, page()],
+    ['another frame', m => m, frame({ frameId: 9 })],
+    ['another document', m => m, frame({ documentId: 'doc-other' })],
+  ])('gives no data to a %s', async (_name, change, sender) => {
+    const env = sourcesSetup();
+    const token = await open(env);
+    await env.send({ command: 'getSearchContext', token }, frame()); // Claim first.
+    await expect(env.send(change({ command: 'querySearchSources', token, query: 'x', sources: both }), sender)).rejects.toThrow();
+    expect(env.api.history.search).not.toHaveBeenCalled();
+    expect(env.scans()).toHaveLength(0);
+  });
+
+  it('scans outside the launch queue, then withholds results if the search was revoked meanwhile', async () => {
+    const env = sourcesSetup();
+    const token = await open(env);
+    const releases = [];
+    const release = () => releases.forEach(fn => fn());
+    env.pageScan.mockImplementation(({ target }) => new Promise(resolve => {
+      releases.push(() => resolve([{ result: { url: env.tabs.find(t => t.id === target.tabId).url, match: true, snippet: 's' } }]));
+    }));
+    const pending = env.send({ command: 'querySearchSources', token, query: 'x', sources: { content: true } }, frame());
+    await vi.waitFor(() => expect(releases).toHaveLength(3));
+    // The serialized queue is free: dismissal completes while the scan hangs.
+    expect(await env.send({ command: 'dismissSearch', token }, frame())).toEqual({ ok: true });
+    release();
+    await expect(pending).rejects.toThrow(/expired/);
+  });
+
+  it('cancels a superseded query for the same search', async () => {
+    const env = sourcesSetup();
+    const token = await open(env);
+    let release;
+    env.pageScan.mockImplementationOnce(({ target }) => new Promise(resolve => {
+      release = () => resolve([{ result: { url: env.tabs.find(t => t.id === target.tabId).url, match: true, snippet: 'old' } }]);
+    }));
+    const first = env.send({ command: 'querySearchSources', token, query: 'a', sources: { content: true } }, frame());
+    await vi.waitFor(() => expect(env.scans().length).toBeGreaterThan(0));
+    const second = await env.send({ command: 'querySearchSources', token, query: 'ab', sources: { content: true } }, frame());
+    expect(second.content.length).toBeGreaterThan(0);
+    release();
+    await expect(first).rejects.toThrow(/newer search/);
+  });
+
+  // Holds every per-page permission recheck (after the live tab re-read) until released.
+  function holdPageChecks(env) {
+    const waiting = [];
+    env.api.permissions.contains.mockImplementation(async () => {
+      if (env.api.permissions.contains.mock.calls.length === 1) return true; // Up-front check.
+      await new Promise(resolve => waiting.push(resolve));
+      return true;
+    });
+    return { waiting, release: () => waiting.splice(0).forEach(resolve => resolve()) };
+  }
+  const fire = (event, ...args) => event.addListener.mock.calls.forEach(([listener]) => listener(...args));
+
+  it.each([
+    ['dismissal', env => env.send({ command: 'dismissSearch', token: env.token }, frame())],
+    ['activation', env => env.send({ command: 'activateSearchTab', token: env.token, tabId: 2 }, frame())],
+    ['a replacement launch', async env => env.launcher.launch(await env.api.tabs.get(1))],
+    ['closing the origin tab', env => fire(env.api.tabs.onRemoved, 1, {})],
+    ['origin navigation', env => fire(env.api.tabs.onUpdated, 1, { status: 'loading' })],
+  ])('stops a scan on %s without waiting for it, injecting nothing further', async (_name, end) => {
+    const env = sourcesSetup();
+    env.token = await open(env);
+    const held = holdPageChecks(env);
+    const pending = env.send({ command: 'querySearchSources', token: env.token, query: 'x', sources: { content: true } }, frame());
+    pending.catch(() => {});
+    await vi.waitFor(() => expect(held.waiting).toHaveLength(3));
+    await end(env); // Completes while every page task is still waiting.
+    await vi.waitFor(() => expect(env.stored()[env.token]).toBeUndefined());
+    held.release();
+    await expect(pending).rejects.toThrow(/expired/);
+    expect(env.scans()).toHaveLength(0);
+  });
+
+  it('cancels a prior scan when content is switched off, injecting nothing further', async () => {
+    const env = sourcesSetup();
+    const token = await open(env);
+    const held = holdPageChecks(env);
+    const first = env.send({ command: 'querySearchSources', token, query: 'x', sources: { content: true } }, frame());
+    await vi.waitFor(() => expect(held.waiting).toHaveLength(3));
+    const off = await env.send({ command: 'querySearchSources', token, query: '', sources: { history: false, content: false } }, frame());
+    expect(off.content).toEqual([]);
+    held.release();
+    await expect(first).rejects.toThrow(/newer search/);
+    expect(env.scans()).toHaveLength(0);
+    expect(Object.keys(env.stored())).toEqual([token]); // The search itself stays open.
+  });
+
+  it('returns no snippets when website access is removed while a scan is in flight', async () => {
+    const env = sourcesSetup();
+    const token = await open(env);
+    const releases = [];
+    env.pageScan.mockImplementation(({ target }) => new Promise(resolve => {
+      releases.push(() => resolve([{ result: { url: env.tabs.find(t => t.id === target.tabId).url, match: true, snippet: 'secret' } }]));
+    }));
+    const pending = env.send({ command: 'querySearchSources', token, query: 'x', sources: { content: true } }, frame());
+    await vi.waitFor(() => expect(releases).toHaveLength(3));
+    env.api.permissions.contains.mockResolvedValue(false);
+    releases.forEach(fn => fn());
+    const reply = await pending;
+    expect(reply.content).toEqual([]);
+    expect(reply.coverage.content).toEqual({ state: 'permission', searched: 0, total: 0, skipped: 0, truncated: 0 });
+    expect(JSON.stringify(reply)).not.toContain('secret');
+  });
+
+  it('opens a history result in the origin window, then revokes the search', async () => {
+    const env = sourcesSetup();
+    const token = await open(env);
+    const url = 'https://h.test/p?q=1#f';
+    expect(await env.send({ command: 'activateHistoryResult', token, url }, frame())).toEqual({ ok: true });
+    expect(env.api.history.search).toHaveBeenCalledWith(expect.objectContaining({ text: url, startTime: 0 }));
+    expect(env.api.tabs.create).toHaveBeenCalledWith({ url, windowId: 10, active: true });
+    expect(env.api.tabs.sendMessage).toHaveBeenCalledWith(1, expect.objectContaining({ type: 'tabvacuum:close' }), { frameId: 0 });
+    expect(env.stored()).toEqual({});
+    await expect(env.send({ command: 'activateHistoryResult', token, url }, frame())).rejects.toThrow();
+    expect(env.api.tabs.create).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['javascript:alert(1)', 'file:///etc/passwd', 'https://u:p@h.test/', 'moz-extension://uuid/options.html',
+    'https://not-in-history.test/', 'https://h.test/p?q=1'])('refuses to open %s', async url => {
+    const env = sourcesSetup();
+    const token = await open(env);
+    await expect(env.send({ command: 'activateHistoryResult', token, url }, frame())).rejects.toThrow();
+    expect(env.api.tabs.create).not.toHaveBeenCalled();
+    expect(Object.keys(env.stored())).toEqual([token]); // Still usable.
+  });
+
+  it('refuses private history activation before reading history', async () => {
+    const env = sourcesSetup();
+    const token = await open(env, 3);
+    await expect(env.send({ command: 'activateHistoryResult', token, url: 'https://h.test/p?q=1#f' }, privateFrame())).rejects.toThrow();
+    expect(env.api.history.search).not.toHaveBeenCalled();
+    expect(env.api.tabs.create).not.toHaveBeenCalled();
+  });
+
+  it('opens the options page for an authorized frame only, keeping the search open', async () => {
+    const env = sourcesSetup();
+    const token = await open(env);
+    await expect(env.send({ command: 'openSearchPermissions', token }, page())).rejects.toThrow();
+    expect(env.api.runtime.openOptionsPage).not.toHaveBeenCalled();
+    expect(await env.send({ command: 'openSearchPermissions', token }, frame())).toEqual({ ok: true });
+    expect(env.api.runtime.openOptionsPage).toHaveBeenCalledTimes(1);
+    expect(env.api.permissions.request).toBeUndefined();
+    expect(Object.keys(env.stored())).toEqual([token]);
   });
 });

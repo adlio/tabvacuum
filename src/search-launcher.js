@@ -4,6 +4,7 @@
 // first valid claim binds it to that frame. Sessions live in storage.session
 // so they survive worker suspension, and expire.
 import { mountSearchOverlay } from './search-overlay.js';
+import { normalizeQuery, normalizeSources } from './search-sources-core.js';
 
 const TOKEN = /^[A-Za-z0-9_-]{43}$/;
 export const UNCLAIMED_MS = 60_000;
@@ -57,7 +58,19 @@ export function createSearchLauncher(api, search, {
     }
     return sessions;
   }
-  const save = sessions => api.storage.session.set({ [SESSIONS]: sessions });
+  // Latest in-flight source query per search id. Every path that ends a search
+  // (dismiss, activate, relaunch, tab close, navigation, expiry) saves the
+  // sessions without it, so save() is the one place that aborts its scan.
+  const sourceQueries = new Map();
+  const save = sessions => {
+    const live = new Set(Object.values(sessions).map(session => session.id));
+    for (const [id, controller] of sourceQueries) {
+      if (live.has(id)) continue;
+      sourceQueries.delete(id);
+      controller.abort(denied());
+    }
+    return api.storage.session.set({ [SESSIONS]: sessions });
+  };
 
   const closeOverlay = session =>
     api.tabs.sendMessage(session.originTabId, { type: 'tabvacuum:close', id: session.id }, { frameId: 0 }).catch(() => {});
@@ -254,7 +267,81 @@ export function createSearchLauncher(api, search, {
     return result;
   }
 
-  const handlers = { getSearchContext, activateSearchTab, dismissSearch, closeSearchTabs };
+  // History result: opened (or focused) only if still in history. Single use, like a tab.
+  async function activateHistoryResult(message, sender) {
+    const { token, session, sessions } = await authorize(message, sender);
+    if (session.incognito) throw new Error('History is not searched in private windows.');
+    const origin = await originOf(session);
+    await search.activateHistory(message.url, origin.windowId);
+    delete sessions[token];
+    await save(sessions);
+    await closeUi(session);
+    return { ok: true };
+  }
+
+  // Shows the options page, where the user can grant access. Grants nothing itself.
+  async function openSearchPermissions(message, sender) {
+    await authorize(message, sender);
+    await api.runtime.openOptionsPage();
+    return { ok: true };
+  }
+
+  const superseded = () => new Error('A newer search replaced this one.');
+  const noContentPermission = () => ({ results: [],
+    coverage: { state: 'permission', searched: 0, total: 0, skipped: 0, truncated: 0 } });
+
+  // Authorizes and snapshots inside the serialized queue, scans outside it so
+  // slow pages never delay launch/close, then re-authorizes before answering.
+  async function querySearchSources(message, sender) {
+    const query = normalizeQuery(message.query);
+    const sources = normalizeSources(message.sources);
+    const snapshot = await serial(async () => {
+      const { session } = await authorize(message, sender);
+      const origin = await originOf(session);
+      // Registered inside the queue, so any later save() that ends this search aborts it.
+      sourceQueries.get(session.id)?.abort(superseded());
+      const controller = new AbortController();
+      sourceQueries.set(session.id, controller);
+      return { id: session.id, incognito: session.incognito, windowId: origin.windowId, controller };
+    });
+    const { controller } = snapshot;
+    const { signal } = controller;
+    try {
+      const off = { history: { state: 'off', limited: false },
+        content: { state: 'off', searched: 0, total: 0, skipped: 0, truncated: 0 } };
+      const [history, scanned] = await Promise.all([
+        sources.history ? search.searchHistory(query, snapshot.windowId) : { results: [], coverage: off.history },
+        sources.content ? search.searchContent(query, snapshot.windowId, { signal })
+          : { results: [], coverage: off.content },
+      ]);
+      let content = scanned;
+      if (signal.aborted) throw signal.reason;
+      await serial(async () => {
+        const { session } = await authorize(message, sender);
+        const origin = await originOf(session);
+        if (session.id !== snapshot.id || origin.windowId !== snapshot.windowId) throw denied();
+      });
+      // Website access may have been revoked after the pages were read.
+      if (sources.content && content.coverage.state !== 'permission' && !await search.hasContentPermission()) {
+        content = noContentPermission();
+      }
+      if (signal.aborted) throw signal.reason;
+      return {
+        history: history.results, content: content.results,
+        coverage: { history: history.coverage, content: content.coverage },
+        incognito: snapshot.incognito,
+      };
+    } finally {
+      if (sourceQueries.get(snapshot.id) === controller) sourceQueries.delete(snapshot.id);
+    }
+  }
+
+  const handlers = {
+    getSearchContext, activateSearchTab, dismissSearch, closeSearchTabs,
+    activateHistoryResult, openSearchPermissions, querySearchSources,
+  };
+  // Handlers that serialize their own critical sections.
+  const unqueued = new Set(['querySearchSources']);
 
   /** Handles search commands; returns undefined for anything else. */
   function handleMessage(message, sender) {
@@ -271,7 +358,8 @@ export function createSearchLauncher(api, search, {
         if (!(session?.mode === 'window' && session.launcherTabId === undefined &&
             withoutQuery(sender.url) === searchUrl && sender.frameId === 0)) throw denied();
       }
-      return serial(() => handlers[message.command](message, sender));
+      const handler = handlers[message.command];
+      return unqueued.has(message.command) ? handler(message, sender) : serial(() => handler(message, sender));
     });
   }
 

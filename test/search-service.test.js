@@ -298,10 +298,231 @@ for (const browser of ['firefox', 'chrome']) {
     expect(manifest.permissions).toEqual(expect.arrayContaining(['activeTab', 'scripting']));
     expect(manifest.permissions.filter(p => p.includes('://') || p === '<all_urls>')).toEqual([]);
     expect(manifest.host_permissions).toBeUndefined();
-    expect(manifest.optional_host_permissions).toBeUndefined();
+    // Website access is optional only: Chrome MV3 uses optional_host_permissions;
+    // Firefox (min 115) takes origins in optional_permissions.
+    const origins = ['http://*/*', 'https://*/*'];
+    if (browser === 'chrome') {
+      expect(manifest.optional_host_permissions).toEqual(origins);
+      expect(manifest.optional_permissions).toBeUndefined();
+    } else {
+      expect(manifest.optional_permissions).toEqual(origins);
+      expect(manifest.optional_host_permissions).toBeUndefined();
+    }
     expect(manifest.content_scripts).toBeUndefined();
     expect(manifest.web_accessible_resources).toEqual([
       { resources: ['search.html'], matches: ['http://*/*', 'https://*/*'] },
     ]);
   });
 }
+
+describe('expanded search sources', () => {
+  function sources({ permission = true } = {}) {
+    const env = fixture();
+    const { api, tabs } = env;
+    tabs[1].url = 'https://other.test/';
+    tabs.push({ id: 4, windowId: 10, url: 'https://discarded.test/', discarded: true },
+      { id: 5, windowId: 10, url: 'https://loading.test/', status: 'loading' },
+      { id: 6, windowId: 10, url: 'about:blank' },
+      { id: 7, windowId: 30, url: 'https://private2.test/', incognito: true });
+    api.permissions = { contains: vi.fn(async () => permission) };
+    api.history = { search: vi.fn(async () => [
+      { url: 'https://h.test/?a=1#x', title: 'Hist', lastVisitTime: 2 },
+      { url: 'https://h.test/?a=1#x', title: 'Hist', lastVisitTime: 9 },
+      { url: 'javascript:alert(1)', title: 'evil', lastVisitTime: 10 },
+    ]) };
+    api.tabs.create = vi.fn(async () => ({ id: 99 }));
+    api.scripting = { executeScript: vi.fn(async ({ target }) => {
+      const tab = tabs.find(t => t.id === target.tabId);
+      return [{ result: { url: tab.url, match: tab.id === 1, snippet: tab.id === 1 ? 'a match' : '', truncated: tab.id === 2 } }];
+    }) };
+    return env;
+  }
+
+  it('reports privacy and the optional host permission in context', async () => {
+    const { api, service } = sources();
+    expect(await service.getContext(10)).toMatchObject({ incognito: false, contentPermission: true });
+    expect(api.permissions.contains).toHaveBeenCalledWith({ origins: ['http://*/*', 'https://*/*'] });
+    expect(await service.getContext(30)).toMatchObject({ incognito: true });
+    api.permissions.contains.mockRejectedValue(new Error('x'));
+    expect((await service.getContext(10)).contentPermission).toBe(false);
+    delete api.permissions;
+    expect((await service.getContext(10)).contentPermission).toBe(false);
+  });
+
+  it('searches full history with native matching, deduped and safe only', async () => {
+    const { api, service } = sources();
+    expect(await service.searchHistory('hist', 10)).toEqual({
+      results: [{ url: 'https://h.test/?a=1#x', title: 'Hist', lastVisitTime: 9 }],
+      coverage: { state: 'ready', limited: false },
+    });
+    expect(api.history.search).toHaveBeenCalledWith({ text: 'hist', startTime: 0, maxResults: 101 });
+  });
+
+  it('never reads history for a private search, or for an empty query', async () => {
+    const { api, service } = sources();
+    expect((await service.searchHistory('hist', 30)).coverage.state).toBe('private');
+    expect((await service.searchHistory('', 10)).results).toEqual([]);
+    expect(api.history.search).not.toHaveBeenCalled();
+  });
+
+  it('reports a history failure as an error state', async () => {
+    const { api, service } = sources();
+    api.history.search.mockRejectedValue(new Error('boom'));
+    expect(await service.searchHistory('x', 10)).toEqual({ results: [], coverage: { state: 'error', limited: false } });
+  });
+
+  it('opens a history result only if that exact URL is still in history', async () => {
+    const { api, service } = sources();
+    expect(await service.activateHistory('https://h.test/?a=1#x', 10)).toEqual({ ok: true });
+    expect(api.history.search).toHaveBeenCalledWith(expect.objectContaining({ text: 'https://h.test/?a=1#x', startTime: 0 }));
+    expect(api.tabs.create).toHaveBeenCalledWith({ url: 'https://h.test/?a=1#x', windowId: 10, active: true });
+    // A near-miss (normalized form) is not accepted.
+    await expect(service.activateHistory('https://h.test/?a=1', 10)).rejects.toThrow();
+    expect(api.tabs.create).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(['javascript:alert(1)', 'file:///etc/passwd', 'https://u:p@h.test/', 'data:text/html,x', 42, undefined])(
+    'refuses unsafe history URL %s before reading history', async url => {
+      const { api, service } = sources();
+      await expect(service.activateHistory(url, 10)).rejects.toThrow();
+      expect(api.history.search).not.toHaveBeenCalled();
+      expect(api.tabs.create).not.toHaveBeenCalled();
+    });
+
+  it('refuses private history activation before reading history', async () => {
+    const { api, service } = sources();
+    await expect(service.activateHistory('https://h.test/?a=1#x', 30)).rejects.toThrow();
+    expect(api.history.search).not.toHaveBeenCalled();
+    expect(api.tabs.create).not.toHaveBeenCalled();
+  });
+
+  it('focuses an already-open tab with the exact URL instead of duplicating it', async () => {
+    const { api, service } = sources();
+    api.history.search.mockResolvedValue([{ url: 'https://other.test/', lastVisitTime: 1 }]);
+    expect(await service.activateHistory('https://other.test/', 10)).toEqual({ ok: true });
+    expect(api.tabs.update).toHaveBeenCalledWith(2, { active: true });
+    expect(api.tabs.create).not.toHaveBeenCalled();
+  });
+
+  it('does not read page content without the host permission', async () => {
+    const { api, service } = sources({ permission: false });
+    expect(await service.searchContent('match', 10)).toEqual({
+      results: [], coverage: { state: 'permission', searched: 0, total: 0, skipped: 0, truncated: 0 },
+    });
+    expect(api.scripting.executeScript).not.toHaveBeenCalled();
+  });
+
+  it('searches loaded same-privacy pages top-frame only, with honest coverage', async () => {
+    const { api, service } = sources();
+    const { results, coverage } = await service.searchContent('match', 10);
+    expect(results).toEqual([{ tabId: 1, url: 'https://example.org', snippet: 'a match' }]);
+    // Tabs 1,2,4,5,6 in scope; discarded/loading/about:blank skipped; private 7 never touched.
+    expect(coverage).toEqual({ state: 'ready', searched: 2, total: 5, skipped: 3, truncated: 1 });
+    const targets = api.scripting.executeScript.mock.calls.map(([call]) => call.target);
+    expect(targets).toEqual([{ tabId: 1, frameIds: [0] }, { tabId: 2, frameIds: [0] }]);
+    expect(api.scripting.executeScript.mock.calls[0][0].args).toEqual(['match', expect.objectContaining({ maxChars: 100_000 })]);
+    expect(api.tabs.update).not.toHaveBeenCalled();
+  });
+
+  it('keeps private content searches private', async () => {
+    const { api, service } = sources();
+    const { results } = await service.searchContent('x', 30);
+    // Tab 3 has no web URL; normal tabs are never injected from a private search.
+    expect(api.scripting.executeScript.mock.calls.map(([c]) => c.target.tabId)).toEqual([7]);
+    expect(results).toEqual([]);
+  });
+
+  it('does not inject for an empty query', async () => {
+    const { api, service } = sources();
+    expect((await service.searchContent('', 10)).results).toEqual([]);
+    expect(api.scripting.executeScript).not.toHaveBeenCalled();
+  });
+
+  it('discards a result from a page that navigated during the scan', async () => {
+    const { api, tabs, service } = sources();
+    api.scripting.executeScript.mockImplementation(async ({ target }) => {
+      const tab = tabs.find(t => t.id === target.tabId);
+      const url = tab.url;
+      if (tab.id === 1) tab.url = 'https://elsewhere.test/';
+      return [{ result: { url, match: true, snippet: 'secret', truncated: false } }];
+    });
+    const { results, coverage } = await service.searchContent('x', 10);
+    expect(results.map(r => r.tabId)).toEqual([2]);
+    expect(coverage.searched).toBe(1);
+  });
+
+  it('discards a result whose reported URL differs from the tab', async () => {
+    const { api, service } = sources();
+    api.scripting.executeScript.mockResolvedValue([{ result: { url: 'https://spoof.test/', match: true, snippet: 's' } }]);
+    expect((await service.searchContent('x', 10)).results).toEqual([]);
+  });
+
+  it('bounds each injection by a timeout and counts it as not searched', async () => {
+    const { api } = sources();
+    const service = createSearchService(api, { contentTimeoutMs: 5 });
+    api.scripting.executeScript.mockImplementation(() => new Promise(() => {}));
+    const { coverage } = await service.searchContent('x', 10);
+    expect(coverage).toMatchObject({ searched: 0, total: 5, skipped: 5 });
+  });
+
+  function manyTabs(env) {
+    for (let id = 20; id < 30; id++) env.tabs.push({ id, windowId: 10, url: `https://t${id}.test/` });
+    return env;
+  }
+  const hit = (tabs, target) => [{ result: { url: tabs.find(t => t.id === target.tabId).url, match: true, snippet: 'secret' } }];
+
+  it('checks the abort signal after the live re-read, immediately before each injection', async () => {
+    const { api, service } = sources();
+    const controller = new AbortController();
+    const waiting = [];
+    api.permissions.contains.mockImplementation(async () => {
+      if (api.permissions.contains.mock.calls.length > 1) await new Promise(resolve => waiting.push(resolve));
+      return true;
+    });
+    const pending = service.searchContent('x', 10, { signal: controller.signal });
+    await vi.waitFor(() => expect(waiting).toHaveLength(2));
+    controller.abort();
+    waiting.forEach(resolve => resolve());
+    expect((await pending).results).toEqual([]);
+    expect(api.scripting.executeScript).not.toHaveBeenCalled();
+  });
+
+  it('discards a result from a script already running at abort, and starts no more', async () => {
+    const { api, tabs, service } = manyTabs(sources());
+    const controller = new AbortController();
+    api.scripting.executeScript.mockImplementation(async ({ target }) => {
+      controller.abort();
+      return hit(tabs, target);
+    });
+    const { results } = await service.searchContent('x', 10, { signal: controller.signal });
+    expect(results).toEqual([]);
+    expect(api.scripting.executeScript.mock.calls.length).toBeLessThanOrEqual(4); // Of 12 candidates.
+  });
+
+  it('rechecks website access per page, returning no stale snippets once revoked', async () => {
+    const { api, tabs, service } = manyTabs(sources());
+    api.scripting.executeScript.mockImplementation(async ({ target }) => {
+      api.permissions.contains.mockResolvedValue(false);
+      return hit(tabs, target);
+    });
+    expect(await service.searchContent('x', 10)).toEqual({
+      results: [], coverage: { state: 'permission', searched: 0, total: 0, skipped: 0, truncated: 0 },
+    });
+    expect(api.scripting.executeScript.mock.calls.length).toBeLessThanOrEqual(4); // Of 12 candidates.
+  });
+
+  it('caps concurrent injections at four', async () => {
+    const { api, tabs, service } = sources();
+    for (let id = 20; id < 30; id++) tabs.push({ id, windowId: 10, url: `https://t${id}.test/` });
+    let active = 0;
+    let peak = 0;
+    api.scripting.executeScript.mockImplementation(async ({ target }) => {
+      active++; peak = Math.max(peak, active);
+      await new Promise(resolve => setTimeout(resolve, 2));
+      active--;
+      return [{ result: { url: tabs.find(t => t.id === target.tabId).url, match: false } }];
+    });
+    await service.searchContent('x', 10);
+    expect(peak).toBe(4);
+  });
+});

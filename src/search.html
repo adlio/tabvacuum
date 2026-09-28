@@ -20,8 +20,19 @@
         placeholder="Search tabs…" autocomplete="off" spellcheck="false" autofocus>
       <!-- Mode changes are announced through #announcement. -->
       <span id="mode-indicator" class="mode-indicator" aria-hidden="true" hidden></span>
+      <!-- A disclosure: extra sources start off on every launch; open tabs are always searched. -->
+      <button id="search-in" class="source-trigger" type="button" aria-expanded="false" aria-controls="source-menu">Search in <span id="source-summary" class="source-summary"></span></button>
       <kbd class="esc-hint" aria-hidden="true">Esc</kbd>
+      <div id="source-menu" class="source-menu" role="group" aria-label="Search in" hidden>
+        <p class="source-option">Open tabs <span class="source-always">Always on</span></p>
+        <label class="source-option"><input id="source-history" type="checkbox" disabled> History</label>
+        <p id="history-private-note" class="source-note" hidden>History isn't searched in private windows.</p>
+        <label class="source-option"><input id="source-content" type="checkbox" disabled> Page contents</label>
+        <p id="content-access-note" class="source-note" hidden>Contents requires website access; sleeping tabs stay asleep.</p>
+        <button id="enable-content" class="action" type="button" aria-describedby="content-access-note" hidden>Enable in Settings</button>
+      </div>
     </header>
+    <p class="source-line"><span id="source-status" role="status" aria-live="polite"></span></p>
     <div class="list-heading">
       <span class="heading-text">
         <span id="list-label">Recent tabs</span>
@@ -42,14 +53,14 @@
     <footer id="help" aria-hidden="true">
       <div id="hints-search" class="hint-group">
         <span class="hint optional"><kbd>↑</kbd><kbd>↓</kbd> Navigate</span>
-        <span class="hint"><kbd>↵</kbd> Switch</span>
+        <span class="hint"><kbd>↵</kbd> <span id="enter-search">Switch</span></span>
         <span class="hint"><kbd>Tab</kbd> Tab menu</span>
         <span class="hint"><kbd>Esc</kbd> Close</span>
       </div>
       <div id="hints-tabs" class="hint-group" hidden>
         <span class="hint optional"><kbd>J</kbd><kbd>K</kbd> Move</span>
-        <span class="hint"><kbd>↵</kbd> Switch</span>
-        <span class="hint"><kbd>X</kbd><kbd>Del</kbd> Close tab</span>
+        <span class="hint"><kbd>↵</kbd> <span id="enter-tabs">Switch</span></span>
+        <span class="hint hint-close"><kbd>X</kbd><kbd>Del</kbd> Close tab</span>
         <span class="hint"><kbd>M</kbd> Select multiple</span>
         <span class="hint"><kbd>Esc</kbd> Search</span>
       </div>
@@ -62,8 +73,8 @@
         <span class="hint"><kbd>Esc</kbd> Back</span>
       </div>
     </footer>
-    <p id="query-help" class="sr-only">Up and Down arrows move through results. Enter switches to the highlighted tab. Tab opens the tab menu, where you can close tabs. Escape closes search.</p>
-    <p id="tabs-help" class="sr-only">Tab menu. Up and Down arrows, or J and K, move. Enter switches to the highlighted tab. X or Delete closes the highlighted tab. M selects multiple tabs. Escape returns to search.</p>
+    <p id="query-help" class="sr-only">Up and Down arrows move through results. Enter switches to the highlighted tab, or opens the highlighted history page. Tab opens the tab menu, where you can close tabs. Shift Tab reaches the Search in button, which chooses whether to also search history and page contents. Escape closes search.</p>
+    <p id="tabs-help" class="sr-only">Tab menu. Up and Down arrows, or J and K, move. Enter switches to the highlighted tab or opens the highlighted history page. X or Delete closes the highlighted tab; history results cannot be closed. M selects multiple tabs. Escape returns to search.</p>
     <p id="select-help" class="sr-only">Select multiple mode. Up and Down arrows, or J and K, move. Space or Enter toggles selection of the highlighted tab. A, or Control A, selects all listed tabs. X or Delete closes the selected tabs. M or Done returns to the tab menu. Escape clears the selection and returns to the tab menu.</p>
     <div id="announcement" class="sr-only" role="status" aria-live="polite"></div>
   </main>

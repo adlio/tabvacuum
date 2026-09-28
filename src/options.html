@@ -1,7 +1,9 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TabVacuum Settings</title>
   <link rel="stylesheet" href="options.css">
 </head>
 <body>
@@ -72,7 +74,18 @@
 
     <div id="status" class="status"></div>
   </form>
+
+  <section id="content-permissions" aria-labelledby="content-permissions-heading">
+    <h2 id="content-permissions-heading">Page-content search</h2>
+    <p>Optional website access lets TabVacuum read text from loaded tabs only when you enable Contents in the Search in menu. Queries and page text are not saved or sent off your device. Sleeping tabs are never loaded.</p>
+    <p>Your browser keeps this permission across restarts. History and Contents start off each time you open the search palette.</p>
+    <p>Website access: <strong id="content-access-state">Checking…</strong></p>
+    <button type="button" id="content-access-allow">Allow website access</button>
+    <button type="button" id="content-access-revoke">Remove website access</button>
+    <p id="content-access-message" role="status" aria-live="polite"></p>
+  </section>
   <script src="browser-polyfill.js"></script>
   <script src="options.js"></script>
+  <script type="module" src="content-permissions.js"></script>
 </body>
 </html>

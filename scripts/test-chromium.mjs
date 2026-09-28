@@ -20,7 +20,10 @@ function nativeKeys(...args) {
 // --acceptance-only runs setup plus the privacy/lifecycle checks, skipping the main flow.
 // --closing-only runs setup plus the selection/closing flows (scripts/test-search-closing.mjs).
 const ACCEPTANCE_ONLY = process.argv.includes('--acceptance-only');
-const CLOSING_ONLY = process.argv.includes('--closing-only');
+const EXPANDED_ONLY = process.argv.includes('--expanded-only');
+// --expanded-only runs setup plus the History/Contents flows (scripts/test-expanded-search.mjs).
+const CLOSING_ONLY = EXPANDED_ONLY || process.argv.includes('--closing-only');
+import { runExpandedSearch } from './test-expanded-search.mjs';
 const { scratch, directory } = await outputDir('tabvacuum-chromium');
 const profile = await mkdtemp(path.join(directory, 'profile-'));
 const site = await startSite();
@@ -94,6 +97,56 @@ try {
     await sleep(80);
   }
   const closed = p => until(async () => (await hosts(p)) === 0 && !overlayFrame(p), 'overlay removed');
+  // Incognito tabs are outside Playwright's context; evaluate there over raw CDP.
+  const cdp = await context.browser().newBrowserCDPSession();
+  const targets = async () => (await cdp.send('Target.getTargets')).targetInfos;
+  let seq = 0;
+  async function evalIn(targetId, expression) {
+    const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: false });
+    const id = ++seq;
+    try {
+      const reply = new Promise((resolve, reject) => {
+        const timer = setTimeout(() => { cdp.off('Target.receivedMessageFromTarget', on); reject(new Error('CDP evaluate timeout')); }, 5000);
+        function on(event) {
+          if (event.sessionId !== sessionId) return;
+          const message = JSON.parse(event.message);
+          if (message.id !== id) return;
+          clearTimeout(timer);
+          cdp.off('Target.receivedMessageFromTarget', on);
+          resolve(message);
+        }
+        cdp.on('Target.receivedMessageFromTarget', on);
+      });
+      await cdp.send('Target.sendMessageToTarget', { sessionId, message: JSON.stringify({ id, method: 'Runtime.evaluate', params: { expression, awaitPromise: true, returnByValue: true } }) });
+      const message = await reply;
+      if (message.result?.exceptionDetails) throw new Error(message.result.exceptionDetails.text);
+      return message.result?.result?.value;
+    } finally {
+      await cdp.send('Target.detachFromTarget', { sessionId }).catch(() => {});
+    }
+  }
+  // Incognito access is granted only in this throwaway profile, through
+  // chrome://extensions' own settings API (developer mode is required there to
+  // keep a command-line unpacked extension enabled on reload). The settings
+  // page's own message wakes the reloaded worker; the returned extension page
+  // stays open as a privileged evaluator.
+  async function allowIncognito() {
+    const manager = await context.newPage();
+    await manager.goto('chrome://extensions/');
+    const previousWorker = worker;
+    await manager.evaluate(async id => {
+      const call = (name, arg) => new Promise(resolve => chrome.developerPrivate[name](arg, resolve));
+      await call('updateProfileConfiguration', { inDeveloperMode: true });
+      await call('updateExtensionConfiguration', { extensionId: id, incognitoAccess: true });
+    }, new URL(extOrigin).host);
+    await sleep(1500);
+    const extPage = await context.newPage();
+    await extPage.goto(`${extOrigin}/options.html`).catch(() => {});
+    await until(() => (worker = context.serviceWorkers().find(w => w !== previousWorker && w.url().startsWith(extOrigin))), 'reloaded worker', 15000);
+    if (!extPage.url().startsWith(extOrigin)) await extPage.goto(`${extOrigin}/options.html`);
+    await manager.close();
+    return extPage;
+  }
   async function shot(name, what) {
     if (name === 'light-two-results' || name === 'dark-two-results') {
       // Buttons transition their background (0.15 s) after a theme switch.
@@ -512,7 +565,7 @@ try {
     await page.bringToFront();
     frame = await openOverlay(page);
     check(!(await rows(frame)).includes(TITLES['/remote']), 'current-window scope excludes other window', await rows(frame));
-    check(await frame.evaluate(() => document.querySelectorAll('select,input[type=checkbox],input[type=range]').length) === 0, 'no runtime settings controls');
+    check(await frame.evaluate(() => [...document.querySelectorAll('select,input[type=checkbox],input[type=range]')].every(el => ['source-history', 'source-content'].includes(el.id))), 'no persistent settings controls in search (only explicit source choices)');
 
     // Many tabs: every match reachable, highlight scrolls.
     const bulk = await worker.evaluate(async windowId => {
@@ -568,34 +621,6 @@ try {
     if (page.url() !== `${base}/current`) await page.goto(`${base}/current`);
     const focusCurrent = () => worker.evaluate(ids => Promise.all([chrome.tabs.update(ids.current, { active: true }), chrome.windows.update(ids.windowId, { focused: true })]), ids);
     await focusCurrent();
-    const cdp = await context.browser().newBrowserCDPSession();
-    const targets = async () => (await cdp.send('Target.getTargets')).targetInfos;
-    // Incognito tabs are outside Playwright's context; evaluate there over raw CDP.
-    let seq = 0;
-    async function evalIn(targetId, expression) {
-      const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: false });
-      const id = ++seq;
-      try {
-        const reply = new Promise((resolve, reject) => {
-          const timer = setTimeout(() => { cdp.off('Target.receivedMessageFromTarget', on); reject(new Error('CDP evaluate timeout')); }, 5000);
-          function on(event) {
-            if (event.sessionId !== sessionId) return;
-            const message = JSON.parse(event.message);
-            if (message.id !== id) return;
-            clearTimeout(timer);
-            cdp.off('Target.receivedMessageFromTarget', on);
-            resolve(message);
-          }
-          cdp.on('Target.receivedMessageFromTarget', on);
-        });
-        await cdp.send('Target.sendMessageToTarget', { sessionId, message: JSON.stringify({ id, method: 'Runtime.evaluate', params: { expression, awaitPromise: true, returnByValue: true } }) });
-        const message = await reply;
-        if (message.result?.exceptionDetails) throw new Error(message.result.exceptionDetails.text);
-        return message.result?.result?.value;
-      } finally {
-        await cdp.send('Target.detachFromTarget', { sessionId }).catch(() => {});
-      }
-    }
     async function keysTo(title, keys) {
       for (let attempt = 0; ; attempt++) {
         try { return nativeKeys(env, keys, title); } catch (error) { if (attempt > 10) throw error; await sleep(200); }
@@ -607,25 +632,8 @@ try {
     const windowCount = () => worker.evaluate(() => chrome.windows.getAll().then(w => w.length));
     const urlsOf = f => f.evaluate(() => [...document.querySelectorAll('.result .url')].map(e => e.textContent));
 
-    // (1) Private windows. Incognito access is granted only in this throwaway
-    // profile, through chrome://extensions' own settings API (developer mode is
-    // required there to keep a command-line unpacked extension enabled on reload).
-    const manager = await context.newPage();
-    await manager.goto('chrome://extensions/');
-    const previousWorker = worker;
-    await manager.evaluate(async id => {
-      const call = (name, arg) => new Promise(resolve => chrome.developerPrivate[name](arg, resolve));
-      await call('updateProfileConfiguration', { inDeveloperMode: true });
-      await call('updateExtensionConfiguration', { extensionId: id, incognitoAccess: true });
-    }, new URL(extOrigin).host);
-    await sleep(1500);
-    // The settings page's own message wakes the reloaded worker; it stays open
-    // (in the background) as a privileged evaluator for the worker-restart case.
-    const extPage = await context.newPage();
-    await extPage.goto(`${extOrigin}/options.html`).catch(() => {});
-    await until(() => (worker = context.serviceWorkers().find(w => w !== previousWorker && w.url().startsWith(extOrigin))), 'reloaded worker', 15000);
-    if (!extPage.url().startsWith(extOrigin)) await extPage.goto(`${extOrigin}/options.html`);
-    await manager.close();
+    // (1) Private windows, allowed through allowIncognito() above.
+    const extPage = await allowIncognito();
     check(await worker.evaluate(() => chrome.extension.isAllowedIncognitoAccess()), 'private: incognito allowed in throwaway profile only');
 
     // The manifest uses incognito "split": the private window gets its own
@@ -876,6 +884,7 @@ try {
   if (!ACCEPTANCE_ONLY) {
     // ===== Selection and closing, on disposable tabs only =====================
     // A dedicated extension page keeps the removal listener alive across worker restarts.
+    if (!(await worker.evaluate(() => chrome.extension.isAllowedIncognitoAccess()))) await (await allowIncognito()).close();
     const extTab = await context.newPage();
     await extTab.goto(`${extOrigin}/options.html`);
     api = (fn, arg) => extTab.evaluate(fn, arg);
@@ -888,7 +897,124 @@ try {
       chrome.tabs.onRemoved.addListener(id => globalThis.tvRemoved.push(urls.get(id) ?? `unknown-tab:${id}`));
       await chrome.storage.local.set({ searchScope: 'all' });
     });
-    await runSearchClosing(closing);
+    // Expanded-search adapter: chrome.history/chrome.permissions from extension pages,
+    // and the browser's own permission dialog answered with native X keys.
+    const ORIGINS = ['http://*/*', 'https://*/*'];
+    let opt;
+    let optionsBaseline = new Set();
+    const optionPages = () => context.pages().filter(p => p !== extTab && p !== opt &&
+      (p.url().startsWith(`${extOrigin}/options.html`) || p.url().startsWith('chrome://extensions')));
+    const readOptions = () => opt.evaluate(() => ({ state: document.getElementById('content-access-state').textContent,
+      message: document.getElementById('content-access-message').textContent }));
+    const byUrl = url => api(url => chrome.tabs.query({}).then(tabs => tabs.find(t => t.url === url) || null), url);
+    closing.expanded = {
+      historyHas: url => api(url => chrome.history.getVisits({ url }).then(v => v.length > 0), url),
+      permitted: () => api(origins => chrome.permissions.contains({ origins }), ORIGINS),
+      markOptions: async () => { optionsBaseline = new Set(optionPages()); },
+      optionsOpened: async () => optionPages().some(p => !optionsBaseline.has(p)),
+      closeOptions: async () => { for (const p of optionPages()) if (!optionsBaseline.has(p)) await p.close(); },
+      async settingsOpen() {
+        opt = await context.newPage();
+        await opt.goto(`${extOrigin}/options.html?tv=settings`);
+        await opt.bringToFront();
+        await until(async () => (await readOptions()).state !== 'Checking…', 'settings ready', 5000);
+      },
+      async settingsClose() { await opt?.close(); opt = undefined; await closing.focus(ORIGIN); },
+      async request(decision) {
+        const variants = decision === 'allow' ? [['Return'], ['Tab', 'Return'], ['Shift_L', 'Tab', 'Return']] : [['Escape']];
+        for (const keys of variants) {
+          await opt.bringToFront();
+          await opt.click('#content-access-allow');
+          // The dialog's accept button is briefly disabled after it appears.
+          await sleep(1500);
+          nativeKeys(env, keys);
+          await until(async () => (await readOptions()).message !== 'Waiting for your browser…', 'prompt answered', 5000).catch(() => {});
+          const r = await readOptions();
+          const method = `native X keys ${keys.join('+')} to the browser's own permission dialog`;
+          if (decision === 'deny' || r.state === 'Allowed' || r.message === 'Waiting for your browser…') return { ...r, method };
+          console.log(`INFO chromium allow attempt ${keys.join('+')} -> ${r.message}`);
+        }
+        return { ...(await readOptions()), method: 'no native key variant accepted the dialog' };
+      },
+      async revoke() {
+        await opt.bringToFront();
+        opt.once('dialog', d => d.accept());
+        await opt.click('#content-access-revoke');
+        await until(async () => /removed/.test((await readOptions()).message), 'revoked', 5000).catch(() => {});
+        return { ...(await readOptions()), method: 'Playwright (CDP) accept of the page confirm() dialog' };
+      },
+      discard: url => api(async url => { const t = (await chrome.tabs.query({})).find(t => t.url === url); await chrome.tabs.discard(t.id); return true; }, url),
+      isDiscarded: async url => (await byUrl(url))?.discarded === true,
+      async navigate(url, to) {
+        await api(async ({ url, to }) => { const t = (await chrome.tabs.query({})).find(t => t.url === url); await chrome.tabs.update(t.id, { url: to }); }, { url, to });
+        await loaded([to]);
+      },
+      // A real incognito window opened by the normal extension context (split mode
+      // hides the window from it). Its tabs and the extension frame over them are
+      // outside Playwright's context, so the UI is read over raw CDP targets in that
+      // browser context and driven only with native X keys to the window by title.
+      async privateWindow(urls, title) {
+        const returned = await api(urls => chrome.windows.create({ incognito: true, url: urls, left: 0, top: 0, width: 1280, height: 900, focused: true })
+          .then(w => Boolean(w)), urls);
+        let top;
+        await until(async () => (top = (await targets()).find(t => t.type === 'page' && t.url === urls[0])), 'private page target');
+        const privContext = top.browserContextId;
+        const normalContext = (await targets()).find(t => t.type === 'page' && t.url === ORIGIN)?.browserContextId;
+        check(privContext && privContext !== normalContext && !returned, 'private: fixture tabs are in a separate incognito browser context', { returned });
+        const pages = async () => (await targets()).filter(t => t.browserContextId === privContext && t.type === 'page');
+        await until(async () => {
+          const all = await pages();
+          const states = await Promise.all(urls.map(u => all.find(t => t.url === u)).map(t => t && evalIn(t.targetId, 'document.readyState').catch(() => null)));
+          return states.every(s => s === 'complete');
+        }, 'private tabs loaded', 15000);
+        await evalIn(top.targetId, `document.title = ${JSON.stringify(title)}`);
+        await sleep(400);
+        const frame = async () => (await targets()).find(t => t.browserContextId === privContext && t.type === 'iframe' && t.url === searchUrl);
+        const inFrame = async expression => {
+          const f = await frame();
+          if (!f) throw new Error('no private search frame');
+          return evalIn(f.targetId, expression);
+        };
+        const keys = keys => nativeTo(keys, title);
+        return {
+          check, base, originUrl: urls[0],
+          ui: (body, arg) => inFrame(`(async arg => { ${body} })(${JSON.stringify(arg ?? null)})`),
+          keys,
+          async type(text) {
+            const focus = await inFrame('document.activeElement?.id');
+            if (focus !== 'query') throw new Error(`type() needs the query focused, not ${focus}`);
+            await keys(['Control_L', 'a']);
+            await keys(['BackSpace']);
+            for (const character of text) await keys([character]);
+            await sleep(150);
+          },
+          async focus(url) {
+            const t = (await pages()).find(t => t.url === url);
+            await cdp.send('Target.activateTarget', { targetId: t.targetId });
+            await sleep(300);
+          },
+          async open() {
+            await keys(['Alt_L', 'Shift_L', 'k']);
+            let kind;
+            await until(async () => {
+              if (await frame()) return (kind = 'overlay');
+              if ((await pages()).some(t => t.url.startsWith(`${searchUrl}?`))) return (kind = 'window');
+            }, 'private search UI', 9000).catch(() => {});
+            if (kind === 'overlay') await until(async () => (await inFrame("document.getElementById('results')?.getAttribute('aria-busy')")) === 'false', 'private results', 8000);
+            return kind;
+          },
+          uiCount: async () => ({ overlays: (await frame()) ? 1 : 0, windows: (await pages()).filter(t => t.url.startsWith(`${searchUrl}?`)).length }),
+          shot: closing.shot,
+          async close() {
+            for (const t of await pages()) await cdp.send('Target.closeTarget', { targetId: t.targetId }).catch(() => {});
+            await until(async () => !(await pages()).length, 'private window closed', 5000);
+            await closing.focus(ORIGIN);
+          },
+        };
+      },
+    };
+    if (!EXPANDED_ONLY) await runSearchClosing(closing);
+    await runExpandedSearch(closing);
   }
 
   await writeFile(path.join(directory, 'screenshots.json'), JSON.stringify(shots, null, 2));

@@ -48,6 +48,8 @@ function titleFor(url) {
 }
 
 function page(url) {
+  const special = expandedPage(url);
+  if (special) return special;
   const title = titleFor(url);
   const extra = url === '/hostile-css' ? `<style>${HOSTILE_CSS}</style>` : '';
   const cards = ['Milestones', 'Owners', 'Risks', 'Launch plan', 'Metrics', 'Open questions']
@@ -63,6 +65,7 @@ function page(url) {
 export async function startSite() {
   const server = createServer((req, res) => {
     const url = req.url.split('?')[0];
+    hits.set(url, (hits.get(url) || 0) + 1);
     res.setHeader('Content-Type', 'text/html; charset=utf-8');
     // Restrictive but ordinary policy: no frames and no inline style or script.
     if (url === '/csp') res.setHeader('Content-Security-Policy', "default-src 'none'; frame-src 'none'; child-src 'none'; style-src 'none'; script-src 'none'");
@@ -200,4 +203,67 @@ export function paletteContrast() {
   const low = ratios.filter(r => r.ratio < 4.5).map(r => `${r.selector} ${r.ratio.toFixed(2)}`);
   const checked = [...new Set(ratios.map(r => r.selector))];
   return { passes: ratios.length > 0 && !low.length, minimum: Math.min(...ratios.map(r => r.ratio)), low, checked };
+}
+
+// ---- Expanded-search fixtures (history + page contents) ---------------------
+// Every request is counted by path, so a test can prove a sleeping tab was
+// never reloaded and a content scan never re-fetched a page.
+export const hits = new Map();
+// Per-run page text, registered by the harness: path -> { kind, needle } or a title override.
+export const contentPages = new Map();
+export const pageTitles = new Map();
+const ARCHIVE = /^\/archive\/([a-z0-9-]{1,80})$/;
+const CONTENT = /^\/content\/([a-z]+)\/([a-z0-9-]{1,64})$/;
+export const archiveTitle = slug => `Archive quasar ${slug.replaceAll('-', ' ')}`;
+
+// Where the needle appears for each content kind. Only 'main' and 'titled'
+// put it in rendered main-frame text; every other kind must never match.
+function contentBody(kind, needle) {
+  const [a, b] = needle ? [needle.slice(0, 4), needle.slice(4)] : ['', ''];
+  switch (kind) {
+    case 'main': case 'titled': case 'sleeping': return `<p>Quarterly figures mention ${needle} in passing.</p>`;
+    case 'field': return `<input value="${needle}" aria-label="f"><textarea aria-label="t">${needle}</textarea>`;
+    case 'hidden': return `<p hidden>${needle}</p><div style="display:none">${needle}</div><p aria-hidden="true">${needle}</p>`;
+    case 'editable': return `<div contenteditable="true">${needle}</div>`;
+    case 'script': return `<script>window.tvValue = "${needle}";</script><style>/* ${needle} */</style>`;
+    case 'iframe': return `<iframe title="child" srcdoc="&lt;p&gt;${needle}&lt;/p&gt;"></iframe>`;
+    // Built from halves so the needle is never in the light DOM, even inside the script.
+    case 'shadow': return `<div id="host"></div><script>document.getElementById('host').attachShadow({ mode: 'open' }).innerHTML = '<p>' + ['${a}', '${b}'].join('') + '</p>';</script>`;
+    default: return '<p>Nothing to see here.</p>';
+  }
+}
+
+function expandedPage(url) {
+  const doc = (title, body) => `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>${title}</title>
+    <style>${STYLE}</style></head><body><main><h1>${title}</h1>${body}</main></body></html>`;
+  if (pageTitles.has(url)) return doc(pageTitles.get(url), '<p>An archived page.</p>');
+  const [, slug] = url.match(ARCHIVE) || [];
+  if (slug) return doc(archiveTitle(slug), '<p>An archived page.</p>');
+  const [, kind] = url.match(CONTENT) || [];
+  if (kind) {
+    const entry = contentPages.get(url);
+    const title = kind === 'titled' && entry ? `Ledger ${entry.needle}` : 'Unrelated ledger';
+    return doc(title, entry ? contentBody(entry.kind, entry.needle) : contentBody('plain'));
+  }
+  return null;
+}
+
+const CLICK = `
+import ctypes, sys, time
+x11 = ctypes.CDLL("libX11.so.6"); xtst = ctypes.CDLL("libXtst.so.6")
+x11.XOpenDisplay.restype = ctypes.c_void_p; x11.XOpenDisplay.argtypes = [ctypes.c_char_p]
+x11.XFlush.argtypes = [ctypes.c_void_p]; x11.XCloseDisplay.argtypes = [ctypes.c_void_p]
+xtst.XTestFakeMotionEvent.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_ulong]
+xtst.XTestFakeButtonEvent.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_int, ctypes.c_ulong]
+d = x11.XOpenDisplay(None)
+if not d: raise SystemExit("Cannot open test display")
+xtst.XTestFakeMotionEvent(d, -1, int(sys.argv[1]), int(sys.argv[2]), 0); x11.XFlush(d); time.sleep(0.15)
+xtst.XTestFakeButtonEvent(d, 1, 1, 0); x11.XFlush(d); time.sleep(0.05)
+xtst.XTestFakeButtonEvent(d, 1, 0, 0); x11.XFlush(d)
+x11.XCloseDisplay(d)`;
+
+/** A real X pointer click at screen pixel (x, y) on the isolated test display. */
+export function nativeClick(env, x, y) {
+  if (!env.DISPLAY?.startsWith(':')) throw new Error('An isolated local DISPLAY is required');
+  execFileSync('python3', ['-c', CLICK, String(Math.round(x)), String(Math.round(y))], { env });
 }
