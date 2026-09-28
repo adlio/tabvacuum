@@ -1,6 +1,7 @@
 // TabVacuum settings page
 
 const elements = {
+  searchScope: document.getElementById('search-scope'),
   staleValue: document.getElementById('stale-value'),
   staleUnit: document.getElementById('stale-unit'),
   ignoreFragments: document.getElementById('ignore-fragments'),
@@ -44,6 +45,7 @@ async function loadSettings() {
   const settings = await browser.runtime.sendMessage({ command: 'getSettings' });
   const { value, unit } = millisecondsToTimeValue(settings.staleThresholdMs);
 
+  elements.searchScope.value = settings.searchScope === 'current' ? 'current' : 'all';
   elements.staleValue.value = value;
   elements.staleUnit.value = unit;
   elements.ignoreFragments.checked = settings.ignoreFragments;
@@ -58,6 +60,7 @@ async function loadSettings() {
 
 async function saveSettings() {
   const settings = {
+    searchScope: elements.searchScope.value,
     staleThresholdMs: timeValueToMilliseconds(
       Number(elements.staleValue.value),
       elements.staleUnit.value

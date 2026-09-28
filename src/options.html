@@ -8,6 +8,15 @@
   <h1>TabVacuum Settings</h1>
   <form id="settings-form">
     <fieldset>
+      <legend>Tab Search</legend>
+      <label for="search-scope">Search in</label>
+      <select id="search-scope">
+        <option value="all">All windows</option>
+        <option value="current">Current window only</option>
+      </select>
+      <p>Search titles and URLs as you type. Empty searches show the 10 most recent tabs, with the current tab last.</p>
+    </fieldset>
+    <fieldset>
       <legend>Stale Tab Threshold</legend>
       <label>
         Close tabs not accessed in

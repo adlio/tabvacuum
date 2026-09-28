@@ -74,7 +74,8 @@ tools to tame tab sprawl without leaving the browser.
   - Close Duplicates: `Alt+Shift+D`
   - Merge Windows: `Alt+Shift+M`
   - Sort Tabs: `Alt+Shift+S` (uses last-selected sort criteria)
-  - Close Stale: `Alt+Shift+X`
+  - Search Tabs: `Alt+Shift+K` (`Command+Shift+Space` on macOS)
+  - Close Stale and Close Blank: unassigned (manually assignable)
 - **R6.4**: After every operation, display a brief notification (via the popup if open, or `browser.notifications` if triggered via keyboard/context menu).
 
 ### R7 - Safety
@@ -105,3 +106,19 @@ tools to tame tab sprawl without leaving the browser.
 - **R10.3**: GitHub Releases created automatically on version tags.
 - **R10.4**: CI/CD pipeline automates building, testing, and publishing to both stores on tagged releases.
 - **R10.5**: README includes badges for CI status, Firefox Add-ons, and Chrome Web Store.
+
+### R11 - Tab Search
+
+- **R11.1**: Open search from a TabVacuum toolbar-menu item or the default Alt+Shift+K shortcut (Command+Shift+Space on macOS). Remove the Close Stale Tabs default, retaining its command and all cleanup actions. Keep four suggested shortcuts. Show actual user-assigned shortcuts as platform-native keycaps; do not overwrite existing assignments.
+- **R11.2**: Search tab titles and URLs while typing. Fuzzy matching is enabled by default; exact/literal matches outrank fuzzy matches. Results show titles, URLs, match source, and other-window context without runtime configuration controls.
+- **R11.3**: For an empty/whitespace-only query, sort by most recent focus descending and force the current tab last, then take the first 10. With two tabs, the other tab is first; with one, the current tab remains selectable. For every nonempty query, apply no current-tab ranking exception.
+- **R11.4**: Arrow keys move the highlighted result without activating tabs. Enter activates that tab and focuses its window without moving the tab. Escape dismisses without navigation. Clicking a result also selects it.
+- **R11.5**: Search all windows by default. Offer current-window-only scope on the Settings page, not the search UI. Keep normal and private window results separate.
+- **R11.6**: Use the same search UI across Firefox and Chrome and verify real built extensions in isolated browser profiles on kirodesk. Do not substitute mocked browser APIs for these acceptance tests.
+- **R11.7**: Persistent filtering remains P1; deep page-content search remains P2. No Tree Style Tab integration, audio-tab search, runtime fuzzy slider, or automatic hiding/multi-selection in this release.
+- **R11.8**: Present a centered in-page command palette with shadcn-inspired neutral light/dark styling, compact two-line results, visible keyboard selection, and no settings controls. Use native CSS/JS, not a UI framework. Constrain the palette to the viewport and keep Tab/Shift+Tab focus inside it; Escape and backdrop dismissal restore the page's prior focus.
+- **R11.9**: Use `activeTab` and `scripting` only after user invocation, without broad host permissions or permanent content scripts. Isolate titles, URLs, queries, and launch authorization from website scripts. Bind privileged messages to the launch token, tab, frame, and private/normal context. Never expose generic cleanup/settings operations to the embedded search page; explicit closing uses the same validated search capability and scope.
+- **R11.10**: When the current page cannot host search, use a separate centered extension-owned window without navigating the source tab. Support private-window fallback with Chrome split incognito execution; keep normal/private worker session keys distinct. Revoke sessions on dismissal, activation, replacement, navigation, and tab closure; reject expired or replayed authorization.
+- **R11.11**: Provide explicit tab closing using an × button on each result row, closing only that row even when other rows are checked. Tab enters tab-menu mode without checkboxes. In that mode arrows/j/k navigate, Enter activates, x/Delete closes the highlight, and m enters multi-select. In multi-select use arrows/j/k, Space/Enter to Toggle Selection, and a (or platform Cmd/Ctrl+A) to select the current result snapshot including off-scroll results. x/Delete and Close N tabs close checked tabs only, never an unchecked fallback. Empty-query select-all is limited to ten recent results; later arriving tabs stay unchecked. Keep browser-native multi-selection unchanged.
+- **R11.12**: Show mode-specific inline hints, a mode indicator, and a selected count. Show a header Close N tabs button only in multi-select; individual closing belongs on rows. x/Delete/Backspace closes only with result focus; text editing retains its normal keys. Escape steps multi-select → tab menu → search → dismissal; m or Done returns from multi-select to tab menu. Query focus clears checks and returns to search. Keep keyboard focus inside the palette; row × controls must be keyboard accessible, retain native button activation and survive refresh without moving to an unrelated external replacement.
+- **R11.13**: Close only explicitly targeted IDs immediately after Close. Allow the current/active tab even in a batch; close the host last and finish accepted work in the background. Preserve pinned/audio settings and last-tab protection, reporting skips/failures inline. Do not change automatic cleanup safeguards. Preserve query, current mode and keyboard focus even with zero matches. Highlight the next row at the same index so j/x sequences close alternating original rows. Preserve fast navigation/close keystroke order during asynchronous closing; cancel pending keys on focus/mode change or partial failure. Ignore key autorepeat and never hide post-close refresh failures.

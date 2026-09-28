@@ -1,0 +1,66 @@
+/* Shared command surfaces; the separate Settings page keeps its own styling. */
+@import "common.css";
+
+:root {
+  color-scheme: light;
+  --background: #ffffff;
+  --foreground: #18181b;
+  --muted: #f4f4f5;
+  --muted-foreground: #62626d;
+  --border: #e4e4e7;
+  --hover: #f4f4f5;
+  --selected: #e4e4ec;
+  --selected-muted-foreground: #52525b;
+  --ring: #71717a;
+  --accent: #5b50b6;
+  --accent-soft: #f2f0fc;
+  --danger: #b91c1c;
+  --radius: 12px;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --background: #1c1c1f;
+    --foreground: #f4f4f5;
+    --muted: #27272b;
+    --muted-foreground: #aaaab4;
+    --border: #35353b;
+    --hover: #27272b;
+    --selected: #414149;
+    --selected-muted-foreground: #c4c4cd;
+    --ring: #a1a1aa;
+    --accent: #c3baff;
+    --accent-soft: #2d293e;
+    --danger: #fca5a5;
+  }
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  -webkit-font-smoothing: antialiased;
+}
+
+kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 21px;
+  height: 22px;
+  padding: 0 5px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--muted);
+  color: var(--muted-foreground);
+  font-family: var(--font-family);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+}
+
+[hidden] { display: none !important; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition: none !important; animation: none !important; }
+}
