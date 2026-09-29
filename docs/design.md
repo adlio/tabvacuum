@@ -344,7 +344,7 @@ tabs already enriched with `visitCount`.
 
 ## Centered Tab Search (R11)
 
-The toolbar menu and Alt+Shift+K (Command+Shift+Space on macOS) both invoke `search-launcher.js` through the background worker. The menu remains a normal toolbar popup; the search itself is not anchored to the address bar. Both surfaces share light/dark tokens in `ui-theme.css`. The toolbar renders actual browser-assigned bindings with `shortcuts.js`, translating Mac modifier names to native keycaps without changing user assignments.
+The toolbar menu and Alt+Shift+K (Command+Shift+K on macOS) both invoke `search-launcher.js` through the background worker. The menu remains a normal toolbar popup; the search itself is not anchored to the address bar. Both surfaces share light/dark tokens in `ui-theme.css`. The toolbar renders actual browser-assigned bindings with `shortcuts.js`, translating Mac modifier names to native keycaps without changing user assignments.
 
 - `search-core.js`: pure fuzzy title/URL ranking. Empty queries sort recent focus descending, put the current tab last, then limit to ten. Typed queries apply no current-tab exception.
 - `search-service.js`: live tab scope, normal/private filtering, focus timestamps, and tab/window activation. Search's own fallback tabs are excluded from results and focus tracking.

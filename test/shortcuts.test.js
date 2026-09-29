@@ -4,6 +4,7 @@ import { formatShortcut, renderShortcuts } from '../src/shortcuts.js';
 const cases = [
   ['MacCtrl+Shift+K', 'mac', ['⌃', '⇧', 'K'], 'Control + Shift + K'],
   ['Ctrl+Shift+F', 'mac', ['⌘', '⇧', 'F'], 'Command + Shift + F'],
+  ['Command+Shift+K', 'mac', ['⌘', '⇧', 'K'], 'Command + Shift + K'],
   ['Command+Shift+Space', 'mac', ['⌘', '⇧', 'Space'], 'Command + Shift + Space'],
   ['Alt+Shift+K', 'mac', ['⌥', '⇧', 'K'], 'Option + Shift + K'],
   ['Option+K', 'mac', ['⌥', 'K'], 'Option + K'],
@@ -82,7 +83,7 @@ describe('manifest shortcut defaults', () => {
     const { readFileSync } = await import('node:fs');
     const manifest = JSON.parse(readFileSync(new URL(`../src/manifest.${name}.json`, import.meta.url), 'utf8'));
     expect(manifest.commands['search-tabs'].suggested_key).toEqual({
-      default: 'Alt+Shift+K', mac: 'Command+Shift+Space',
+      default: 'Alt+Shift+K', mac: 'Command+Shift+K',
     });
     expect(Object.values(manifest.commands).filter(command => command.suggested_key)).toHaveLength(4);
     expect(manifest.commands['close-stale'].suggested_key).toBeUndefined();

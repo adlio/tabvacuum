@@ -45,7 +45,7 @@ Accessible via toolbar popup, tab right-click menu, and keyboard shortcuts.
 | Close Duplicates | `Alt+Shift+D` |
 | Merge Windows | `Alt+Shift+M` |
 | Sort Tabs | `Alt+Shift+S` |
-| Search Tabs | `Alt+Shift+K` (`Cmd+Shift+Space` on macOS) |
+| Search Tabs | `Alt+Shift+K` (`Cmd+Shift+K` on macOS) |
 | Close Stale Tabs | *(unassigned — set manually)* |
 | Close Blank Tabs | *(unassigned — set manually)* |
 
