@@ -63,7 +63,14 @@
       </ul>
     </section>
   </main>
-  <div id="status" class="status" role="status" aria-live="polite"></div>
+  <div id="status" class="status">
+    <span id="status-spinner" class="spinner" aria-hidden="true" hidden></span>
+    <div class="status-copy" role="status" aria-live="polite">
+      <span id="status-title" class="status-title"></span>
+      <span id="status-detail" class="status-detail" hidden></span>
+    </div>
+    <button id="status-close" class="status-close" type="button" hidden>Close menu</button>
+  </div>
   <script src="browser-polyfill.js"></script>
   <script type="module" src="popup.js"></script>
 </body>

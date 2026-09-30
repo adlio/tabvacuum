@@ -45,14 +45,25 @@ Accessible via toolbar popup, tab right-click menu, and keyboard shortcuts.
 | Close Duplicates | `Alt+Shift+D` |
 | Merge Windows | `Alt+Shift+M` |
 | Sort Tabs | `Alt+Shift+S` |
-| Search Tabs | `Alt+Shift+K` (`Cmd+Shift+K` on macOS) |
+| Search Tabs | `Ctrl+Shift+.` (`Cmd+Shift+.` on macOS) |
 | Close Stale Tabs | *(unassigned — set manually)* |
 | Close Blank Tabs | *(unassigned — set manually)* |
 
-Chrome allows at most four suggested shortcuts per extension. **Close Stale Tabs** and **Close Blank Tabs** ship without defaults. Existing user-assigned bindings remain managed by the browser; check the browser's shortcut settings after upgrading. Search uses Alt+Shift+K because Firefox on Linux intercepts Alt+Shift+F for its File menu and Chromium reserves Alt+Shift+X for tab-group navigation. You can assign shortcuts yourself:
+Chrome allows at most four suggested shortcuts per extension. **Close Stale Tabs** and **Close Blank Tabs** ship without defaults. Existing user-assigned bindings remain managed by the browser; check the browser's shortcut settings after upgrading. Search uses the same period key across platforms: Firefox reserves Ctrl+Shift+K for its web console on Windows/Linux (the Mac console shortcut is Command+Option+K). TabVacuum never overwrites shortcuts the browser already holds, so an existing install may keep its previous search binding until you change it in the browser's shortcut settings. You can assign shortcuts yourself:
 
 **Firefox**: remap in `about:addons` → gear icon → "Manage Extension Shortcuts".
 **Chrome**: remap in `chrome://extensions/shortcuts`.
+
+### Action feedback
+
+Sort, Merge and cleanup actions report their result the same way from every surface:
+
+- **Toolbar popup**: the status area shows an action label and spinner while the action runs, and the popup ignores further action clicks until it finishes. On success, or when nothing needed changing, the popup closes and a system notification reports the outcome. A genuine failure keeps the popup open with the error shown inline.
+- **Tab right-click menu and keyboard shortcuts**: a system notification reports the outcome.
+- **Nothing to do** (for example, no duplicates found) is reported as information, not an error.
+- If the notification itself cannot be shown, the action's real result still stands; an open popup shows that result inline instead of reporting a failure.
+
+Whether system notifications appear depends on your operating system's notification settings for the browser. Closing tabs from the search palette is different: the palette stays open and reports results inline.
 
 ## Settings
 
@@ -128,3 +139,5 @@ Firefox 115+ and Chrome 127+ are supported by the manifests. Firefox's embedded 
 Run `npm run test:browsers` on Linux with Python 3, Xvfb, X11/XTest libraries, ffmpeg, Firefox, geckodriver, and Chromium installed. The tests use real built extensions, in-page palettes, protected-page fallback windows, native toolbar menus, and local fixture tabs in fresh profiles, with no mocked browser APIs. Test pages bind only to loopback. Set `KIROCREW_SCRATCH` (or `TMPDIR`) to a disposable test directory. Optional paths are `FIREFOX_BINARY`, `GECKODRIVER`, `CHROMIUM_BINARY`, and `XVFB_BINARY`. Firefox/geckodriver/Xvfb default to the session's `browsers/` install; Chromium defaults to Playwright's browser. On hosts with locally extracted Xvfb libraries, the harness also searches `browsers/usr/lib64` under scratch.
 
 Screenshots go under `tabvacuum-firefox/` and `tabvacuum-chromium/` in scratch. `RECORD_BROWSER=1 npm run test:chromium` additionally records the actual desktop flow to MP4. Firefox uses its native Marionette actor for popup content because ordinary WebDriver frame APIs exclude these remote extension views. Physical shortcut keys are sent through XTest on the isolated X display. This verifies Linux browser behavior; it does not claim OS-level macOS shortcut testing.
+
+For focused toolbar feedback and period-shortcut checks, build first, then run `node scripts/test-action-feedback.mjs chromium` and `node scripts/test-action-feedback.mjs firefox` with the same browser paths. `RECORD_BROWSER=1` records a real frecency sort and asserts its returned result. Success/no-op checks use real browser APIs on disposable tabs. Busy-state screenshots deliberately delay the test transport; failure cases inject transport errors or a notification-only failure. These checks establish notification API acceptance, not OS-banner visibility. The Firefox harness selects the privileged-inspection opt-in supported by the installed geckodriver, only for its throwaway profile.

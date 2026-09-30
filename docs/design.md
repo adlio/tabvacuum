@@ -106,10 +106,12 @@ Firefox example (Chrome is identical except `background` and no `browser_specifi
       "suggested_key": { "default": "Alt+Shift+S" },
       "description": "Sort tabs"
     },
-    "close-stale": {
-      "suggested_key": { "default": "Alt+Shift+X" },
-      "description": "Close stale tabs"
-    }
+    "search-tabs": {
+      "suggested_key": { "default": "Ctrl+Shift+Period", "mac": "Command+Shift+Period" },
+      "description": "Search tabs"
+    },
+    "close-stale": { "description": "Close stale tabs" },
+    "close-blank": { "description": "Close blank tabs" }
   }
 }
 ```
@@ -121,7 +123,7 @@ Firefox example (Chrome is identical except `background` and no `browser_specifi
 | `tabs` | Access `tab.url`, `tab.title`, `tab.lastAccessed` (R1-R4) |
 | `history` | Access `visitCount` for sort-by-visit-count (R3.1d) |
 | `contextMenus` | Tab context menu (R6.2). Chrome uses `contextMenus`; Firefox supports both `contextMenus` and `menus` |
-| `notifications` | Feedback when triggered via shortcut/context menu (R6.4) |
+| `notifications` | Outcome feedback for popup, context menu and shortcut actions (R6.4) |
 | `storage` | Persist user settings (R5.3) |
 
 ## Module Design
@@ -240,9 +242,14 @@ function notify(message) {
 
 ### popup.html / popup.js
 
-Minimal HTML with four action buttons and a sort-criteria dropdown with direction
-toggle. JS sends messages to background and displays the returned `message` string
-in a status area. ~50 lines of HTML, ~50 lines of JS.
+Minimal HTML with action buttons and a sort-criteria dropdown with direction
+toggle. JS sends messages to background. While Sort, Merge or a cleanup action is
+pending, the status area shows an action label and spinner, and further action commands are ignored.
+On success or a zero-match no-op the popup closes and the background posts the
+outcome as a native notification (R6.4). A genuine failure stays inline in the status
+area. If the notification cannot be delivered, the background still returns the
+actual completion result, which an open popup shows inline rather than as a failure.
+Search-palette closing is separate: it stays open and reports inline.
 
 ### options.html / options.js
 
@@ -259,8 +266,9 @@ User action (popup button / context menu / keyboard shortcut)
   → calls core.js pure function with data + settings
   → core.js returns plan (IDs to close, moves to make, message)
   → background.js executes plan via browser APIs
-  → returns { message } to caller
-  → UI displays message (popup status area or notification)
+  → posts the outcome as a native notification (zero matches = informational)
+  → returns { message } to caller (notification failure never rewrites the result)
+  → popup closes on success/no-op, or shows a genuine failure inline
 ```
 
 ## Testing Strategy (R9)
@@ -344,7 +352,7 @@ tabs already enriched with `visitCount`.
 
 ## Centered Tab Search (R11)
 
-The toolbar menu and Alt+Shift+K (Command+Shift+K on macOS) both invoke `search-launcher.js` through the background worker. The menu remains a normal toolbar popup; the search itself is not anchored to the address bar. Both surfaces share light/dark tokens in `ui-theme.css`. The toolbar renders actual browser-assigned bindings with `shortcuts.js`, translating Mac modifier names to native keycaps without changing user assignments.
+The toolbar menu and Ctrl+Shift+Period (Command+Shift+Period on macOS) both invoke `search-launcher.js` through the background worker. The menu remains a normal toolbar popup; the search itself is not anchored to the address bar. Both surfaces share light/dark tokens in `ui-theme.css`. The toolbar renders actual browser-assigned bindings with `shortcuts.js`, translating Mac modifier names to native keycaps without changing user assignments.
 
 - `search-core.js`: pure fuzzy title/URL ranking. Empty queries sort recent focus descending, put the current tab last, then limit to ten. Typed queries apply no current-tab exception.
 - `search-service.js`: live tab scope, normal/private filtering, focus timestamps, and tab/window activation. Search's own fallback tabs are excluded from results and focus tracking.

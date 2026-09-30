@@ -3,12 +3,13 @@
 // closed-shadow dialog, so the harness addresses the extension iframe from the
 // privileged side: its BrowsingContext under the tab, through Marionette's own
 // per-frame actor, the same way it reaches toolbar popups.
+import { execFileSync } from 'node:child_process';
 import { Builder, By } from 'selenium-webdriver';
 import firefox from 'selenium-webdriver/firefox.js';
 import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { startDisplay } from './test-display.mjs';
-import { inspectPopup } from './test-popup-fixture.mjs';
+import { inspectPopup, SEARCH_KEYS } from './test-popup-fixture.mjs';
 import { TITLES, startSite, outputDir, checker, until, sleep, nativeKeys as sendKeys, nativeHold, nativeSequence, captureDisplay, recorder, paletteContrast } from './test-browser-fixtures.mjs';
 import { runTabCycle, runSearchClosing } from './test-search-closing.mjs';
 
@@ -40,11 +41,16 @@ const env = display.env;
 process.env.DISPLAY = env.DISPLAY;
 const { check, finish } = checker();
 const shots = [];
+const driverPath = process.env.GECKODRIVER || path.join(scratch, 'browsers/geckodriver');
+const driverService = new firefox.ServiceBuilder(driverPath).addArguments('--host', '127.0.0.1');
 const options = new firefox.Options()
   .setBinary(process.env.FIREFOX_BINARY || path.join(scratch, 'browsers/firefox/firefox'))
-  .addArguments('-remote-allow-system-access')
   .setPreference('browser.startup.homepage_override.mstone', 'ignore')
   .setPreference('extensions.webextensions.uuids', JSON.stringify({ 'tabvacuum@adlio': UUID }));
+// Privileged inspection is limited to this throwaway browser; newer drivers own
+// the opt-in rather than accepting it as a Firefox capability.
+if (execFileSync(driverPath, ['--help'], { encoding: 'utf8' }).includes('--allow-system-access')) driverService.addArguments('--allow-system-access');
+else options.addArguments('-remote-allow-system-access');
 let driver;
 let video = { stop: async () => {} };
 
@@ -70,7 +76,7 @@ function actor(bc) { return bc.currentWindowGlobal.getActor('MarionetteCommands'
 
 try {
   driver = await new Builder().forBrowser('firefox').setFirefoxOptions(options)
-    .setFirefoxService(new firefox.ServiceBuilder(process.env.GECKODRIVER || path.join(scratch, 'browsers/geckodriver'))).build();
+    .setFirefoxService(driverService).build();
   await driver.manage().window().setRect({ x: 0, y: 0, width: 1280, height: 900 });
   await driver.installAddon(path.resolve('dist/firefox'), true);
   const version = (await driver.getCapabilities()).get('browserVersion');
@@ -132,7 +138,7 @@ try {
     await chrome('const w=Services.wm.getMostRecentWindow("navigator:browser"); w.focus(); w.gBrowser.selectedBrowser.focus();');
     const title = (await activeTitle()) || 'Mozilla Firefox';
     for (let attempt = 0; ; attempt++) {
-      try { nativeKeys(env, ['Alt_L', 'Shift_L', 'k'], title); return; } catch (error) { if (attempt > 10) throw error; await sleep(200); }
+      try { nativeKeys(env, SEARCH_KEYS, title); return; } catch (error) { if (attempt > 10) throw error; await sleep(200); }
     }
   }
   async function openOverlay() {
@@ -531,7 +537,7 @@ try {
       const menu = await inspectMenu(`return (${inspectPopup.toString()})()`);
       check(menu.scheme === expectedBackground, `${scheme}: native menu follows browser theme`, menu.scheme);
       check(menu.visible && menu.noOverflow && menu.sort && menu.status, `${scheme}: native menu layout, sort expansion and status semantics`, menu);
-      check(JSON.stringify(menu.shortcut) === JSON.stringify(['Alt', 'Shift', 'K']) && menu.shortcutLabel === 'Alt + Shift + K', `${scheme}: native menu shows actual shortcut as accessible keycaps`, menu);
+      check(JSON.stringify(menu.shortcut) === JSON.stringify(['Ctrl', 'Shift', '.']) && menu.shortcutLabel === 'Control + Shift + .', `${scheme}: native menu shows actual shortcut as accessible keycaps`, menu);
       check(menu.contrast >= 4.5, `${scheme}: native menu text contrast meets 4.5:1`, menu.contrast);
       await shot(`menu-${scheme}`, 'Native toolbar menu with actual browser shortcuts');
     }

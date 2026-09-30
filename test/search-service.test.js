@@ -289,7 +289,7 @@ for (const browser of ['firefox', 'chrome']) {
   it(`${browser}: four defaults, search bound, stale and blank commands retained unbound`, () => {
     const manifest = JSON.parse(readFileSync(new URL(`../src/manifest.${browser}.json`, import.meta.url)));
     expect(Object.values(manifest.commands).filter(c => c.suggested_key)).toHaveLength(4);
-    expect(manifest.commands['search-tabs'].suggested_key.default).toBe('Alt+Shift+K');
+    expect(manifest.commands['search-tabs'].suggested_key.default).toBe('Ctrl+Shift+Period');
     expect(manifest.commands['close-stale'].suggested_key).toBeUndefined();
     expect(manifest.commands['close-blank']).toBeDefined();
   });

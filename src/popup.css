@@ -48,7 +48,27 @@ h2 { padding: 4px 10px 5px; font-size: 12px; font-weight: 600; color: var(--mute
 .sort-options button span { color: var(--muted-foreground); }
 .sort-options button:hover { background: var(--hover); }
 .sort-options button:active { background: var(--selected); }
-#status { display: none; margin: 0; border-radius: 0; background: var(--muted); color: var(--foreground); }
-#status.visible { display: block; padding: 10px 18px; border-top: 1px solid var(--border); font-size: 12px; line-height: 18px; text-align: left; }
+/* The live region stays rendered while empty so its first message is announced. */
+#status { display: flex; align-items: flex-start; gap: 10px; margin: 0; border-radius: 0; background: var(--muted); color: var(--foreground); font-size: 12px; line-height: 18px; text-align: left; }
+#status.visible { padding: 10px 18px; border-top: 1px solid var(--border); }
+.status-copy { flex: 1; min-width: 0; }
+.status-title, .status-detail { display: block; }
+.status-detail { color: var(--muted-foreground); }
+#status[data-tone="error"] .status-title { color: var(--danger); }
+.spinner {
+  flex: none; width: 14px; height: 14px; margin-top: 2px;
+  border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%;
+  animation: popup-spin 0.8s linear infinite;
+}
+@keyframes popup-spin { to { transform: rotate(360deg); } }
+.status-close {
+  flex: none; min-height: 28px; padding: 4px 10px;
+  border: 1px solid var(--border); border-radius: 6px;
+  background: var(--background); color: var(--foreground); font: inherit; font-size: 12px;
+}
+.status-close:hover { background: var(--hover); }
+main[aria-busy="true"] button[aria-disabled="true"] { cursor: default; opacity: 0.55; }
+main[aria-busy="true"] button[aria-disabled="true"]:hover { background: transparent; }
+main[aria-busy="true"] .search-action[aria-disabled="true"]:hover { background: var(--accent-soft); }
 body:not(.ready) { visibility: hidden; }
 @media (forced-colors: active) { button:focus-visible { outline-color: Highlight; } }

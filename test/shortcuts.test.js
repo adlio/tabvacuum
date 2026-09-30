@@ -14,6 +14,11 @@ const cases = [
   ['Alt+Shift+K', 'linux', ['Alt', 'Shift', 'K'], 'Alt + Shift + K'],
   ['Ctrl+Comma', 'win', ['Ctrl', ','], 'Control + ,'],
   ['MacCtrl+Shift+Up', 'mac', ['⌃', '⇧', '↑'], 'Control + Shift + ↑'],
+  // Default search binding as each browser reports it on each platform.
+  ['Command+Shift+Period', 'mac', ['⌘', '⇧', '.'], 'Command + Shift + .'],
+  ['⌘⇧Period', 'mac', ['⌘', '⇧', '.'], 'Command + Shift + .'],
+  ['Ctrl+Shift+Period', 'win', ['Ctrl', 'Shift', '.'], 'Control + Shift + .'],
+  ['Ctrl+Shift+Period', 'linux', ['Ctrl', 'Shift', '.'], 'Control + Shift + .'],
   ['', 'mac', [], ''],
   [undefined, 'linux', [], ''],
 ];
@@ -79,13 +84,35 @@ describe('shortcut labels', () => {
 // Suggested defaults differ by platform, never by browser, and stay within
 // Chromium's four-default command limit. User-assigned bindings remain untouched.
 describe('manifest shortcut defaults', () => {
-  it.each(['firefox', 'chrome'])('uses the chosen Mac launcher binding in %s', async name => {
+  async function load(name) {
     const { readFileSync } = await import('node:fs');
-    const manifest = JSON.parse(readFileSync(new URL(`../src/manifest.${name}.json`, import.meta.url), 'utf8'));
+    return JSON.parse(readFileSync(new URL(`../src/manifest.${name}.json`, import.meta.url), 'utf8'));
+  }
+
+  // Ctrl+Shift+K opens Firefox's web console, so search uses the period chord.
+  it.each(['firefox', 'chrome'])('uses the period-chord search binding in %s', async name => {
+    const manifest = await load(name);
     expect(manifest.commands['search-tabs'].suggested_key).toEqual({
-      default: 'Alt+Shift+K', mac: 'Command+Shift+K',
+      default: 'Ctrl+Shift+Period', mac: 'Command+Shift+Period',
     });
-    expect(Object.values(manifest.commands).filter(command => command.suggested_key)).toHaveLength(4);
-    expect(manifest.commands['close-stale'].suggested_key).toBeUndefined();
+  });
+
+  it.each(['firefox', 'chrome'])('keeps exactly four suggested defaults in %s', async name => {
+    const { commands } = await load(name);
+    const defaults = Object.fromEntries(Object.entries(commands)
+      .filter(([, command]) => command.suggested_key)
+      .map(([id, command]) => [id, command.suggested_key]));
+    expect(defaults).toEqual({
+      'close-duplicates': { default: 'Alt+Shift+D' },
+      'merge-windows': { default: 'Alt+Shift+M' },
+      'sort-tabs': { default: 'Alt+Shift+S' },
+      'search-tabs': { default: 'Ctrl+Shift+Period', mac: 'Command+Shift+Period' },
+    });
+    expect(commands['close-stale'].suggested_key).toBeUndefined();
+    expect(commands['close-blank'].suggested_key).toBeUndefined();
+  });
+
+  it('ships identical command definitions to both browsers', async () => {
+    expect((await load('firefox')).commands).toEqual((await load('chrome')).commands);
   });
 });

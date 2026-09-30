@@ -74,9 +74,15 @@ tools to tame tab sprawl without leaving the browser.
   - Close Duplicates: `Alt+Shift+D`
   - Merge Windows: `Alt+Shift+M`
   - Sort Tabs: `Alt+Shift+S` (uses last-selected sort criteria)
-  - Search Tabs: `Alt+Shift+K` (`Command+Shift+K` on macOS)
+  - Search Tabs: `Ctrl+Shift+Period` (`Command+Shift+Period` on macOS). Firefox reserves `Ctrl+Shift+K` for its web console on Windows/Linux; the Mac console shortcut is `Command+Option+K`.
   - Close Stale and Close Blank: unassigned (manually assignable)
-- **R6.4**: After every operation, display a brief notification (via the popup if open, or `browser.notifications` if triggered via keyboard/context menu).
+- **R6.4**: Report every Sort, Merge and cleanup outcome, from every surface, without new permissions or storage:
+  - **R6.4a**: From the toolbar popup, show an action label and spinner in the status area and ignore further action commands until it settles. The background shows a `browser.notifications` notification on completion; close the popup on success or no-op once that notification is accepted.
+  - **R6.4b**: From the context menu or a keyboard shortcut, the background shows a `browser.notifications` notification.
+  - **R6.4c**: Zero matches (nothing to change) is informational, not an error.
+  - **R6.4d**: A genuine failure stays visible inline while the popup is open.
+  - **R6.4e**: If notification delivery fails, preserve and show the action's actual completion result (inline when the popup is open); never report the tab mutation itself as failed. Notification visibility depends on OS settings.
+  - **R6.4f**: Closing rows or batches from the search palette keeps the palette open and reports inline (R11.13).
 
 ### R7 - Safety
 
@@ -109,7 +115,7 @@ tools to tame tab sprawl without leaving the browser.
 
 ### R11 - Tab Search
 
-- **R11.1**: Open search from a TabVacuum toolbar-menu item or the default Alt+Shift+K shortcut (Command+Shift+K on macOS). Remove the Close Stale Tabs default, retaining its command and all cleanup actions. Keep four suggested shortcuts. Show actual user-assigned shortcuts as platform-native keycaps; do not overwrite existing assignments.
+- **R11.1**: Open search from a TabVacuum toolbar-menu item or the default Ctrl+Shift+Period shortcut (Command+Shift+Period on macOS). Remove the Close Stale Tabs default, retaining its command and all cleanup actions. Keep four suggested shortcuts. Show actual user-assigned shortcuts as platform-native keycaps; do not overwrite existing assignments.
 - **R11.2**: Search tab titles and URLs while typing. Fuzzy matching is enabled by default; exact/literal matches outrank fuzzy matches. Results show titles, URLs, match source, and other-window context without runtime configuration controls.
 - **R11.3**: For an empty/whitespace-only query, sort by most recent focus descending and force the current tab last, then take the first 10. With two tabs, the other tab is first; with one, the current tab remains selectable. For every nonempty query, apply no current-tab ranking exception.
 - **R11.4**: Arrow keys move the highlighted result without activating tabs. Enter activates that tab and focuses its window without moving the tab. Escape dismisses without navigation. Clicking a result also selects it.

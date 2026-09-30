@@ -44,8 +44,8 @@
     },
     "search-tabs": {
       "suggested_key": {
-        "default": "Alt+Shift+K",
-        "mac": "Command+Shift+K"
+        "default": "Ctrl+Shift+Period",
+        "mac": "Command+Shift+Period"
       },
       "description": "Search tabs"
     },

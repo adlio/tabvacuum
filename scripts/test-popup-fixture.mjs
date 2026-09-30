@@ -1,3 +1,6 @@
+// Native XTest keysyms for the default search binding, Ctrl+Shift+Period on Linux.
+export const SEARCH_KEYS = ['Control_L', 'Shift_L', 'period'];
+
 // Serialized into the native extension popup by both browser harnesses.
 export function inspectPopup() {
   const $ = id => document.getElementById(id);
@@ -32,7 +35,12 @@ export function inspectPopup() {
     shortcutLabel: shortcut.getAttribute('aria-label'),
     noOverflow: document.documentElement.scrollWidth <= innerWidth && [...document.querySelectorAll('button')].filter(visible).every(el => el.scrollWidth <= el.clientWidth),
     sort: expanded && $('sort-options').hidden && $('btn-sort').getAttribute('aria-expanded') === 'false' && sortCount === 7,
-    status: $('status').getAttribute('role') === 'status',
+    // The live region is the status copy; the spinner and Close button sit outside it.
+    status: (() => {
+      const live = $('status').querySelector('.status-copy');
+      return live?.getAttribute('role') === 'status' && live.getAttribute('aria-live') === 'polite' &&
+        !$('status').hasAttribute('role') && !live.contains($('status-close')) && !live.contains($('status-spinner'));
+    })(),
     contrast: Math.min(...ratios),
     scheme: getComputedStyle(document.body).backgroundColor,
   };
