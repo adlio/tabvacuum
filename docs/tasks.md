@@ -116,3 +116,7 @@
 ## Consistent shortcut and action feedback (R6.1, R6.3, R6.4, R11.1)
 
 - [x] **T68 (Kiro)** — Implemented approved option B: Command+Shift+Period on macOS and Ctrl+Shift+Period elsewhere, preserving browser-owned assignments and the four-command limit. Sort/Merge/cleanup show an immediate busy label and spinner, prevent repeat actions, collapse the sort submenu so progress fits, close on success/no-op, and report through background system notifications from all three entry points. Failures stay visible; notification-only failures preserve the completed result. Search-palette closing remains unchanged. Verified 619 unit tests, both builds, clean extension lint, focused native Firefox/Chromium popup and shortcut checks, plus 172 Firefox and 189 Chromium closing/expanded-search checks. Source and cold-user visual review completed; fixed submenu overflow and pointer-focus recovery, clarified Escape, and asserted the recorded sort result. Physical macOS/Windows keys, native screen-reader announcements and OS notification-banner visibility remain unverified. Combined changes target PR #12; no branding, version bump, merge or release.
+
+## 0.5.1 release preparation (R10)
+
+- [x] **T69 (Kiro)** — Prepared the version-only 0.5.1 candidate from merged main, aligned package and lockfile root versions without dependency changes, and verified both browser ZIPs contain version 0.5.1 with 26 files matching each build. All 619 unit tests, both builds/packages and extension lint pass. No code, permission, branding, tag or store-publication changes.
