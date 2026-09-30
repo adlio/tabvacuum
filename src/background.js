@@ -13,7 +13,7 @@ launcher.installCleanup();
 function openSearch(tab) {
   return launcher.launch(tab).catch(() => {
     const message = 'Could not open Search tabs. Try again from the TabVacuum menu. For private windows, check that TabVacuum is allowed to run there.';
-    notify(message);
+    notify(message).catch(() => {});
     return { error: message };
   });
 }
@@ -43,13 +43,35 @@ async function saveSettings(settings) {
   return { message: 'Settings saved' };
 }
 
-function notify(message) {
-  browser.notifications.create({
+async function notify(message) {
+  await browser.notifications.create({
     type: 'basic',
     title: 'TabVacuum',
     message,
     iconUrl: 'icons/icon-96.png',
   });
+}
+
+const errorText = err => String(err?.message ?? err ?? 'Unknown error');
+
+// Runs a tab action and reports its outcome in exactly one system
+// notification, whichever surface started it (R6.4). Never rejects: an action
+// failure stays `error`; a notification failure after completed work is
+// reported separately so the completed tab change is not presented as failed.
+async function runAction(action) {
+  let result;
+  try {
+    result = await action();
+  } catch (err) {
+    const error = errorText(err);
+    result = { error, message: `Error: ${error}` };
+  }
+  try {
+    await notify(result.message);
+  } catch (err) {
+    return { ...result, notificationError: errorText(err) };
+  }
+  return result;
 }
 
 async function closeMatchingTabs(findFn) {
@@ -160,21 +182,25 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   const handlers = {
     launchSearch: () => openSearch(),
-    closeDuplicates,
-    mergeWindows,
-    closeStaleTabs,
-    closeBlankTabs,
+    closeDuplicates: () => runAction(closeDuplicates),
+    mergeWindows: () => runAction(mergeWindows),
+    closeStaleTabs: () => runAction(closeStaleTabs),
+    closeBlankTabs: () => runAction(closeBlankTabs),
     getSettings,
-    sortTabs: () => sortTabs(message.criteria, message.direction),
+    sortTabs: () => runAction(() => sortTabs(message.criteria, message.direction)),
     saveSettings: () => saveSettings(message.settings)
   };
 
   if (!Object.hasOwn(handlers, message?.command)) return;
   const handler = handlers[message.command];
 
+  // The reply is sent only after the action and its notification settle. The
+  // work itself does not depend on delivery: a dismissed popup just drops it.
   handler()
-    .then(sendResponse)
-    .catch(err => sendResponse({ error: err.message, message: `Error: ${err.message}` }));
+    .catch(err => ({ error: errorText(err), message: `Error: ${errorText(err)}` }))
+    .then(result => {
+      try { sendResponse(result); } catch { /* caller is gone */ }
+    });
   return true; // keep message channel open for async sendResponse
 });
 
@@ -210,10 +236,7 @@ browser.contextMenus.onClicked.addListener(async (info) => {
   };
 
   const action = menuActions[info.menuItemId];
-  if (action) {
-    const result = await action();
-    notify(result.message);
-  }
+  if (action) await runAction(action);
 });
 
 // Handle keyboard shortcuts
@@ -232,8 +255,6 @@ browser.commands.onCommand.addListener(async (command, tab) => {
   };
 
   const action = commandActions[command];
-  if (action) {
-    const result = await action();
-    notify(result.message);
-  }
+  // Called with no arguments so the shortcut sort uses the saved criteria.
+  if (action) await runAction(() => action());
 });

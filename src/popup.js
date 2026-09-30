@@ -1,66 +1,150 @@
 // TabVacuum popup UI
 import { renderShortcuts } from './shortcuts.js';
 
-const elements = {
-  status: document.getElementById('status'),
-  btnDupes: document.getElementById('btn-dupes'),
-  btnMerge: document.getElementById('btn-merge'),
-  btnSort: document.getElementById('btn-sort'),
-  sortOptions: document.querySelector('.sort-options'),
-  btnStale: document.getElementById('btn-stale'),
-  btnBlank: document.getElementById('btn-blank')
+const ACTIONS = {
+  closeDuplicates: { busy: 'Closing duplicate tabs...', failed: 'Could not close duplicate tabs' },
+  mergeWindows: { busy: 'Merging windows...', failed: 'Could not merge windows' },
+  closeStaleTabs: { busy: 'Closing stale tabs...', failed: 'Could not close stale tabs' },
+  closeBlankTabs: { busy: 'Closing blank tabs...', failed: 'Could not close blank tabs' },
+  sortTabs: { failed: 'Could not sort tabs' },
+  launchSearch: { failed: 'Could not open Search tabs' },
 };
 
-function showStatus(message) {
-  elements.status.textContent = message;
-  elements.status.classList.add('visible');
-  setTimeout(() => elements.status.classList.remove('visible'), 3000);
-}
+const SORT_LABELS = {
+  'url:asc': 'URL, A → Z', 'url:desc': 'URL, Z → A',
+  'title:asc': 'title, A → Z', 'title:desc': 'title, Z → A',
+  'lastAccessed:desc': 'last accessed', 'visitCount:desc': 'most visited',
+  'frecency:desc': 'frequent & recent',
+};
 
-async function sendCommand(command, params = {}) {
-  try {
-    const result = await browser.runtime.sendMessage({ command, ...params });
-    showStatus(result.message);
-  } catch (error) {
-    showStatus(`Error: ${error.message}`);
+// Sorts that look up every tab in history can take a while (R3).
+const HISTORY_SORTS = new Set(['visitCount', 'frecency']);
+const HISTORY_DETAIL = 'Reading browsing history. Press Esc to dismiss.';
+
+const errorText = err => String(err?.message ?? err ?? 'Unknown error');
+
+export function startPopup({ document, window, browser }) {
+  const $ = id => document.getElementById(id);
+  const main = document.querySelector('main');
+  const sortOptions = $('sort-options');
+  const actionButtons = [
+    $('btn-search'), $('btn-merge'), $('btn-sort'), $('btn-dupes'), $('btn-stale'), $('btn-blank'),
+    ...sortOptions.querySelectorAll('button'),
+  ];
+  const status = { box: $('status'), spinner: $('status-spinner'), title: $('status-title'), detail: $('status-detail'), close: $('status-close') };
+  let pending = false;
+  let dismissed = false;
+
+  // A dismissed menu is gone for good: late replies must not touch it or reopen anything.
+  window.addEventListener('pagehide', () => { dismissed = true; });
+
+  function render({ tone, title, detail = '', busy = false, closable = false }) {
+    status.box.dataset.tone = tone;
+    status.box.classList.add('visible');
+    status.spinner.hidden = !busy;
+    status.title.textContent = title;
+    status.detail.textContent = detail;
+    status.detail.hidden = !detail;
+    status.close.hidden = !closable;
   }
-}
 
-function toggleSortOptions() {
-  const isHidden = elements.sortOptions.hidden;
-  elements.sortOptions.hidden = !isHidden;
-  elements.btnSort.setAttribute('aria-expanded', String(isHidden));
-}
+  function clearStatus() {
+    status.box.classList.remove('visible');
+    delete status.box.dataset.tone;
+    status.spinner.hidden = true;
+    status.title.textContent = '';
+    status.detail.textContent = '';
+    status.detail.hidden = true;
+    status.close.hidden = true;
+  }
 
-// Action buttons
-elements.btnDupes.addEventListener('click', () => sendCommand('closeDuplicates'));
-elements.btnMerge.addEventListener('click', () => sendCommand('mergeWindows'));
-elements.btnStale.addEventListener('click', () => sendCommand('closeStaleTabs'));
-elements.btnBlank.addEventListener('click', () => sendCommand('closeBlankTabs'));
+  // aria-disabled keeps focus on the pressed control, so keyboard users are not dropped to <body>.
+  function setBusy(busy) {
+    pending = busy;
+    if (busy) main.setAttribute('aria-busy', 'true');
+    else main.removeAttribute('aria-busy');
+    for (const button of actionButtons) {
+      if (busy) button.setAttribute('aria-disabled', 'true');
+      else button.removeAttribute('aria-disabled');
+    }
+  }
 
-// Sort Tabs toggle
-elements.btnSort.addEventListener('click', toggleSortOptions);
+  function finishWithError(trigger, text) {
+    setBusy(false);
+    render({ tone: 'error', title: text, detail: 'Try again, or close this menu.', closable: true });
+    if (!document.activeElement || document.activeElement === document.body) trigger?.focus();
+  }
 
-// Sort option buttons — each fires immediately
-elements.sortOptions.addEventListener('click', (e) => {
-  const btn = e.target.closest('button[data-criteria]');
-  if (!btn) return;
-  sendCommand('sortTabs', {
-    criteria: btn.dataset.criteria,
-    direction: btn.dataset.direction
-  });
-});
-
-// Opening the menu granted activeTab for this window's page; the background
-// shows search over it (or in a separate window) and this menu gets out of the way.
-document.getElementById('btn-search').addEventListener('click', async () => {
-  try {
-    const result = await browser.runtime.sendMessage({ command: 'launchSearch' });
-    if (result?.error) throw new Error(result.error);
+  async function run(trigger, command, params, busyLabel) {
+    if (pending || dismissed) return;
+    // Keep progress visible within the browser's popup height limit. The status
+    // names the selected sort, so its submenu can collapse while work runs.
+    if (!sortOptions.hidden) {
+      const focusInSort = sortOptions.contains(document.activeElement);
+      if (sortOptions.contains(trigger)) trigger = $('btn-sort');
+      sortOptions.hidden = true;
+      $('btn-sort').setAttribute('aria-expanded', 'false');
+      if (focusInSort) $('btn-sort').focus();
+    }
+    setBusy(true);
+    if (busyLabel) render({ tone: 'busy', busy: true, ...busyLabel });
+    else clearStatus();
+    const failed = ACTIONS[command].failed;
+    let result;
+    try {
+      result = await browser.runtime.sendMessage({ command, ...params });
+    } catch (error) {
+      if (!dismissed) finishWithError(trigger, `${failed}: ${errorText(error)}`);
+      return;
+    }
+    if (dismissed) return;
+    // Search errors are complete sentences from the background already.
+    if (result?.error) return finishWithError(trigger, command === 'launchSearch' ? String(result.error) : `${failed}: ${result.error}`);
+    const done = command === 'launchSearch' ? result && typeof result === 'object' : typeof result?.message === 'string' && result.message.trim();
+    if (!done) return finishWithError(trigger, `${failed}: TabVacuum did not respond.`);
+    if (result.notificationError) {
+      // The work completed; only the system notification failed. Never present it as a failure.
+      setBusy(false);
+      render({ tone: 'done', title: result.message, detail: `System notification unavailable: ${result.notificationError}`, closable: true });
+      if (!document.activeElement || document.activeElement === document.body) trigger?.focus();
+      return;
+    }
     window.close();
-  } catch (error) {
-    showStatus(`Error: ${error.message}`);
   }
-});
-renderShortcuts(document, browser);
-document.body.classList.add('ready');
+
+  const bind = (id, command, busy) => $(id).addEventListener('click', event => run(event.currentTarget ?? $(id), command, {}, busy));
+  bind('btn-dupes', 'closeDuplicates', { title: ACTIONS.closeDuplicates.busy });
+  bind('btn-merge', 'mergeWindows', { title: ACTIONS.mergeWindows.busy });
+  bind('btn-stale', 'closeStaleTabs', { title: ACTIONS.closeStaleTabs.busy });
+  bind('btn-blank', 'closeBlankTabs', { title: ACTIONS.closeBlankTabs.busy });
+  // Opening the menu granted activeTab for this window's page; the background
+  // shows search over it (or in a separate window) and this menu gets out of the way.
+  bind('btn-search', 'launchSearch');
+
+  $('btn-sort').addEventListener('click', () => {
+    if (pending) return;
+    const opening = sortOptions.hidden;
+    sortOptions.hidden = !opening;
+    $('btn-sort').setAttribute('aria-expanded', String(opening));
+  });
+
+  // Sort option buttons — each fires immediately
+  sortOptions.addEventListener('click', event => {
+    const button = event.target.closest('button[data-criteria]');
+    if (!button) return;
+    const { criteria, direction } = button.dataset;
+    const label = SORT_LABELS[`${criteria}:${direction}`] ?? 'the selected order';
+    run(button, 'sortTabs', { criteria, direction }, {
+      title: `Sorting by ${label}...`,
+      detail: HISTORY_SORTS.has(criteria) ? HISTORY_DETAIL : '',
+    });
+  });
+
+  status.close.addEventListener('click', () => window.close());
+}
+
+if (globalThis.browser?.runtime && globalThis.document?.getElementById('btn-merge')) {
+  startPopup({ document, window, browser });
+  renderShortcuts(document, browser);
+  document.body.classList.add('ready');
+}

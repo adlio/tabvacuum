@@ -6,7 +6,7 @@ import { chromium } from 'playwright';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { startDisplay } from './test-display.mjs';
-import { inspectPopup } from './test-popup-fixture.mjs';
+import { inspectPopup, SEARCH_KEYS } from './test-popup-fixture.mjs';
 import { TITLES, startSite, outputDir, checker, until, sleep, nativeKeys as sendKeys, nativeHold, nativeSequence, captureDisplay, recorder, paletteContrast } from './test-browser-fixtures.mjs';
 import { runTabCycle, runSearchClosing } from './test-search-closing.mjs';
 
@@ -62,7 +62,7 @@ try {
   await until(async () => (await tab(ids.remote)).status === 'complete', 'remote loaded');
 
   const commands = await worker.evaluate(() => chrome.commands.getAll());
-  check(commands.find(c => c.name === 'search-tabs')?.shortcut === 'Alt+Shift+K', 'search default registered by Chromium');
+  check(commands.find(c => c.name === 'search-tabs')?.shortcut === 'Ctrl+Shift+Period', 'search default registered by Chromium');
 
   // --- helpers over the real frame tree -------------------------------------
   const overlayFrame = p => p.frames().find(f => f.url() === searchUrl);
@@ -74,7 +74,7 @@ try {
   const windowTitle = async p => `${(await p.title()) || p.url()} - Chromium`;
   async function shortcut(p) {
     await p.bringToFront();
-    await native(p, ['Alt_L', 'Shift_L', 'k']);
+    await native(p, SEARCH_KEYS);
   }
   // The X window title trails document.title slightly; retry the lookup briefly.
   async function native(p, keys) {
@@ -247,7 +247,7 @@ try {
     click: selector => uiTarget().click(selector),
     async open() {
       await ui.page.bringToFront();
-      await nativeTo(['Alt_L', 'Shift_L', 'k'], await ui.page.title());
+      await nativeTo(SEARCH_KEYS, await ui.page.title());
       let kind;
       await until(() => {
         if (ui.page.frames().some(f => f.url() === searchUrl && !f.name())) return (kind = 'overlay');
@@ -536,7 +536,7 @@ try {
       const menu = await popupEval(`(${inspectPopup.toString()})()`);
       check(menu.scheme === (scheme === 'dark' ? 'rgb(28, 28, 31)' : 'rgb(255, 255, 255)'), `${scheme}: native menu follows browser theme`, menu.scheme);
       check(menu.visible && menu.noOverflow && menu.sort && menu.status, `${scheme}: native menu layout, sort expansion and status semantics`, menu);
-      check(JSON.stringify(menu.shortcut) === JSON.stringify(['Alt', 'Shift', 'K']) && menu.shortcutLabel === 'Alt + Shift + K', `${scheme}: native menu shows actual shortcut as accessible keycaps`, menu);
+      check(JSON.stringify(menu.shortcut) === JSON.stringify(['Ctrl', 'Shift', '.']) && menu.shortcutLabel === 'Control + Shift + .', `${scheme}: native menu shows actual shortcut as accessible keycaps`, menu);
       check(menu.contrast >= 4.5, `${scheme}: native menu text contrast meets 4.5:1`, menu.contrast);
       await shot(`menu-${scheme}`, 'Native toolbar menu with actual browser shortcuts');
     }
@@ -668,7 +668,7 @@ try {
     await until(async () => (await privEval(id => chrome.tabs.query({ windowId: id }), priv.windowId)).every(t => t.status === 'complete'), 'private tabs loaded');
     await evalIn(privTarget.targetId, 'document.title = "Private sentinel"');
     await sleep(400);
-    await keysTo('Private sentinel', ['Alt_L', 'Shift_L', 'k']);
+    await keysTo('Private sentinel', SEARCH_KEYS);
     let privMode, privFrame;
     await until(async () => {
       const all = (await targets()).filter(t => t.browserContextId === privContext);
@@ -709,7 +709,7 @@ try {
     await evalIn(blankTarget.targetId, 'document.title = "Private blank"');
     await sleep(400);
     const windowsBefore = { normal: await windowCount(), private: await privEval(() => chrome.windows.getAll().then(w => w.length)) };
-    await keysTo('Private blank', ['Alt_L', 'Shift_L', 'k']);
+    await keysTo('Private blank', SEARCH_KEYS);
     const findSearchWindow = url => chrome.windows.getAll({ populate: true }).then(ws => {
       for (const w of ws) {
         const t = w.tabs.find(t => (t.url || t.pendingUrl || '').startsWith(url + '?'));
@@ -994,7 +994,7 @@ try {
             await sleep(300);
           },
           async open() {
-            await keys(['Alt_L', 'Shift_L', 'k']);
+            await keys(SEARCH_KEYS);
             let kind;
             await until(async () => {
               if (await frame()) return (kind = 'overlay');
