@@ -18,11 +18,13 @@
 // website access is granted only there, through the browser's own prompt.
 import { randomBytes } from 'node:crypto';
 import { sleep, until, contentPages, pageTitles, hits } from './test-browser-fixtures.mjs';
-import { LAYOUT } from './test-search-closing.mjs';
+import { LAYOUT, follow } from './test-search-closing.mjs';
 
 const LETTERS = 'abcdefghijklmnopqrstuvwxyz';
 const newToken = prefix => `${prefix}${[...randomBytes(6)].map(b => LETTERS[b % 26]).join('')}`;
 const pathOf = url => new URL(url).pathname;
+const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const sameSet = (a, b) => same([...a].sort(), [...b].sort());
 
 const STATE = `
   const $ = id => document.getElementById(id);
@@ -374,6 +376,8 @@ async function contentFlow(ctx) {
   check(s && !s.rows.some(r => r.snippet && r.url === moved) && !s.rows.some(r => r.url === url.main), 'contents: navigating a tab away drops its stale snippet', brief(s));
   await dismiss();
 
+  await hostHandoff(ctx);
+
   await privateFlow(ctx);
 
   // Revoke in Settings; reopened search no longer offers or shows contents.
@@ -391,6 +395,117 @@ async function contentFlow(ctx) {
   s = await settle(s => s.rows.length >= 1);
   check(s.rows.every(r => !r.snippet) && !s.rows.some(r => r.url === url.main2), 'permissions: after revoke no content snippets remain', brief(s));
   await dismiss();
+}
+
+// With website access granted through Settings and Contents off: closing the host moves
+// the palette to a surviving, loaded, permitted tab in the SAME window, never one the same
+// request closes, keeping query, mode, History and other checks; repeated host closes stay
+// in-page. A sleeping tab and a protected page in that window never take over, so once
+// only they are left, the standalone window does.
+async function hostHandoff(ctx) {
+  const { a, x, check, press, settle, open, dismiss, setSource, state } = ctx;
+  const tk = newToken('hh');
+  const page = slug => `${a.base}/disposable/${tk}-${slug}`;
+  const u = { guarded: 'data:text/html,%3Ctitle%3EProtected%20handoff%3C/title%3E', host: page('host'), tango: page('tango'),
+    romeo: page('romeo'), sierra: page('sierra'), sugar: page('sugar'), sleeping: page('sleeping') };
+  const order = [u.host, u.tango, u.romeo, u.sierra, u.sugar, u.sleeping];
+  const tabUrls = s => s.rows.filter(r => !r.history).map(r => r.url);
+  const short = url => (url?.startsWith('data:') ? 'protected' : url?.split(`${tk}-`)[1] ?? url);
+  const view = s => ({ focus: s.focus, mode: s.mode, query: s.query, history: s.history.checked, content: s.content.checked,
+    tabs: tabUrls(s).map(short), checked: s.rows.filter(r => r.checked).map(r => short(r.url)) });
+  const closed = [];
+  // Highlight the open-tab row for `url` with the arrow keys.
+  async function highlight(url) {
+    let s = await state();
+    for (let i = 0; i < 20; i++) {
+      const at = s.rows.findIndex(r => r.active), want = s.rows.findIndex(r => r.url === url && !r.history);
+      if (at === want || want < 0) break;
+      s = await press([at < want ? 'Down' : 'Up'], 150);
+    }
+    return s;
+  }
+  // After a close that included the host `from`: the palette is now over another candidate.
+  async function handedOff(label, from, closing, ok) {
+    closed.push(...closing);
+    const ui = await follow(a, { not: from });
+    const candidates = [u.romeo, u.sierra, u.sugar].filter(url => !closed.includes(url));
+    const active = await a.activeUrl();
+    const moved = check(ui.kind === 'overlay' && ui.window === 'handoff' && candidates.includes(ui.url) && active === ui.url,
+      `host handoff ${label}: palette moves in-page to a surviving loaded permitted tab in the same window`,
+      { host: short(ui.url), window: ui.window, kind: ui.kind, active: short(active), candidates: candidates.map(short) });
+    if (!ui.kind) throw new Error('search ended with its host');
+    const s = await state();
+    const removed = await a.removed();
+    check(moved && sameSet(removed, closed) && removed.at(-1) === from && ok(s), `host handoff ${label}: exactly the requested tabs closed, host last; state kept`,
+      { removed: removed.map(short), ...view(s) });
+    return { host: ui.url, s };
+  }
+
+  try {
+    await a.createWindow('handoff', [u.guarded, ...order]);
+    ctx.created.push(...Object.values(u));
+    await x.discard(u.sleeping);
+    check(await x.permitted() && await x.isDiscarded(u.sleeping), 'host handoff: website access granted; one matching tab is asleep');
+    let { kind, s } = await open(u.host);
+    await a.startRemovals();
+    check(kind === 'overlay', 'host handoff: shortcut opens the overlay over the host tab', kind);
+    await setSource('history', true);
+    await a.type(tk);
+    s = await settle(s => tabUrls(s).length === order.length && s.busy === 'false');
+    check(s.history.checked && !s.content.checked && !s.content.disabled && tabUrls(s)[0] === u.host && sameSet(tabUrls(s), order),
+      'host handoff: History on, Contents available but off, host listed first', view(s));
+    const kept = (s, mode) => s.query === tk && s.mode === mode && s.focus === 'results' && s.history.checked && !s.content.checked;
+
+    // One batch: the host and another loaded tab. Neither may receive the palette.
+    await press(['Tab']);
+    await press(['m']);
+    for (const url of [u.host, u.tango]) { await highlight(url); await press(['space'], 150); }
+    s = await highlight(u.romeo);
+    check(s.mode === 'select' && sameSet(s.rows.filter(r => r.checked).map(r => r.url), [u.host, u.tango]), 'host handoff: host and one other tab checked', view(s));
+    await a.keys(['x']);
+    let step = await handedOff('(batch)', u.host, [u.tango, u.host],
+      s => kept(s, 'select') && s.rows.every(r => !r.checked) && sameSet(tabUrls(s), order.filter(url => ![u.host, u.tango].includes(url))));
+    await a.shot('host-handoff-in-page', 'website access on: after closing the host and another tab, the palette continues over a surviving tab in the same window');
+
+    // Row X on the new host while another row is checked: that check stays.
+    const other = [u.romeo, u.sierra, u.sugar].find(url => url !== step.host);
+    await highlight(other);
+    s = await press(['space'], 150);
+    check(same(s.rows.filter(r => r.checked).map(r => r.url), [other]), 'host handoff: another row checked before the host row X', view(s));
+    await a.click(`#${s.rows.find(r => r.url === step.host && !r.history).closer}`);
+    step = await handedOff('(row X)', step.host, [step.host],
+      s => kept(s, 'select') && same(s.rows.filter(r => r.checked).map(r => r.url), [other]));
+
+    // Tab menu X on the host again: still in-page.
+    s = await press(['Escape']);
+    check(s.mode === 'tabs' && s.rows.every(r => !r.checked), 'host handoff: Escape returns to the tab menu', view(s));
+    await highlight(step.host);
+    await a.keys(['x']);
+    step = await handedOff('(tab menu X)', step.host, [step.host], s => kept(s, 'tabs'));
+
+    // Last loaded permitted tab: only the sleeping and protected tabs remain, so the
+    // standalone window takes over and neither of them is woken or activated.
+    await highlight(step.host);
+    await a.keys(['x']);
+    closed.push(step.host);
+    const ui = await follow(a, { not: step.host });
+    s = ui.kind && await state();
+    const removed = await a.removed();
+    const left = { asleep: await x.isDiscarded(u.sleeping), guarded: await a.exists(u.guarded), window: await a.windowAlive('handoff') };
+    check(ui.kind === 'window' && sameSet(removed, closed) && s && kept(s, 'tabs') && same(tabUrls(s), [u.sleeping]) &&
+      left.asleep && left.guarded && left.window,
+    'host handoff: with only a sleeping and a protected tab left, the standalone window takes over; neither is woken',
+    { kind: ui.kind, removed: removed.map(short), ...left, ...(s ? view(s) : {}) });
+    await dismiss();
+    const after = { ...(await a.uiCount()), sessions: await a.sessions() };
+    check(after.overlays + after.windows + after.sessions === 0, 'host handoff: Escape dismisses; no orphan session', after);
+  } catch (error) {
+    check(false, 'host handoff: scenario stopped', error.message);
+    if ((await a.searchUIs()).length) await dismiss().catch(() => {});
+  } finally {
+    await a.cleanup([], ['handoff']).catch(() => {});
+    await a.focus(a.originUrl).catch(() => {});
+  }
 }
 
 // Private window, while website access is granted: the palette there never reads

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createSearchService } from '../src/search-service.js';
-import { createSearchLauncher, placement, newToken, UNCLAIMED_MS, SESSION_MS } from '../src/search-launcher.js';
+import { createSearchLauncher, placement, newToken, handoffState, UNCLAIMED_MS, SESSION_MS, HANDOFF_MS, READY_MS } from '../src/search-launcher.js';
 import { mountSearchOverlay } from '../src/search-overlay.js';
 import { searchPageContent } from '../src/search-content.js';
 
@@ -78,7 +78,7 @@ function setup({ now = () => 1_000_000 } = {}) {
   const env = fakeBrowser();
   const timers = [];
   const search = createSearchService(env.api);
-  const options = { now, schedule: fn => timers.push(fn) };
+  const options = { now, schedule: (fn, ms) => timers.push(Object.assign(fn, { ms })) };
   const launcher = createSearchLauncher(env.api, search, options);
   launcher.installCleanup();
   const send = (message, sender) => launcher.handleMessage(message, sender);
@@ -581,7 +581,9 @@ describe('injected overlay', () => {
       else page.win.dispatch('pagehide');
       expect(page.host()).toBeUndefined();
       expect(page.input.focus).toHaveBeenCalledWith({ preventScroll: true });
-      expect(page.runtime.sendMessage).toHaveBeenCalledWith({ command: 'dismissSearch', token: TOKEN });
+      // A page teardown is reported as such, never as the user's dismissal.
+      expect(page.runtime.sendMessage).toHaveBeenCalledWith(trigger === 'pagehide'
+        ? { command: 'dismissSearch', token: TOKEN, reason: 'pagehide' } : { command: 'dismissSearch', token: TOKEN });
       expect(page.runtime.sendMessage).toHaveBeenCalledTimes(1);
       vi.unstubAllGlobals();
     }
@@ -775,27 +777,54 @@ describe('closing selected tabs from search', () => {
   const removed = api => api.tabs.remove.mock.calls.map(([id]) => id);
 
   describe.each(['overlay', 'window'])('%s', mode => {
-    it('closes only the approved IDs and keeps the search usable', async () => {
+    it('closes only the approved IDs, keeps the search usable, and bundles the fresh list', async () => {
       const env = await closing(mode);
-      expect(await close(env, [2, 4])).toEqual({ ok: true, closedIds: [2, 4], skipped: [], failedIds: [] });
+      const result = await close(env, [2, 4]);
+      expect(result).toMatchObject({ ok: true, closedIds: [2, 4], skipped: [], failedIds: [] });
+      expect(Object.keys(result).sort()).toEqual(['closedIds', 'context', 'failedIds', 'ok', 'skipped']);
       expect(removed(env.api)).toEqual([2, 4]);
       expect(env.api.tabs.sendMessage).not.toHaveBeenCalled();
       expect(env.api.windows.remove).not.toHaveBeenCalled();
       const context = await env.send({ command: 'getSearchContext', token: env.token }, env.sender);
       expect(context.tabs.map(t => t.id)).toEqual([1, 5, 6]);
+      expect(result.context).toEqual(context);
     });
 
-    it('closes the origin last, then revokes the search and closes its UI', async () => {
+    it('reports a failed list read after a completed close, without closing again', async () => {
       const env = await closing(mode);
-      expect(await close(env, [1, 2, 4])).toEqual({ ok: true, closedIds: [2, 4, 1], skipped: [], failedIds: [] });
-      expect(removed(env.api)).toEqual([2, 4, 1]);
-      expect(env.stored()).toEqual({});
-      if (mode === 'window') expect(env.api.windows.remove).toHaveBeenCalledWith(env.created.id);
-      else expect(env.api.tabs.sendMessage).toHaveBeenCalledWith(1, expect.objectContaining({ type: 'tabvacuum:close' }), { frameId: 0 });
-      await expect(env.send({ command: 'getSearchContext', token: env.token }, env.sender)).rejects.toThrow('expired');
-      await expect(close(env, [5])).rejects.toThrow('expired');
+      await env.send({ command: 'getSearchContext', token: env.token }, env.sender); // Claim first.
+      const query = env.api.tabs.query.getMockImplementation();
+      // The scope read before closing succeeds; the bundled read after it fails.
+      env.api.tabs.query.mockImplementation(async q => {
+        if (env.api.tabs.remove.mock.calls.length && q.windowId === undefined) throw new Error('read failed');
+        return query(q);
+      });
+      const result = await close(env, [2]);
+      expect(result).toEqual({ ok: true, closedIds: [2], skipped: [], failedIds: [], contextError: true });
+      expect(removed(env.api)).toEqual([2]);
     });
+  });
 
+  describe('window', () => {
+    it('closes the origin last and stays usable, scoped to the origin’s window', async () => {
+      const env = await closing('window');
+      const result = await close(env, [1, 2, 4]);
+      expect(result).toMatchObject({ ok: true, closedIds: [2, 4, 1], skipped: [], failedIds: [] });
+      expect(result.context).toMatchObject({ windowId: 10 });
+      expect(result.context.tabs.map(t => t.id)).toEqual([5, 6]);
+      expect(removed(env.api)).toEqual([2, 4, 1]);
+      await new Promise(resolve => setImmediate(resolve)); // Queued onRemoved cleanup runs.
+      expect(env.api.windows.remove).not.toHaveBeenCalled();
+      expect(Object.keys(env.stored())).toEqual([env.token]);
+      // Still authorized, and the last-tab safeguard still applies.
+      await expect(close(env, [5])).resolves.toMatchObject({ closedIds: [], skipped: [{ tabId: 5, reason: 'last-tab' }] });
+      await expect(env.send({ command: 'dismissSearch', token: env.token }, env.sender)).resolves.toEqual({ ok: true });
+      expect(env.api.windows.remove).toHaveBeenCalledWith(env.created.id);
+      expect(env.stored()).toEqual({});
+    });
+  });
+
+  describe.each(['overlay', 'window'])('%s', mode => {
     it('keeps the search when the origin is protected as the last tab of its window', async () => {
       const env = await closing(mode);
       const result = await close(env, [1, 4, 6]);
@@ -823,7 +852,7 @@ describe('closing selected tabs from search', () => {
     it('reports partial failures instead of claiming success', async () => {
       const env = await closing(mode);
       env.api.tabs.remove.mockImplementationOnce(async () => { throw new Error('busy'); });
-      expect(await close(env, [2, 4])).toEqual({ ok: true, closedIds: [4], skipped: [], failedIds: [2] });
+      expect(await close(env, [2, 4])).toMatchObject({ ok: true, closedIds: [4], skipped: [], failedIds: [2] });
     });
 
     it.each([
@@ -876,8 +905,9 @@ describe('closing selected tabs from search', () => {
     await env.launcher.launch(await env.api.tabs.get(3));
     const sender = frame({ tab: { id: 3, windowId: 30, incognito: true } });
     const result = await env.send({ command: 'closeSearchTabs', token: env.lastToken(), tabIds: [1, 2, 7] }, sender);
-    expect(result).toEqual({ ok: true, closedIds: [7], failedIds: [],
+    expect(result).toMatchObject({ ok: true, closedIds: [7], failedIds: [],
       skipped: [{ tabId: 1, reason: 'unavailable' }, { tabId: 2, reason: 'unavailable' }] });
+    expect(result.context.tabs.map(t => t.id)).toEqual([3]);
   });
 
   it('honors current-window scope from settings', async () => {
@@ -889,7 +919,7 @@ describe('closing selected tabs from search', () => {
   });
 
   it('is serialized with launches, and origin cleanup listeners queue behind it without deadlock', async () => {
-    const env = await closing('overlay');
+    const env = await closing('window');
     let release;
     const realRemove = env.api.tabs.remove.getMockImplementation();
     env.api.tabs.remove.mockImplementationOnce(id => new Promise(resolve => { release = () => resolve(realRemove(id)); }));
@@ -897,11 +927,557 @@ describe('closing selected tabs from search', () => {
     await vi.waitFor(() => expect(release).toBeDefined());
     const relaunch = env.launcher.launch(await env.api.tabs.get(4));
     await new Promise(resolve => setImmediate(resolve));
-    expect(env.api.scripting.executeScript).toHaveBeenCalledTimes(1); // Waiting for the close.
+    expect(env.api.windows.create).toHaveBeenCalledTimes(1); // Waiting for the close.
     release();
-    expect(await closingNow).toEqual({ ok: true, closedIds: [2, 4, 1], skipped: [], failedIds: [] });
+    expect(await closingNow).toMatchObject({ ok: true, closedIds: [2, 4, 1], skipped: [], failedIds: [] });
     await relaunch;
-    expect(env.api.windows.create).toHaveBeenCalledTimes(1); // Background tab 4 → window.
+    expect(env.api.windows.create).toHaveBeenCalledTimes(2); // Background tab 4 → window.
+  });
+});
+
+describe('closing the tab that hosts an embedded search', () => {
+  const STATE = { query: 'secret query', mode: 'tabs', sources: { history: true, content: true }, highlight: 'tab:1', focus: 'list' };
+  // Window 10: 1 (host), 4 (loaded, most recent), 6 (loaded). Window 20: 2, 5.
+  async function hosted({ permission = true, now } = {}) {
+    const env = setup({ now });
+    env.tabs.push({ id: 5, windowId: 20, url: 'https://five.example/' },
+      { id: 6, windowId: 10, url: 'https://six.example/', status: 'complete', lastAccessed: 5 });
+    Object.assign(env.tabs.find(t => t.id === 4), { status: 'complete', lastAccessed: 9 });
+    let granted = permission;
+    env.api.permissions = { contains: vi.fn(async () => granted) };
+    await env.launcher.launch(await env.api.tabs.get(1));
+    const token = env.lastToken();
+    await env.send({ command: 'getSearchContext', token }, frame()); // Claimed.
+    return { ...env, token, grant: value => { granted = value; } };
+  }
+  const startClose = (env, tabIds, state = STATE) =>
+    env.send({ command: 'closeSearchTabs', token: env.token, tabIds, state }, frame());
+  const at = (tabId, over = {}) => frame({ tab: { id: tabId, windowId: 10 }, frameId: 3, documentId: `doc-${tabId}`, ...over });
+  const removed = api => api.tabs.remove.mock.calls.map(([id]) => id);
+  const injected = async (env, count = 2) => {
+    await vi.waitFor(() => expect(env.api.scripting.executeScript).toHaveBeenCalledTimes(count));
+    return env.lastToken();
+  };
+  const windowOpened = async env => {
+    await vi.waitFor(() => expect(env.api.windows.create).toHaveBeenCalled());
+    const created = await env.api.windows.create.mock.results.at(-1).value;
+    const token = env.windowToken();
+    return { created, token, sender: popupWindow(created.tabs[0].id, token) };
+  };
+  // Every replacement readiness wait so far ends, as if READY_MS passed.
+  const readyTimeout = env => { for (const timer of env.timers.filter(t => t.ms === READY_MS)) timer(); };
+  const overlayClosed = (env, tabId) => env.api.tabs.sendMessage.mock.calls.some(([id, msg]) => id === tabId && msg.type === 'tabvacuum:close');
+
+  it('readies an overlay on a permitted loaded tab in the same window before closing anything', async () => {
+    const env = await hosted();
+    const closing = startClose(env, [1, 2]);
+    const token = await injected(env);
+    const [call] = env.api.scripting.executeScript.mock.calls[1];
+    expect(call.target).toEqual({ tabId: 4 }); // Most recently used, not 6, never 2 (closing) or 5 (other window).
+    expect(call.args[2]).toBe(SEARCH); // No token or state in the page or its frame URL.
+    expect(JSON.stringify(call.args)).not.toContain('secret query');
+    expect(token).not.toBe(env.token);
+
+    // Not usable for anything but loading until it reports ready.
+    await expect(env.send({ command: 'closeSearchTabs', token, tabIds: [6] }, at(4))).rejects.toThrow('expired');
+    await expect(env.send({ command: 'searchHandoffReady', token }, at(4))).rejects.toThrow('expired');
+    const loaded = await env.send({ command: 'getSearchContext', token }, at(4));
+    expect(loaded.restore).toEqual({ ...STATE, checked: [], order: [], closing: [1, 2] });
+    expect(loaded.currentTabId).toBe(4);
+    expect(loaded.tabs.map(t => t.id)).toEqual([1, 2, 4, 5, 6]);
+    expect((await env.send({ command: 'getSearchContext', token }, at(4))).restore).toBeUndefined(); // Delivered once.
+    // The original frame can no longer act while handing off.
+    await expect(env.send({ command: 'getSearchContext', token: env.token }, frame())).rejects.toThrow('expired');
+    await expect(startClose(env, [6])).rejects.toThrow('expired');
+    expect(env.api.tabs.remove).not.toHaveBeenCalled();
+
+    const ready = env.send({ command: 'searchHandoffReady', token }, at(4));
+    expect(await closing).toEqual({ ok: true, handedOff: true, closedIds: [2, 1], skipped: [], failedIds: [] });
+    expect(env.api.tabs.update).toHaveBeenCalledWith(4, { active: true });
+    expect(env.api.tabs.update.mock.invocationCallOrder[0]).toBeLessThan(env.api.tabs.remove.mock.invocationCallOrder[0]);
+    const reply = await ready;
+    expect(reply).toMatchObject({ ok: true, closedIds: [2, 1], skipped: [], failedIds: [] });
+    expect(reply.context).toMatchObject({ windowId: 10, currentTabId: 4 });
+    expect(reply.context.tabs.map(t => t.id)).toEqual([4, 5, 6]);
+    expect(Object.keys(env.stored())).toEqual([token]);
+    await expect(env.send({ command: 'getSearchContext', token: env.token }, frame())).rejects.toThrow('expired');
+    await expect(env.send({ command: 'dismissSearch', token: env.token }, page())).rejects.toThrow('expired');
+    await expect(env.send({ command: 'searchHandoffReady', token }, at(4))).rejects.toThrow('expired'); // No replay.
+    expect(env.stored()[token].expiresAt).toBe(1_000_000 + SESSION_MS);
+  });
+
+  it('chains: the replacement can hand off again when its own host closes', async () => {
+    const env = await hosted();
+    const first = startClose(env, [1]);
+    const token = await injected(env);
+    await env.send({ command: 'getSearchContext', token }, at(4));
+    env.send({ command: 'searchHandoffReady', token }, at(4));
+    await first;
+    const second = env.send({ command: 'closeSearchTabs', token, tabIds: [4], state: STATE }, at(4));
+    const next = await injected(env, 3);
+    expect(env.api.scripting.executeScript.mock.calls[2][0].target).toEqual({ tabId: 6 });
+    await env.send({ command: 'getSearchContext', token: next }, at(6));
+    const ready = env.send({ command: 'searchHandoffReady', token: next }, at(6));
+    expect(await second).toMatchObject({ handedOff: true, closedIds: [4] });
+    expect((await ready).context.tabs.map(t => t.id)).toEqual([2, 5, 6]);
+    expect(removed(env.api)).toEqual([1, 4]);
+  });
+
+  it('keeps the remaining checks, and a protected host is not handed off', async () => {
+    const env = await hosted();
+    const closing = startClose(env, [1], { ...STATE, mode: 'select', checked: [1, 4, 6], focus: 'row-close', focusTabId: 1 });
+    const token = await injected(env);
+    const loaded = await env.send({ command: 'getSearchContext', token }, at(4));
+    expect(loaded.restore).toMatchObject({ mode: 'select', checked: [1, 4, 6], focus: 'row-close', focusTabId: 1, closing: [1] });
+    env.send({ command: 'searchHandoffReady', token }, at(4));
+    await closing;
+
+    const pinned = await hosted();
+    Object.assign(pinned.tabs.find(t => t.id === 1), { pinned: true });
+    expect(await startClose(pinned, [1, 2])).toMatchObject({ closedIds: [2], skipped: [{ tabId: 1, reason: 'pinned' }] });
+    expect(pinned.api.scripting.executeScript).toHaveBeenCalledTimes(1);
+    expect(pinned.api.windows.create).not.toHaveBeenCalled();
+  });
+
+  it('closes the old overlay if the host becomes protected before the batch closes', async () => {
+    const env = await hosted();
+    const closing = startClose(env, [1, 2]);
+    const token = await injected(env);
+    await env.send({ command: 'getSearchContext', token }, at(4));
+    Object.assign(env.tabs.find(t => t.id === 1), { audible: true });
+    env.send({ command: 'searchHandoffReady', token }, at(4));
+    expect(await closing).toMatchObject({ handedOff: true, closedIds: [2], skipped: [{ tabId: 1, reason: 'audible' }] });
+    expect(overlayClosed(env, 1)).toBe(true);
+  });
+
+  async function viaWindow(env, closing) {
+    const { created, token, sender } = await windowOpened(env);
+    expect(env.api.tabs.remove).not.toHaveBeenCalled();
+    const loaded = await env.send({ command: 'getSearchContext', token }, sender);
+    expect(loaded.restore).toMatchObject({ query: 'secret query', closing: [1] });
+    const ready = env.send({ command: 'searchHandoffReady', token }, sender);
+    expect(await closing).toMatchObject({ handedOff: true, closedIds: [1] });
+    expect((await ready).context.tabs.map(t => t.id)).toEqual([2, 4, 5, 6]);
+    // The window keeps working after its old host is gone.
+    expect(await env.send({ command: 'closeSearchTabs', token, tabIds: [4] }, sender)).toMatchObject({ closedIds: [4] });
+    expect(env.api.windows.remove).not.toHaveBeenCalledWith(created.id);
+    expect(Object.keys(env.stored())).toEqual([token]);
+    return { created, token, sender };
+  }
+
+  it('falls back to a search window without website access, injecting nothing else', async () => {
+    const env = await hosted({ permission: false });
+    const closing = startClose(env, [1]);
+    await viaWindow(env, closing);
+    expect(env.api.scripting.executeScript).toHaveBeenCalledTimes(1);
+    expect(env.api.windows.create.mock.calls[0][0]).toMatchObject({ type: 'popup', incognito: false });
+  });
+
+  it('falls back when access is revoked after the replacement loaded', async () => {
+    const env = await hosted();
+    const closing = startClose(env, [1]);
+    const token = await injected(env);
+    await env.send({ command: 'getSearchContext', token }, at(4));
+    env.grant(false);
+    env.send({ command: 'searchHandoffReady', token }, at(4));
+    await viaWindow(env, closing);
+    expect(overlayClosed(env, 4)).toBe(true);
+  });
+
+  it.each([
+    ['injection is refused', env => env.api.scripting.executeScript.mockRejectedValueOnce(new Error('Cannot access'))],
+    ['the overlay does not mount', env => env.api.scripting.executeScript.mockResolvedValueOnce([{ result: 'failed' }])],
+  ])('falls back when %s', async (_label, fail) => {
+    const env = await hosted();
+    fail(env);
+    const closing = startClose(env, [1]);
+    await viaWindow(env, closing);
+    expect(overlayClosed(env, 4)).toBe(true);
+  });
+
+  it('bounds an injection that never answers, then falls back', async () => {
+    const env = await hosted();
+    env.api.scripting.executeScript.mockImplementationOnce(() => new Promise(() => {}));
+    const closing = startClose(env, [1]);
+    await vi.waitFor(() => expect(env.api.scripting.executeScript).toHaveBeenCalledTimes(2));
+    readyTimeout(env);
+    await viaWindow(env, closing);
+  });
+
+  it('falls back when the replacement frame never initializes, or its page changes', async () => {
+    for (const change of [() => {}, env => { env.tabs.find(t => t.id === 4).url = 'https://example.org/elsewhere'; }]) {
+      const env = await hosted();
+      const closing = startClose(env, [1]);
+      const token = await injected(env);
+      change(env);
+      if (change.length) await expect(env.send({ command: 'getSearchContext', token }, at(4))).rejects.toThrow('expired');
+      readyTimeout(env);
+      await viaWindow(env, closing);
+      expect(overlayClosed(env, 4)).toBe(true);
+    }
+  });
+
+  it('closes nothing and explains when neither replacement becomes ready', async () => {
+    const env = await hosted({ permission: false });
+    const closing = startClose(env, [1, 2]);
+    const { created } = await windowOpened(env);
+    readyTimeout(env); // The window never initializes.
+    expect(await closing).toEqual({ ok: false, handoffFailed: true, closedIds: [], skipped: [], failedIds: [] });
+    expect(env.api.tabs.remove).not.toHaveBeenCalled();
+    expect(env.api.windows.remove).toHaveBeenCalledWith(created.id);
+    expect(Object.keys(env.stored())).toEqual([env.token]);
+    expect(await startClose(env, [2])).toMatchObject({ closedIds: [2] }); // Usable again.
+
+    const blocked = await hosted({ permission: false });
+    blocked.api.windows.create.mockRejectedValueOnce(new Error('no windows'));
+    expect(await startClose(blocked, [1])).toMatchObject({ ok: false, handoffFailed: true });
+    expect(blocked.api.tabs.remove).not.toHaveBeenCalled();
+  });
+
+  it('authorizes the replacement frame only: no other tab, frame, document, or privacy mode', async () => {
+    const env = await hosted();
+    startClose(env, [1]);
+    const token = await injected(env);
+    for (const sender of [frame(), at(2), at(4, { tab: { id: 4, incognito: true } }), at(4, { frameId: 0 }),
+      at(4, { url: `${BASE}options.html` }), at(4, { id: 'evil@ext' })]) {
+      await expect(env.send({ command: 'getSearchContext', token }, sender)).rejects.toThrow('expired');
+    }
+    await env.send({ command: 'getSearchContext', token }, at(4));
+    await expect(env.send({ command: 'getSearchContext', token }, at(4, { frameId: 8 }))).rejects.toThrow('expired');
+    await expect(env.send({ command: 'searchHandoffReady', token }, at(4, { documentId: 'reloaded' }))).rejects.toThrow('expired');
+    expect(env.api.tabs.remove).not.toHaveBeenCalled();
+  });
+
+  it('accepts a window page that loads before the window is recorded', async () => {
+    const env = await hosted({ permission: false });
+    const create = env.api.windows.create.getMockImplementation();
+    let early;
+    env.api.windows.create.mockImplementationOnce(async options => {
+      const created = await create(options);
+      const token = new URL(options.url).searchParams.get('token');
+      early = env.send({ command: 'getSearchContext', token }, popupWindow(created.tabs[0].id, token));
+      return created;
+    });
+    const closing = startClose(env, [1]);
+    const { token, sender } = await windowOpened(env);
+    expect((await early).restore.closing).toEqual([1]);
+    env.send({ command: 'searchHandoffReady', token }, sender);
+    expect(await closing).toMatchObject({ handedOff: true, closedIds: [1] });
+  });
+
+  it.each([
+    ['the original is dismissed', env => env.send({ command: 'dismissSearch', token: env.token }, page())],
+    ['the host navigates', env => env.api.tabs.onUpdated.addListener.mock.calls[0][0](1, { status: 'loading' })],
+    ['the host closes elsewhere', env => {
+      env.tabs.splice(env.tabs.findIndex(t => t.id === 1), 1);
+      for (const [listener] of env.api.tabs.onRemoved.addListener.mock.calls) listener(1, {});
+    }],
+  ])('cancels without closing anything or stranding the replacement when %s', async (_label, end) => {
+    const env = await hosted();
+    const closing = startClose(env, [1, 2]);
+    const token = await injected(env);
+    await env.send({ command: 'getSearchContext', token }, at(4));
+    env.api.tabs.remove.mockClear();
+    await end(env);
+    await expect(closing).rejects.toThrow('expired');
+    expect(removed(env.api)).toEqual([]);
+    expect(overlayClosed(env, 4)).toBe(true);
+    expect(env.stored()).toEqual({});
+    await expect(env.send({ command: 'searchHandoffReady', token }, at(4))).rejects.toThrow('expired');
+  });
+
+  it('a newer launch cancels the handoff and keeps the new search', async () => {
+    const env = await hosted();
+    const closing = startClose(env, [1, 2]);
+    const token = await injected(env);
+    await env.launcher.launch(await env.api.tabs.get(6));
+    const fresh = env.lastToken();
+    await expect(closing).rejects.toThrow('expired');
+    expect(env.api.tabs.remove).not.toHaveBeenCalled();
+    expect(Object.keys(env.stored())).toEqual([fresh]);
+    await expect(env.send({ command: 'getSearchContext', token }, at(4))).rejects.toThrow('expired');
+  });
+
+  // Replacement destination 4 (overlay) loads, and reports ready.
+  async function readyOverlay(env) {
+    const token = await injected(env);
+    await env.send({ command: 'getSearchContext', token }, at(4));
+    return { token, ready: env.send({ command: 'searchHandoffReady', token }, at(4)) };
+  }
+  // Runs `change` once, the next time close policy reads the pinned/audible settings.
+  const duringPolicyRead = (env, change) => {
+    const get = env.api.storage.local.get.getMockImplementation();
+    let done = false;
+    env.api.storage.local.get.mockImplementation(async keys => {
+      if (!done && keys && 'skipPinned' in keys && env.api.tabs.update.mock.calls.length + env.api.windows.update.mock.calls.length) { done = true; await change(); }
+      return get(keys);
+    });
+  };
+  const usable = env => env.send({ command: 'getSearchContext', token: env.token }, frame());
+
+  describe('the host never closes without a ready replacement (no-handoff branch)', () => {
+    it('keeps the host when a whole-window batch loses a sibling, so the host is no longer last', async () => {
+      const env = await hosted();
+      const remove = env.api.tabs.remove.getMockImplementation();
+      env.api.tabs.remove.mockImplementation(async id => { if (id === 4) throw new Error('busy'); return remove(id); });
+      const result = await startClose(env, [1, 4, 6]);
+      expect(result).toMatchObject({ ok: true, closedIds: [6], failedIds: [4], skipped: [{ tabId: 1, reason: 'changed' }] });
+      expect(removed(env.api)).toEqual([4, 6]); // Never 1.
+      expect(env.api.scripting.executeScript).toHaveBeenCalledTimes(1);
+      expect(env.api.windows.create).not.toHaveBeenCalled();
+      await expect(usable(env)).resolves.toMatchObject({ windowId: 10 });
+    });
+
+    it('keeps the host when its protection lifts mid-batch', async () => {
+      const env = await hosted();
+      const host = env.tabs.find(t => t.id === 1);
+      host.pinned = true;
+      const remove = env.api.tabs.remove.getMockImplementation();
+      env.api.tabs.remove.mockImplementation(async id => { host.pinned = false; return remove(id); });
+      const result = await startClose(env, [2, 1]);
+      expect(result).toMatchObject({ closedIds: [2], skipped: [{ tabId: 1, reason: 'changed' }] });
+      expect(removed(env.api)).toEqual([2]);
+      await expect(usable(env)).resolves.toBeDefined();
+    });
+  });
+
+  describe('standalone handoff does not select a sleeping successor', () => {
+    async function finishWindow(env, closing) {
+      const { token, sender } = await windowOpened(env);
+      await env.send({ command: 'getSearchContext', token }, sender);
+      const ready = env.send({ command: 'searchHandoffReady', token }, sender);
+      expect(await closing).toMatchObject({ handedOff: true });
+      await ready;
+    }
+
+    it('activates a loaded protected survivor before closing the active host', async () => {
+      const env = await hosted({ permission: false });
+      env.tabs.find(tab => tab.id === 4).discarded = true;
+      const protectedTab = env.tabs.find(tab => tab.id === 6);
+      protectedTab.url = 'about:blank';
+      const closing = startClose(env, [1, 2]);
+      await finishWindow(env, closing);
+      expect(env.api.tabs.update).toHaveBeenCalledWith(6, { active: true });
+      expect(env.api.tabs.update).not.toHaveBeenCalledWith(4, { active: true });
+      const activated = env.api.tabs.update.mock.calls.findIndex(([id]) => id === 6);
+      expect(env.api.tabs.update.mock.invocationCallOrder[activated]).toBeLessThan(env.api.tabs.remove.mock.invocationCallOrder[0]);
+    });
+
+    it('never activates a closing or discarded tab when no loaded survivor exists', async () => {
+      const env = await hosted({ permission: false });
+      env.tabs.find(tab => tab.id === 4).discarded = true;
+      const closing = startClose(env, [1, 6]);
+      await finishWindow(env, closing);
+      expect(env.api.tabs.update).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('the destination is checked again at every destructive step', () => {
+    it('falls back to the window when activating the overlay destination fails', async () => {
+      const env = await hosted();
+      env.api.tabs.update.mockRejectedValueOnce(new Error('No tab'));
+      const closing = startClose(env, [1]);
+      await readyOverlay(env);
+      await viaWindow(env, closing);
+      expect(overlayClosed(env, 4)).toBe(true);
+    });
+
+    it('closes nothing when activating the replacement window fails', async () => {
+      const env = await hosted({ permission: false });
+      env.api.windows.update.mockRejectedValueOnce(new Error('No window'));
+      const closing = startClose(env, [1, 2]);
+      const { created, token, sender } = await windowOpened(env);
+      await env.send({ command: 'getSearchContext', token }, sender);
+      env.send({ command: 'searchHandoffReady', token }, sender);
+      expect(await closing).toMatchObject({ ok: false, handoffFailed: true, closedIds: [] });
+      expect(env.api.tabs.remove).not.toHaveBeenCalled();
+      expect(env.api.windows.remove).toHaveBeenCalledWith(created.id);
+      expect(env.api.tabs.update).toHaveBeenCalledWith(4, { active: true });
+      expect(env.api.tabs.update).toHaveBeenLastCalledWith(1, { active: true });
+      expect(env.api.windows.update).toHaveBeenLastCalledWith(10, { focused: true });
+      await expect(usable(env)).resolves.toBeDefined();
+    });
+
+    it.each([
+      ['navigates', env => { env.tabs.find(t => t.id === 4).url = 'https://example.org/elsewhere'; }],
+      ['moves to another window', env => { env.tabs.find(t => t.id === 4).windowId = 20; }],
+      ['loses website access', env => env.grant(false)],
+    ])('falls back to the window, closing nothing first, when the overlay destination %s during close policy reads', async (_label, change) => {
+      const env = await hosted();
+      const closing = startClose(env, [1, 2]);
+      await readyOverlay(env);
+      duringPolicyRead(env, () => change(env));
+      const { token, sender } = await windowOpened(env);
+      expect(env.api.tabs.remove).not.toHaveBeenCalled();
+      expect(overlayClosed(env, 4)).toBe(true);
+      await env.send({ command: 'getSearchContext', token }, sender);
+      env.send({ command: 'searchHandoffReady', token }, sender);
+      expect(await closing).toMatchObject({ handedOff: true, closedIds: [2, 1] });
+    });
+
+    it('closes nothing when the replacement window closes during close policy reads', async () => {
+      const env = await hosted({ permission: false });
+      const closing = startClose(env, [1, 2]);
+      const { created, token, sender } = await windowOpened(env);
+      await env.send({ command: 'getSearchContext', token }, sender);
+      duringPolicyRead(env, () => { env.tabs.splice(env.tabs.findIndex(t => t.id === created.tabs[0].id), 1); });
+      env.send({ command: 'searchHandoffReady', token }, sender);
+      expect(await closing).toMatchObject({ ok: false, handoffFailed: true, closedIds: [] });
+      expect(env.api.tabs.remove).not.toHaveBeenCalled();
+      await expect(usable(env)).resolves.toBeDefined();
+    });
+
+    it('keeps the host and the original search when the destination is lost mid-batch, reporting what closed', async () => {
+      const env = await hosted();
+      const closing = startClose(env, [2, 1]);
+      const { ready } = await readyOverlay(env);
+      const remove = env.api.tabs.remove.getMockImplementation();
+      env.api.tabs.remove.mockImplementation(async id => {
+        await remove(id);
+        env.tabs.find(t => t.id === 4).url = 'https://example.org/elsewhere';
+      });
+      const result = await closing;
+      expect(result).toMatchObject({ ok: true, closedIds: [2], skipped: [{ tabId: 1, reason: 'changed' }], failedIds: [] });
+      expect(result.handedOff).toBeUndefined();
+      expect(result.context.tabs.map(t => t.id)).toEqual([1, 4, 5, 6]);
+      expect(removed(env.api)).toEqual([2]);
+      expect(await ready).toEqual({ ok: false });
+      expect(overlayClosed(env, 4)).toBe(true);
+      expect(env.api.tabs.update).toHaveBeenLastCalledWith(1, { active: true });
+      expect(Object.keys(env.stored())).toEqual([env.token]);
+      await expect(usable(env)).resolves.toBeDefined();
+    });
+  });
+
+  describe('dismissing a replacement cancels the close', () => {
+    const pageAt = tabId => page({ tab: { id: tabId, windowId: 10 }, url: 'https://example.org/b' });
+    it.each([
+      ['its frame', (env, token) => env.send({ command: 'dismissSearch', token }, at(4))],
+      ['its page (Escape or backdrop)', (env, token) => env.send({ command: 'dismissSearch', token }, pageAt(4))],
+    ])('overlay, through %s: no fallback, nothing closes, the original is usable', async (_label, dismiss) => {
+      const env = await hosted();
+      const closing = startClose(env, [1, 2]);
+      const token = await injected(env);
+      await env.send({ command: 'getSearchContext', token }, at(4));
+      await dismiss(env, token);
+      expect(await closing).toEqual({ ok: false, cancelled: true, closedIds: [], skipped: [], failedIds: [] });
+      expect(env.api.windows.create).not.toHaveBeenCalled();
+      expect(env.api.tabs.remove).not.toHaveBeenCalled();
+      await expect(usable(env)).resolves.toBeDefined();
+      expect(Object.keys(env.stored())).toEqual([env.token]);
+    });
+
+    it('overlay torn down by its page (pagehide) is a failed destination, not a cancellation', async () => {
+      const env = await hosted();
+      const closing = startClose(env, [1]);
+      const token = await injected(env);
+      await env.send({ command: 'dismissSearch', token, reason: 'pagehide' }, pageAt(4));
+      await viaWindow(env, closing);
+    });
+
+    it.each([
+      ['its page', (env, token, sender) => env.send({ command: 'dismissSearch', token }, sender)],
+      ['closing the window', (env, _token, sender) => env.api.tabs.remove(sender.tab.id)],
+    ])('window, through %s: nothing closes and the original is usable', async (_label, dismiss) => {
+      const env = await hosted({ permission: false });
+      const closing = startClose(env, [1, 2]);
+      const { token, sender } = await windowOpened(env);
+      await env.send({ command: 'getSearchContext', token }, sender);
+      await dismiss(env, token, sender);
+      expect(await closing).toMatchObject({ ok: false, cancelled: true, closedIds: [] });
+      expect(removed(env.api)).not.toContain(1);
+      expect(removed(env.api)).not.toContain(2);
+      await expect(usable(env)).resolves.toBeDefined();
+    });
+  });
+
+  describe('bounded and restart-safe', () => {
+    it('a claimed replacement keeps its short lifetime until it takes over', async () => {
+      for (const permission of [true, false]) {
+        const env = await hosted({ permission });
+        startClose(env, [1]);
+        const { token, sender } = permission ? { token: await injected(env), sender: at(4) } : await windowOpened(env);
+        await env.send({ command: 'getSearchContext', token }, sender);
+        expect(env.stored()[token].expiresAt).toBe(1_000_000 + HANDOFF_MS);
+      }
+    });
+
+    it('after a restart the original is usable at once and an orphan overlay is removed when it next speaks', async () => {
+      const env = await hosted();
+      startClose(env, [1]);
+      const token = await injected(env);
+      await env.send({ command: 'getSearchContext', token }, at(4));
+      const restarted = env.restart();
+      await expect(restarted.handleMessage({ command: 'searchHandoffReady', token }, at(4))).rejects.toThrow('expired');
+      expect(overlayClosed(env, 4)).toBe(true);
+      expect(Object.keys(env.stored())).toEqual([env.token]);
+      await expect(restarted.handleMessage({ command: 'getSearchContext', token: env.token }, frame())).resolves.toMatchObject({ windowId: 10 });
+      expect(env.api.tabs.remove).not.toHaveBeenCalled();
+    });
+
+    it('after a restart the original is usable at once, and a relaunch is not captured by an orphan window', async () => {
+      const env = await hosted({ permission: false });
+      startClose(env, [1]);
+      const { created, token, sender } = await windowOpened(env);
+      await env.send({ command: 'getSearchContext', token }, sender);
+      const restarted = env.restart();
+      await expect(restarted.handleMessage({ command: 'getSearchContext', token: env.token }, frame())).resolves.toBeDefined();
+      expect(env.api.windows.remove).toHaveBeenCalledWith(created.id); // Reconciled with the original.
+      expect(Object.keys(env.stored())).toEqual([env.token]);
+      expect(await restarted.launch(await env.api.tabs.get(1))).toEqual({ mode: 'overlay' });
+      expect(env.api.tabs.remove).not.toHaveBeenCalled();
+    });
+
+    it('a relaunch closes every earlier search UI, including a pending window', async () => {
+      const env = await hosted({ permission: false });
+      const closing = startClose(env, [1]);
+      const { created } = await windowOpened(env);
+      expect(await env.launcher.launch(await env.api.tabs.get(1))).toEqual({ mode: 'overlay' });
+      await expect(closing).rejects.toThrow('expired');
+      expect(env.api.windows.remove).toHaveBeenCalledWith(created.id);
+      expect(env.api.tabs.remove).not.toHaveBeenCalled();
+    });
+
+    it('withholds the state if the destination moves while its context is read', async () => {
+      const env = await hosted();
+      startClose(env, [1]);
+      const token = await injected(env);
+      const get = env.api.storage.session.get.getMockImplementation();
+      // The context's recency read happens after the first destination check.
+      env.api.storage.session.get.mockImplementation(async keys => {
+        if (Array.isArray(keys)) env.tabs.find(t => t.id === 4).windowId = 20;
+        return get(keys);
+      });
+      await expect(env.send({ command: 'getSearchContext', token }, at(4))).rejects.toThrow('expired');
+      expect(Object.values(env.stored()).find(s => s.pending)?.pending.delivered).toBe(false);
+    });
+
+    it('falls back to the window when looking up an in-page destination fails', async () => {
+      const env = await hosted();
+      const get = env.api.storage.session.get.getMockImplementation();
+      let failed = false;
+      env.api.storage.session.get.mockImplementation(async keys => {
+        // The destination lookup's recency read is the first list read after the close starts.
+        if (Array.isArray(keys) && !failed) { failed = true; throw new Error('storage busy'); }
+        return get(keys);
+      });
+      const closing = startClose(env, [1]);
+      await viaWindow(env, closing);
+      expect(env.api.scripting.executeScript).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('stores only well-formed state fields', () => {
+    const hostile = { query: 'x'.repeat(9000), mode: 'admin', sources: { history: 'yes', content: true, evil: true },
+      highlight: { key: 1 }, checked: [1, 1, '2', 2.5, -0, 3], focus: 'page', focusTabId: '4', script: 'alert(1)' };
+    expect(handoffState(hostile, [1])).toEqual({ query: '', mode: 'tabs', sources: { history: false, content: true },
+      highlight: '', checked: [], order: [], focus: 'list', focusTabId: undefined, closing: [1] });
+    expect(handoffState({ mode: 'tabs', focus: 'close-tabs', order: [3, 3, 'x', 1, 2.5] }, [1])).toMatchObject({ focus: 'list', order: [3, 1] });
+    expect(handoffState({ mode: 'select', focus: 'close-tabs' }, [1])).toMatchObject({ focus: 'close-tabs' });
+    expect(handoffState({ mode: 'search', focus: 'row-close', focusTabId: 4 }, [1])).toMatchObject({ mode: 'search', focus: 'row-close', focusTabId: 4 });
+    expect(handoffState({ mode: 'select', checked: [1, 1, '2', 3], focus: 'query' }, [1]))
+      .toMatchObject({ mode: 'select', checked: [1, 3], focus: 'list' });
+    expect(handoffState(null, [1])).toMatchObject({ mode: 'tabs', focus: 'list' });
   });
 });
 

@@ -258,6 +258,18 @@ try {
       return kind;
     },
     uiCount: async () => ({ overlays: await count('overlay'), windows: await count('window') }),
+    // Each search UI with its host tab: the overlay frame's top-level tab, or the window itself.
+    searchUIs: () => chrome(`${FIXTURE} const [url, origin] = arguments; const out = [];
+      for (const kind of ['overlay', 'window']) for (const bc of locate(kind, url)) {
+        // The host tab's own window object, so test-set expandos such as __tvKey are visible.
+        const w = [...Services.wm.getEnumerator('navigator:browser')].find(w => w.gBrowser.browsers.some(b => b.browsingContext === bc.top));
+        const browser = w?.gBrowser.browsers.find(b => b.browsingContext === bc.top);
+        out.push({ kind, url: kind === 'overlay' ? bc.top.currentURI.spec : null,
+          window: kind === 'window' ? null : w === originWindow(origin) ? 'origin' : w?.__tvKey ?? null,
+          title: kind === 'window' ? 'Search tabs' : browser?.contentTitle || '' });
+      }
+      return out;`, SEARCH, ORIGIN),
+    retarget(target) { ui.kind = target.kind; ui.title = target.title; },
     // Read from a background extension tab in the origin window; its own TabClose is filtered out.
     sessions: () => chromeAsync(`${LOCATE} const [url, origin] = arguments;
       const w = originWindow(origin);
@@ -891,8 +903,10 @@ try {
         await sleep(300);
         return { ...(await readOptions()), method };
       },
-      discard: url => chrome(`${FIXTURE} const f = findTab(arguments[0]); f.w.__tvSleeping = f.t; f.w.gBrowser.discardBrowser(f.t, true);`, url),
-      isDiscarded: () => chrome(`for (const w of Services.wm.getEnumerator('navigator:browser')) if (w.__tvSleeping) return !w.__tvSleeping.linkedPanel && !w.__tvSleeping.selected; return false;`),
+      discard: url => chrome(`${FIXTURE} const f = findTab(arguments[0]); f.w.__tvSleeping = f.t; (f.w.__tvSleepingTabs ??= {})[arguments[0]] = f.t; f.w.gBrowser.discardBrowser(f.t, true);`, url),
+      isDiscarded: url => chrome(`const ws = [...Services.wm.getEnumerator('navigator:browser')];
+        const t = ws.map(w => w.__tvSleepingTabs?.[arguments[0]]).find(Boolean) ?? ws.map(w => w.__tvSleeping).find(Boolean);
+        return Boolean(t) && !t.closing && !t.linkedPanel && !t.selected;`, url),
       async navigate(url, to) {
         await chrome(`${FIXTURE} const f = findTab(arguments[0]); f.t.linkedBrowser.loadURI(Services.io.newURI(arguments[1]), { triggeringPrincipal: sp });`, url, to);
         await loaded([to]);

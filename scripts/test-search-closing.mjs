@@ -14,6 +14,10 @@
 //   windowAlive(key), focus(url), activeUrl(), startRemovals(), removed() (URLs, in order),
 //   multiSelected(), tabCount(), scheme('light' | 'dark' | null), shot(name, what),
 //   layouts [{ name, shot?, enter(), exit() }], record(file), cleanup(urls, windowKeys)
+//   searchUIs()          every search UI in the browser -> [{ kind, url, window }]: url is the
+//                        host tab (overlay) or null (window); window is the createWindow key
+//                        of the host tab ('origin' for the origin window, null otherwise)
+//   retarget(ui)         points ui/keys/burst/type/click at that search UI
 //
 // The UI has three modes: search (typing), tabs (the tab menu acts on the
 // highlight) and select (checked tabs close together).
@@ -114,6 +118,31 @@ const newToken = (prefix = 'qz') => `${prefix}${[...randomBytes(6)].map(b => LET
 const sameSet = (a, b) => a.length === b.length && [...a].sort().join('\n') === [...b].sort().join('\n');
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
+/**
+ * After a close that included the search host: waits until exactly one search UI exists,
+ * not hosted on `not`, with results ready, and that it is still the only one `stable` ms
+ * later (a UI that is about to end must not pass). Retargets the adapter to it and
+ * returns { kind, url, window }, or { kind: null, seen } if that never happens.
+ */
+export async function follow(a, { not, stable = 800, ms = 10000 } = {}) {
+  const key = ui => `${ui.kind} ${ui.url} ${ui.window}`;
+  let seen = [], found = null;
+  const only = async () => {
+    seen = await a.searchUIs();
+    return seen.length === 1 && (seen[0].kind === 'window' || seen[0].url !== not) ? seen[0] : null;
+  };
+  await until(async () => {
+    const ui = await only();
+    if (!ui) return false;
+    a.retarget(ui);
+    if (await a.ui("return document.getElementById('results')?.getAttribute('aria-busy')") !== 'false') return false;
+    await sleep(stable);
+    const again = await only();
+    return again && key(again) === key(ui) && (found = ui);
+  }, 'one ready search UI after the host closed', ms).catch(() => {});
+  return found || { kind: null, seen };
+}
+
 function tools(a) {
   const state = () => a.ui(UI_STATE);
   async function press(keys, settle = 250) {
@@ -205,7 +234,8 @@ export async function runTabCycle(a, label) {
 
 export async function runSearchClosing(a) {
   const { base } = a;
-  const tokens = { main: newToken(), cross: newToken(), guarded: newToken(), jx: newToken('amazon'), rowx: newToken('amazon') };
+  const tokens = { main: newToken(), cross: newToken(), guarded: newToken(), jx: newToken('amazon'), rowx: newToken('amazon'),
+    ha: newToken('ha'), hc: newToken('hc'), hd: newToken('hd'), he: newToken('he') };
   const disposable = slug => `${base}/disposable/${slug}`;
   const keep = slug => `${base}/keep/${slug}`;
   const series = (token, n) => Array.from({ length: n }, (_, i) => disposable(`${token}-n${i + 1}`));
@@ -222,7 +252,11 @@ export async function runSearchClosing(a) {
   const protectedTitle = `Protected ${t.guarded} origin`;
   f.guarded = { origin: `data:text/html,%3Ctitle%3E${protectedTitle.replaceAll(' ', '%20')}%3C/title%3E`,
     first: disposable(`${t.guarded}-yellow`), second: disposable(`${t.guarded}-zulu`), keep: keep('protected-window') };
-  const created = [...Object.values(f.main), ...f.keeps, ...f.jx, ...f.rowx, ...Object.values(f.cross), ...Object.values(f.guarded)];
+  // Host continuation: the search host tab first, then the other matches, per scenario.
+  const hosted = (token, n) => ({ host: disposable(`${token}-host`), rest: series(token, n) });
+  f.host = { keep: keep('host-window'), a: hosted(t.ha, 3), c: hosted(t.hc, 3), d: hosted(t.hd, 4), e: hosted(t.he, 5) };
+  const created = [...Object.values(f.main), ...f.keeps, ...f.jx, ...f.rowx, ...Object.values(f.cross), ...Object.values(f.guarded),
+    f.host.keep, ...['a', 'c', 'd', 'e'].flatMap(k => [f.host[k].host, ...f.host[k].rest])];
   const ctx = {
     a, t, f, ...tools(a),
     name: url => url?.startsWith('data:') ? 'protected origin' : url?.slice(base.length),
@@ -236,13 +270,14 @@ export async function runSearchClosing(a) {
     await emptyQuery(ctx);
     await jxPattern(ctx);
     await rowCloseAndBatch(ctx);
+    await hostContinuation(ctx);
     await layouts(ctx);
     await crossWindow(ctx);
     await fallback(ctx);
   } finally {
     await video.stop();
     await a.scheme(null).catch(() => {});
-    await a.cleanup(created, ['cross-origin', 'cross-other', 'protected']).catch(error => console.log(`INFO closing cleanup: ${error.message}`));
+    await a.cleanup(created, ['cross-origin', 'cross-other', 'protected', 'host']).catch(error => console.log(`INFO closing cleanup: ${error.message}`));
   }
 }
 
@@ -616,6 +651,133 @@ async function rowCloseAndBatch({ a, t, f, state, press, settle, moveTo, dismiss
   check((await a.uiCount()).overlays === 0, 'batch: Escape twice dismisses search');
 }
 
+// Closing the tab that hosts the overlay, without website access: search continues in
+// the standalone search window with its query, mode, checks and focus, and keeps closing
+// the intended rows. Each scenario opens a fresh overlay on its own host tab, which is
+// the most recently used match and so listed first.
+async function hostContinuation(ctx) {
+  const { a, t, f, state, press, settle, moveTo, dismiss, name, urlsOf } = ctx;
+  const { check } = a;
+  const h = f.host;
+  await a.createWindow('host', [h.keep]);
+  check(!(await a.expanded?.permitted?.()), 'host close: runs without website access');
+
+  // Opens the overlay over `scenario.host` and lists its matches, host first.
+  async function start(label, token, scenario) {
+    for (const url of [scenario.host, ...scenario.rest]) await a.addTab('host', url);
+    await a.focus(scenario.host);
+    await a.startRemovals();
+    check(await a.open() === 'overlay', `${label}: shortcut opens the overlay over the host tab`);
+    await a.type(token);
+    const s = await settle(s => s.rows.length === scenario.rest.length + 1 && s.busy === 'false');
+    const order = urlsOf(s);
+    check(order[0] === scenario.host && sameSet(order, [scenario.host, ...scenario.rest]), `${label}: lists the host first, then its matches`, order.map(name));
+    return order;
+  }
+  // After a close that included the host: the standalone window took over, and nothing else changed.
+  async function continued(label, host, ok, detail = {}) {
+    const ui = await follow(a, { not: host });
+    const count = await a.uiCount();
+    const moved = check(ui.kind === 'window' && count.overlays === 0 && count.windows === 1 && !(await a.exists(host)),
+      `${label}: closing the host moves search to the standalone window`, { ui, count, removed: (await a.removed()).map(name) });
+    if (!ui.kind) throw new Error('search ended with its host');
+    const s = await state();
+    check(moved && ok(s), `${label}`, { removed: (await a.removed()).map(name), ...brief(s), ...detail });
+    return s;
+  }
+  // A scenario whose search ended is reported once; the next scenario starts fresh.
+  async function scenario(label, run) {
+    try { await run(); } catch (error) {
+      check(false, `${label}: scenario stopped`, error.message);
+      if ((await a.searchUIs()).length) await dismiss().catch(() => {});
+    }
+  }
+  async function finish(label) {
+    await dismiss();
+    const left = { ...(await a.uiCount()), sessions: await a.sessions() };
+    check(left.overlays + left.windows + left.sessions === 0, `${label}: Escape dismisses the standalone window; no orphan session`, left);
+  }
+
+  // (a) Tab menu: X on the host, then X again closes the row that took its place.
+  await scenario('host close (a)', async () => {
+    const o = await start('host close (a)', t.ha, h.a);
+    let s = await press(['Tab']);
+    check(s.focus === 'results' && inMode(s, 'tabs') && s.highlight === 0, 'host close (a): Tab opens the tab menu on the host row', brief(s));
+    await a.keys(['x']);
+    s = await continued('host close (a): query, tab menu, list focus and next-row highlight are kept', o[0],
+      s => s.query === t.ha && inMode(s, 'tabs') && s.focus === 'results' && s.highlight === 0 && same(urlsOf(s), o.slice(1)) &&
+        same(s.rows.map(r => r.active), o.slice(1).map((_, i) => i === 0)));
+    check(same(await a.removed(), [o[0]]), 'host close (a): exactly the host closed', (await a.removed()).map(name));
+    await a.keys(['x']);
+    s = await settle(s => s.rows.length === o.length - 2 && s.busy === 'false');
+    check(same(await a.removed(), [o[0], o[1]]) && same(urlsOf(s), o.slice(2)) && s.highlight === 0 && s.focus === 'results' && inMode(s, 'tabs') &&
+      (await a.uiCount()).windows === 1, 'host close (a): X again closes the intended next result and keeps the window', { removed: (await a.removed()).map(name), ...brief(s) });
+    await finish('host close (a)');
+  });
+
+  // (c) Select mode: the host row X hands off and leaves the OTHER checked rows checked.
+  await scenario('host row X (c)', async () => {
+    const o = await start('host row X (c)', t.hc, h.c);
+    await press(['Tab']);
+    await press(['m']);
+    for (const url of [o[1], o[2]]) { await moveTo(urlsOf(await state()).indexOf(url)); await press(['space'], 150); }
+    let s = await state();
+    check(inMode(s, 'select') && same(s.rows.filter(r => r.checked).map(r => r.url), [o[1], o[2]]), 'host row X (c): two other rows checked', brief(s));
+    await a.click(`#${s.rows[0].closer}`);
+    s = await continued('host row X (c): select mode, both other checks, query and list focus are kept', o[0],
+      s => s.query === t.hc && inMode(s, 'select') && s.focus === 'results' && same(urlsOf(s), o.slice(1)) &&
+        same(s.rows.filter(r => r.checked).map(r => r.url), [o[1], o[2]]) && s.status === '2 of 3 selected');
+    check(same(await a.removed(), [o[0]]), 'host row X (c): only the host closed', (await a.removed()).map(name));
+    await a.keys(['x']);
+    s = await settle(s => s.rows.length === 1 && s.busy === 'false');
+    check(sameSet(await a.removed(), [o[0], o[1], o[2]]) && same(urlsOf(s), [o[3]]) && inMode(s, 'select') && s.focus === 'results',
+      'host row X (c): the kept checks are real: X closes exactly those two', { removed: (await a.removed()).map(name), ...brief(s) });
+    await finish('host row X (c)');
+  });
+
+  // (d) One batch with the host and other rows: exactly those close, host last; search continues.
+  await scenario('host batch (d)', async () => {
+    const o = await start('host batch (d)', t.hd, h.d);
+    await press(['Tab']);
+    await press(['m']);
+    for (const url of [o[0], o[2], o[3]]) { await moveTo(urlsOf(await state()).indexOf(url)); await press(['space'], 150); }
+    let s = await state();
+    check(s.checked === 3 && s.close === 'Close 3 tabs', 'host batch (d): host and two other rows checked', brief(s));
+    await moveTo(1);
+    await a.keys(['x']);
+    s = await continued('host batch (d): remaining rows listed in order; select mode, query and list focus kept', o[0],
+      s => s.query === t.hd && inMode(s, 'select') && s.focus === 'results' && same(urlsOf(s), [o[1], o[4]]) && s.checked === 0);
+    const removed = await a.removed();
+    check(sameSet(removed, [o[0], o[2], o[3]]) && removed.at(-1) === o[0], 'host batch (d): exactly the checked tabs closed, host last', removed.map(name));
+    s = await press(['m']);
+    check(inMode(s, 'tabs') && s.focus === 'results', 'host batch (d): M returns to the tab menu in the standalone window', brief(s));
+    const next = s.rows[s.highlight]?.url;
+    await a.keys(['x']);
+    s = await settle(s => s.rows.length === 1 && s.busy === 'false');
+    check(next && (await a.removed()).at(-1) === next && s.rows.length === 1 && inMode(s, 'tabs') && s.focus === 'results',
+      'host batch (d): closing continues from the standalone window', { closed: name(next), ...brief(s) });
+    await finish('host batch (d)');
+  });
+
+  // (e) Tab, X on the host, then J J X once the window is ready: closes original rows 0 and 3.
+  await scenario('host tab-x-j-j-x (e)', async () => {
+    const o = await start('host tab-x-j-j-x (e)', t.he, h.e);
+    await press(['Tab']);
+    await a.keys(['x']);
+    let s = await continued('host tab-x-j-j-x (e): after X on the host the tab menu is ready on the next row', o[0],
+      s => inMode(s, 'tabs') && s.focus === 'results' && s.highlight === 0 && same(urlsOf(s), o.slice(1)));
+    await a.burst(['j', 'j', 'x']);
+    s = await settle(s => s.rows.length === o.length - 2 && s.busy === 'false');
+    check(same(await a.removed(), [o[0], o[3]]), 'host tab-x-j-j-x (e): X, J, J, X closes original rows 0 and 3, in order', (await a.removed()).map(name));
+    check(same(urlsOf(s), [o[1], o[2], o[4], o[5]]) && s.highlight === 2 && s.rows[2]?.active && s.focus === 'results' && inMode(s, 'tabs') &&
+      s.query === t.he && (await a.uiCount()).windows === 1, 'host tab-x-j-j-x (e): remaining rows, highlight on the next row, list focus', brief(s));
+    await finish('host tab-x-j-j-x (e)');
+  });
+
+  check(await a.exists(h.keep) && await a.windowAlive('host'), 'host close: the keepalive tab and its window stay open');
+  await a.cleanup([], ['host']);
+}
+
 // Narrow and low-height layouts: buttons and contextual hints fit.
 async function layouts({ a, t, press, settle }) {
   const { check } = a;
@@ -652,8 +814,9 @@ async function layouts({ a, t, press, settle }) {
   }
 }
 
-// Cross-window selection including the origin: origin closes last, no orphan UI.
-async function crossWindow({ a, t, f, press, settle, name, urlsOf, missing }) {
+// Cross-window selection including the origin (the overlay host): origin closes last and,
+// without website access, search continues in the standalone window with no orphan.
+async function crossWindow({ a, t, f, state, press, settle, dismiss, name, urlsOf, missing }) {
   const { check } = a;
   const { cross } = f;
   await a.createWindow('cross-other', [cross.other, cross.keepOther]);
@@ -674,18 +837,24 @@ async function crossWindow({ a, t, f, press, settle, name, urlsOf, missing }) {
   check(s.focus === 'close-tabs', 'cross-window: Close button focused by Tab (results -> row X -> Done -> Close)', s.focus);
   await a.keys(['Return']);
   await until(async () => (await missing([cross.origin, cross.same, cross.other])).length === 3, 'cross-window closed', 8000).catch(() => {});
-  await sleep(1500);
+  const ui = await follow(a, { not: cross.origin });
   const order = await a.removed();
   check(sameSet(order, [cross.origin, cross.same, cross.other]) && order.at(-1) === cross.origin, 'cross-window: exactly the checked tabs close, origin last', order.map(name));
   check(!(await missing([cross.keepSame, cross.keepOther])).length && await a.windowAlive('cross-origin') && await a.windowAlive('cross-other'),
     'cross-window: keepalive tab in each window keeps both windows open');
+  s = ui.kind && await state();
+  const live = { ...(await a.uiCount()), sessions: await a.sessions() };
+  check(ui.kind === 'window' && live.overlays === 0 && live.windows === 1 && live.sessions === 1 && s.query === t.cross &&
+    inMode(s, 'select') && s.rows.length === 0, 'cross-window: search continues in one standalone window with the query and select mode',
+  { ui, live, ...(s ? brief(s) : {}) });
+  if (ui.kind) await dismiss();
   const orphans = { ...(await a.uiCount()), sessions: await a.sessions() };
-  check(orphans.overlays === 0 && orphans.windows === 0 && orphans.sessions === 0, 'cross-window: no orphan palette, search window or session after the origin closes', orphans);
+  check(orphans.overlays === 0 && orphans.windows === 0 && orphans.sessions === 0, 'cross-window: Escape then leaves no orphan palette, search window or session', orphans);
   await a.cleanup([], ['cross-origin', 'cross-other']);
 }
 
 // Protected-page fallback window: close selected tabs, then the origin itself.
-async function fallback({ a, t, f, state, press, settle, moveTo, toResults, name, titleOf, missing }) {
+async function fallback({ a, t, f, state, press, settle, moveTo, toResults, dismiss, name, titleOf, missing }) {
   const { check } = a;
   const { guarded } = f;
   const protectedTitle = `Protected ${t.guarded} origin`;
@@ -717,10 +886,15 @@ async function fallback({ a, t, f, state, press, settle, moveTo, toResults, name
   check(s.checked === 1 && s.close === 'Close 1 tab', 'fallback: Ctrl+A checks the origin', { close: s.close });
   await a.keys(['Delete']);
   await until(async () => !(await a.exists(guarded.origin)), 'fallback origin closed', 8000).catch(() => {});
-  await sleep(1500);
-  const orphans = { ...(await a.uiCount()), sessions: await a.sessions() };
+  const ui = await follow(a, { not: guarded.origin });
   const order = await a.removed();
   check(order.at(-1) === guarded.origin && order.length === 3, 'fallback: Delete closes the checked origin tab', order.map(name));
-  check(orphans.windows === 0 && orphans.overlays === 0 && orphans.sessions === 0, 'fallback: search window closes with its origin; no orphan', orphans);
+  s = ui.kind && await state();
+  const live = { ...(await a.uiCount()), sessions: await a.sessions() };
+  check(ui.kind === 'window' && live.windows === 1 && live.overlays === 0 && live.sessions === 1 && s.query === t.guarded && inMode(s, 'select') && s.rows.length === 0,
+    'fallback: the search window stays usable after its origin closes, query and select mode kept', { ui, live, ...(s ? brief(s) : {}) });
+  if (ui.kind) await dismiss();
+  const orphans = { ...(await a.uiCount()), sessions: await a.sessions() };
+  check(orphans.windows === 0 && orphans.overlays === 0 && orphans.sessions === 0, 'fallback: Escape then closes the search window; no orphan', orphans);
   check(await a.exists(guarded.keep) && await a.windowAlive('protected'), 'fallback: keepalive keeps the origin window open');
 }

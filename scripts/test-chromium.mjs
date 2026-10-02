@@ -263,6 +263,20 @@ try {
       overlays: context.pages().filter(p => p.frames().some(f => f.url() === searchUrl && !f.name())).length,
       windows: context.pages().filter(p => p.url().startsWith(`${searchUrl}?`)).length,
     }),
+    // Each search UI with its host tab: the page holding the overlay frame, or the window itself.
+    async searchUIs() {
+      const out = [];
+      for (const p of context.pages()) {
+        if (p.url().startsWith(`${searchUrl}?`)) { out.push({ kind: 'window', url: null, window: null, page: p }); continue; }
+        if (!p.frames().some(f => f.url() === searchUrl && !f.name())) continue;
+        const windowId = await api(url => chrome.tabs.query({}).then(tabs => tabs.find(t => t.url === url)?.windowId), p.url());
+        const key = [...windowIds].find(([, id]) => id === windowId)?.[0] ?? null;
+        out.push({ kind: 'overlay', url: p.url(), window: key, page: p });
+      }
+      // The Playwright page stays non-enumerable so check details can serialize the list.
+      return out.map(({ page: p, ...ui }) => Object.defineProperty(ui, 'page', { value: p }));
+    },
+    retarget(target) { ui.kind = target.kind; if (target.kind === 'overlay') ui.page = target.page; },
     sessions: () => api(async () => Object.keys((await chrome.storage.session.get('search.sessions'))['search.sessions'] || {}).length),
     async createWindow(key, urls) {
       windowIds.set(key, await api(urls => chrome.windows.create({ url: urls, left: 0, top: 0, width: 1280, height: 900, focused: true })

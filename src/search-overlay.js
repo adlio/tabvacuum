@@ -42,7 +42,9 @@ export function mountSearchOverlay(token, sessionId, frameUrl, extensionOrigin) 
   } catch { /* Backdrop tint is cosmetic; the modal still isolates the page. */ }
 
   let removed = false;
-  function remove({ notify = true } = {}) {
+  // A page teardown is not the user dismissing search: the background then
+  // treats a replacement being prepared here as a failed destination.
+  function remove({ notify = true, reason } = {}) {
     if (removed) return;
     removed = true;
     window.removeEventListener('pagehide', onPageHide, true);
@@ -51,9 +53,9 @@ export function mountSearchOverlay(token, sessionId, frameUrl, extensionOrigin) 
     try { dialog.close(); } catch { /* Already closed. */ }
     host.remove();
     if (previousFocus?.isConnected) previousFocus.focus?.({ preventScroll: true });
-    if (notify) api.runtime.sendMessage({ command: 'dismissSearch', token }).catch(() => {});
+    if (notify) api.runtime.sendMessage(reason ? { command: 'dismissSearch', token, reason } : { command: 'dismissSearch', token }).catch(() => {});
   }
-  const onPageHide = () => remove();
+  const onPageHide = () => remove({ reason: 'pagehide' });
   const onFrameMessage = event => {
     if (event.source === frame.contentWindow && event.origin === extensionOrigin &&
         event.data?.type === 'tabvacuum:escape') remove();
