@@ -19,7 +19,8 @@ export const HANDOFF_MS = 15_000;
 export const HANDOFF_RESULT_MS = 30_000;
 const MAX_STATE_TEXT = 8192;
 const MODES = new Set(['search', 'tabs', 'select']);
-const FOCUS = new Set(['query', 'list', 'row-close']);
+const FOCUS = new Set(['query', 'list', 'row-close', 'close-tabs']);
+const MAX_ORDER = 10_000;
 const SIZE = { width: 640, height: 460, margin: 48 };
 
 function randomId(bytes) {
@@ -45,8 +46,12 @@ export function handoffState(raw, closing) {
     sources: normalizeSources(state.sources),
     highlight: text(state.highlight),
     checked: mode === 'select' ? ints(state.checked, closing.length + 10_000) : [],
-    // The query owns focus only in search mode, as in the search page itself.
-    focus: mode === 'search' || focus !== 'query' ? focus : 'list',
+    // The open tabs in the order they were displayed, so the replacement
+    // shows the same rows in the same places.
+    order: ints(state.order, MAX_ORDER),
+    // Focus in the query means search mode, as in the search page itself;
+    // the header Close button exists only in select mode.
+    focus: (focus === 'query' && mode !== 'search') || (focus === 'close-tabs' && mode !== 'select') ? 'list' : focus,
     focusTabId: Number.isSafeInteger(state.focusTabId) ? state.focusTabId : undefined,
     closing: [...closing],
   };
@@ -97,6 +102,9 @@ export function createSearchLauncher(api, search, {
   // Replacement searches waiting to initialize, by replacement session id.
   // Memory only wakes a waiter; storage stays the authority.
   const handoffs = new Map();
+  // Handoff attempts this worker is running. One stored by an earlier
+  // worker can never finish.
+  const attempts = new Set();
   const save = sessions => {
     const live = new Set(Object.values(sessions).map(session => session.id));
     for (const [id, controller] of sourceQueries) {
@@ -131,7 +139,7 @@ export function createSearchLauncher(api, search, {
 
     // The shortcut pressed in our own search window, or for an origin that
     // already has one: bring that window forward instead of opening another.
-    const existing = values.find(s => s.mode === 'window' && s.launcherWindowId !== undefined &&
+    const existing = values.find(s => s.mode === 'window' && s.launcherWindowId !== undefined && !s.pending &&
       (s.launcherTabId === tab.id || s.originTabId === tab.id));
     if (existing) {
       await api.windows.update(existing.launcherWindowId, { focused: true });
@@ -139,9 +147,11 @@ export function createSearchLauncher(api, search, {
     }
     if (search.isSearchPage(tab.url)) return { mode: 'none' }; // Stale search window.
 
-    // One search at a time: a new launch revokes every earlier token.
+    // One search at a time: a new launch revokes every earlier token, and
+    // closes every earlier UI, expired or not.
+    const stored = Object.values((await api.storage.session.get(SESSIONS))[SESSIONS] ?? {});
     await save({});
-    await Promise.all(values.map(closeUi));
+    await Promise.all(stored.filter(s => s && typeof s === 'object').map(closeUi));
 
     const base = {
       id: randomId(16), originTabId: tab.id, originUrl: tab.url, incognito: Boolean(tab.incognito),
@@ -221,18 +231,25 @@ export function createSearchLauncher(api, search, {
   const withoutQuery = url => (typeof url === 'string' ? url.split(/[?#]/, 1)[0] : undefined);
 
   // Returns the token's session only for the frame it was issued to.
-  // A replacement still being prepared may only load and report readiness;
-  // a search handing off may only be dismissed (which cancels the handoff).
+  // A replacement still being prepared may only load, report readiness, or
+  // be dismissed; a search handing off may only be dismissed.
   async function authorize(message, sender, { allowOriginPage = false, allowPending = false, allowHandingOff = false } = {}) {
     const { token } = message;
     if (sender?.id !== api.runtime.id || typeof token !== 'string' || !TOKEN.test(token)) throw denied();
     const sessions = await load();
     if (!Object.hasOwn(sessions, token)) throw denied();
     const session = sessions[token];
-    if ((session.pending && !allowPending) || (handingOff(session) && !allowHandingOff)) throw denied();
     const tab = sender.tab;
     if (!tab || tab.id !== (session.mode === 'overlay' ? session.originTabId : session.launcherTabId) ||
         Boolean(tab.incognito) !== session.incognito) throw denied();
+    // Attempts live in this worker's memory. After a restart, storage still
+    // names them but nothing can finish them: end them now, closing nothing.
+    if (session.pending && !handoffs.has(session.id)) {
+      await endAttempt(session.pending.attempt, sessions);
+      throw denied();
+    }
+    if (session.handoff && !attempts.has(session.handoff.id)) await endAttempt(session.handoff.id, sessions);
+    if ((session.pending && !allowPending) || (handingOff(session) && !allowHandingOff)) throw denied();
 
     // The overlay's own top-frame script may dismiss it, nothing else.
     if (allowOriginPage && session.mode === 'overlay' && sender.frameId === 0 &&
@@ -249,7 +266,8 @@ export function createSearchLauncher(api, search, {
     if (session.frameId === undefined) {
       session.frameId = sender.frameId;
       session.documentId = documentId;
-      session.expiresAt = now() + SESSION_MS;
+      // A replacement keeps its short handoff lifetime until it takes over.
+      if (!session.pending) session.expiresAt = now() + SESSION_MS;
       await save(sessions);
     } else if (session.frameId !== sender.frameId || session.documentId !== documentId) {
       throw denied();
@@ -259,8 +277,20 @@ export function createSearchLauncher(api, search, {
 
   const handingOff = session => session.handoff?.until > now();
 
+  // Ends a handoff attempt in `sessions`: its replacements are removed (and
+  // their UI closed) and the original search becomes usable again.
+  async function endAttempt(attemptId, sessions) {
+    const ended = [];
+    for (const [token, s] of Object.entries(sessions)) {
+      if (s.pending?.attempt === attemptId) { ended.push(s); delete sessions[token]; }
+      if (s.handoff?.id === attemptId) delete s.handoff;
+    }
+    await save(sessions);
+    await Promise.all(ended.map(closeUi));
+  }
+
   // The origin tab, live: it may have moved windows since launch. A search
-  // window that replaced a closed host keeps that host's window as its scope.
+  // window that outlived its origin keeps that origin's window as its scope.
   async function originOf(session) {
     const origin = await api.tabs.get(session.originTabId).catch(() => undefined);
     if (origin && Boolean(origin.incognito) === session.incognito) return origin;
@@ -276,13 +306,18 @@ export function createSearchLauncher(api, search, {
     return search.getContext(origin.windowId, { currentTabId: origin.id });
   };
 
+  const linkedOriginal = (session, sessions) =>
+    Object.values(sessions).find(s => s.handoff?.id === session.pending?.attempt && handingOff(s));
+
   async function getSearchContext(message, sender) {
     const { session, sessions } = await authorize(message, sender, { allowPending: true });
     if (!session.pending) return contextOf(session);
     // A replacement gets the closing search's state once, and only while its
-    // destination is still valid.
-    if (!await handoffTarget(session, sessions)) throw denied();
+    // destination is valid, checked again after the awaited context read.
+    const original = linkedOriginal(session, sessions);
+    if (!original || !await handoffTarget(session, original)) throw denied();
     const context = await contextOf(session);
+    if (!await handoffTarget(session, original)) throw denied();
     const restore = session.pending.delivered ? undefined : session.pending.state;
     session.pending.delivered = true;
     await save(sessions);
@@ -299,13 +334,16 @@ export function createSearchLauncher(api, search, {
     return { ok: true };
   }
 
-  // Dismissing a search that is handing off, or a replacement being
-  // prepared, cancels the handoff: nothing closes.
+  // Dismissing a search that is handing off ends it, so nothing closes.
+  // Dismissing a replacement before it takes over cancels the whole close:
+  // no other replacement is tried and the original stays usable. Only an
+  // overlay torn down by its page (pagehide) counts as a failed destination.
   async function dismissSearch(message, sender) {
     const { token, session, sessions, fromPage } = await authorize(message, sender,
       { allowOriginPage: true, allowPending: true, allowHandingOff: true });
     delete sessions[token];
-    await save(sessions);
+    if (session.pending && !(fromPage && message.reason === 'pagehide')) await endAttempt(session.pending.attempt, sessions);
+    else await save(sessions);
     if (session.mode === 'overlay') {
       if (!fromPage) await closeOverlay(session);
     } else {
@@ -331,70 +369,91 @@ export function createSearchLauncher(api, search, {
   }
 
   // Closes only the explicit IDs the user approved. The search stays open
-  // for further work. Closing the tab that hosts an embedded search first
-  // moves the search (see handOff). A search window that closes its own
-  // origin keeps working, scoped to that origin's window.
+  // for further work. If closing would remove the tab that hosts an embedded
+  // search, the search moves first (see handOff); otherwise that host is
+  // never removed, even if a failed or changed sibling would now allow it.
+  // A search window that closes its own origin keeps working, scoped to
+  // that origin's window.
   async function closeSearchTabs(message, sender) {
     const plan = await serial(async () => {
       const { token, session, sessions } = await authorize(message, sender);
       const origin = await originOf(session);
       const ids = validateTabIds(message.tabIds);
-      if (session.mode === 'overlay' && ids.includes(origin.id) &&
-          await search.closeSkipReason(origin.id, origin.windowId, { closing: ids }) === undefined) {
+      const hosted = session.mode === 'overlay' && ids.includes(origin.id);
+      if (hosted && await search.closeSkipReason(origin.id, origin.windowId, { closing: ids }) === undefined) {
         const attempt = { id: randomId(16), token, sessionId: session.id, hostId: origin.id,
           incognito: session.incognito, ids, state: handoffState(message.state, ids) };
         session.handoff = { id: attempt.id, until: now() + HANDOFF_MS };
+        attempts.add(attempt.id);
         await save(sessions);
         return { attempt };
       }
-      const result = await search.closeSelected(ids, origin.windowId, { originTabId: origin.id });
-      if (result.closedIds.includes(origin.id) && session.mode === 'window') {
-        // The window outlives an origin it closed itself, keeping that window
-        // as its scope. Saved before the queued onRemoved cleanup runs.
+      const result = await search.closeSelected(ids, origin.windowId,
+        { originTabId: origin.id, keepTabId: hosted ? origin.id : undefined });
+      if (result.closedIds.includes(origin.id)) {
+        // Only a window gets here. Saved before the queued onRemoved cleanup runs.
         session.scopeWindowId ??= origin.windowId;
         await save(sessions);
-      } else if (result.closedIds.includes(origin.id)) {
-        // An overlay that could not hand off has nothing left: revoke now.
-        delete sessions[token];
-        await save(sessions);
-        await closeUi(session);
-        return { result };
       }
       return { result: await withContext(result, session) };
     });
-    return plan.result ?? handOff(plan.attempt);
+    if (plan.result) return plan.result;
+    try {
+      return await handOff(plan.attempt);
+    } finally {
+      attempts.delete(plan.attempt.id);
+    }
   }
+
+  const endedReply = status => {
+    if (status === 'gone') throw denied();
+    return { ok: false, cancelled: true, closedIds: [], skipped: [], failedIds: [] };
+  };
 
   /**
    * Moves an embedded search off the tab about to close, then closes the
    * batch. Tries an overlay on an already-permitted surviving page in the
-   * same window, then a separate search window. Nothing closes unless one
-   * replacement has authenticated, received the state and reported ready.
+   * same window, then a separate search window. The host never closes
+   * unless a replacement has authenticated, received the state, reported
+   * ready, been brought forward, and is still valid at the removal itself.
    * Waiting happens outside the serialized queue, so the replacement's own
    * (serialized) messages cannot deadlock behind this close.
    */
   async function handOff(attempt) {
-    for (const prepare of [prepareOverlay, prepareWindow]) {
-      const target = await serial(() => prepare(attempt));
-      if (!target) continue;
-      const ready = await target.ready;
-      const result = await serial(() => commit(attempt, target, ready));
-      if (result) return result;
+    try {
+      for (const prepare of [prepareOverlay, prepareWindow]) {
+        const target = await serial(() => prepare(attempt));
+        if (target?.status) return endedReply(target.status);
+        if (!target) continue;
+        const ready = await target.ready;
+        const outcome = await serial(() => commit(attempt, target, ready));
+        if (outcome?.status) return endedReply(outcome.status);
+        if (outcome) return outcome;
+      }
+    } catch (error) {
+      await serial(() => restore(attempt)).catch(() => {});
+      throw error;
     }
-    await serial(async () => {
-      const sessions = await load();
-      const original = sessions[attempt.token];
-      if (original?.handoff?.id !== attempt.id) throw denied();
-      delete original.handoff; // Usable again: the request failed as a whole.
-      await save(sessions);
-    });
+    const status = await serial(() => restore(attempt));
+    if (status !== 'live') return endedReply(status);
     return { ok: false, handoffFailed: true, closedIds: [], skipped: [], failedIds: [] };
   }
 
-  // The original search, if it is still handing off this attempt.
-  function originalOf(attempt, sessions) {
+  // 'live' while the original is still handing off this attempt; 'cancelled'
+  // once it is usable again (a dismissed replacement, or the time bound);
+  // 'gone' once it ended.
+  function statusOf(attempt, sessions) {
     const original = sessions[attempt.token];
-    return original?.handoff?.id === attempt.id && handingOff(original) ? original : undefined;
+    if (!original) return 'gone';
+    return original.handoff?.id === attempt.id && handingOff(original) ? 'live' : 'cancelled';
+  }
+
+  // Makes the original usable again, if it still exists. Returns its status before.
+  async function restore(attempt) {
+    const sessions = await load();
+    const status = statusOf(attempt, sessions);
+    if (status !== 'gone') await endAttempt(attempt.id, sessions);
+    return status;
   }
 
   function track(session, originalId) {
@@ -416,20 +475,24 @@ export function createSearchLauncher(api, search, {
   }
 
   // Uses only website access the user already granted: activeTab does not
-  // carry over to another tab, and nothing here may prompt.
+  // carry over to another tab, and nothing here may prompt. Any failure to
+  // find or prepare a destination falls through to the search window.
   async function prepareOverlay(attempt) {
     const sessions = await load();
-    if (!originalOf(attempt, sessions)) throw denied();
-    const host = await api.tabs.get(attempt.hostId).catch(() => undefined);
-    if (!host || !await search.hasContentPermission()) return undefined;
-    const [tab] = await search.handoffTargets(host, attempt.ids);
+    const status = statusOf(attempt, sessions);
+    if (status !== 'live') return { status };
+    let tab;
+    try {
+      const host = await api.tabs.get(attempt.hostId);
+      if (await search.hasContentPermission()) [tab] = await search.handoffTargets(host, attempt.ids);
+    } catch { /* No in-page destination. */ }
     if (!tab) return undefined;
     const token = newToken();
     const session = pendingSession(attempt, { mode: 'overlay', originTabId: tab.id, originUrl: tab.url });
     sessions[token] = session;
-    await save(sessions);
     const { ready } = track(session, attempt.sessionId);
     try {
+      await save(sessions);
       // Bounded: this holds the serialized queue, and a page may never answer.
       const [injection] = await withTimeout(api.scripting.executeScript({
         target: { tabId: tab.id },
@@ -450,7 +513,8 @@ export function createSearchLauncher(api, search, {
 
   async function prepareWindow(attempt) {
     const sessions = await load();
-    if (!originalOf(attempt, sessions)) throw denied();
+    const status = statusOf(attempt, sessions);
+    if (status !== 'live') return { status };
     const host = await api.tabs.get(attempt.hostId).catch(() => undefined);
     if (!host) return undefined;
     const token = newToken();
@@ -479,55 +543,91 @@ export function createSearchLauncher(api, search, {
     await closeUi(session);
   }
 
-  // The replacement's destination, checked again at each step: still in the
-  // host's window and privacy mode, still the same loaded page, and website
-  // access still granted for an overlay. Returns the live host, or undefined.
-  async function handoffTarget(session, sessions) {
-    const original = Object.values(sessions).find(s => s.handoff?.id === session.pending?.attempt && handingOff(s));
-    const host = original && await api.tabs.get(original.originTabId).catch(() => undefined);
+  // The replacement's destination, live: still in the host's window and
+  // privacy mode, still the same loaded page with website access for an
+  // overlay, still open for a window. Returns the live host, or undefined.
+  async function handoffTarget(session, original) {
+    const host = await api.tabs.get(original.originTabId).catch(() => undefined);
     if (!host || Boolean(host.incognito) !== session.incognito) return undefined;
-    if (session.mode === 'window') return host.windowId === session.scopeWindowId ? host : undefined;
+    if (session.mode === 'window') {
+      if (host.windowId !== session.scopeWindowId) return undefined;
+      if (session.launcherTabId === undefined) return host; // Still opening.
+      const launcher = await api.tabs.get(session.launcherTabId).catch(() => undefined);
+      return launcher && Boolean(launcher.incognito) === session.incognito ? host : undefined;
+    }
     const tab = await api.tabs.get(session.originTabId).catch(() => undefined);
     if (!search.canHostSearch(tab, host) || tab.url !== session.originUrl) return undefined;
     return await search.hasContentPermission() ? host : undefined;
   }
 
-  // Serialized. Hands the session over, then closes exactly the accepted IDs.
-  // Returns undefined to try the next replacement; throws if the original
-  // search ended meanwhile (dismissed, navigated, or replaced by a new launch).
+  // Serialized. Returns a final result, { status } if the attempt ended, or
+  // undefined to try the next destination (nothing was removed).
   async function commit(attempt, target, ready) {
     const sessions = await load();
-    const original = originalOf(attempt, sessions);
-    if (!original) {
+    const status = statusOf(attempt, sessions);
+    if (status !== 'live') {
       await drop(target.token, target.session);
-      throw denied();
+      return { status };
     }
+    const original = sessions[attempt.token];
     const replacement = sessions[target.token];
+    const usable = () => handoffTarget(replacement, original);
     const host = ready && replacement?.id === target.session.id && replacement.pending?.ready &&
-      replacement.frameId !== undefined && await handoffTarget(replacement, sessions);
+      replacement.frameId !== undefined && await usable();
     if (!host) {
       await drop(target.token, target.session);
       return undefined;
     }
-    // From here the original frame holds nothing: its token is gone.
-    delete sessions[attempt.token];
-    delete replacement.pending;
-    replacement.expiresAt = now() + SESSION_MS;
-    await save(sessions);
-    const handoff = handoffs.get(replacement.id);
-    handoffs.delete(replacement.id);
-    if (replacement.mode === 'overlay') await api.tabs.update(replacement.originTabId, { active: true }).catch(() => {});
-    else await api.windows.update(replacement.launcherWindowId, { focused: true }).catch(() => {});
+    // Brought forward before anything closes; the original keeps its
+    // session until the replacement takes over.
+    try {
+      if (replacement.mode === 'overlay') await api.tabs.update(replacement.originTabId, { active: true });
+      else await api.windows.update(replacement.launcherWindowId, { focused: true });
+    } catch {
+      await drop(target.token, target.session);
+      return undefined;
+    }
+    // Checked again after closeSelected's own reads, right before the first
+    // removal and before the host's (always last).
+    let first = true;
+    const guard = async tabId => {
+      if (!first && tabId !== attempt.hostId) return true;
+      first = false;
+      return Boolean(await usable());
+    };
     let result;
     try {
-      result = await search.closeSelected(attempt.ids, host.windowId, { originTabId: host.id });
-    } catch {
-      result = { ok: false, closedIds: [], skipped: [], failedIds: [...attempt.ids] };
+      result = await search.closeSelected(attempt.ids, host.windowId, { originTabId: attempt.hostId, guard });
+    } catch { /* Nothing was removed. */ }
+    const back = () => Promise.all([
+      api.tabs.update(attempt.hostId, { active: true }).catch(() => {}),
+      api.windows.update(host.windowId, { focused: true }).catch(() => {}),
+    ]);
+    if (!result || (!result.closedIds.length && !result.failedIds.length && result.stopped)) {
+      await drop(target.token, target.session);
+      await back();
+      return undefined;
     }
-    // A protected host survives; its overlay must not stay behind, inert.
-    if (!result.closedIds.includes(host.id)) await closeOverlay(original);
-    handoff?.deliver(await withContext(result, replacement));
-    return { ...result, handedOff: true };
+    const hostClosed = result.closedIds.includes(attempt.hostId);
+    if (hostClosed || await usable()) {
+      // The replacement takes over; the original frame holds nothing.
+      delete sessions[attempt.token];
+      delete replacement.pending;
+      replacement.expiresAt = now() + SESSION_MS;
+      await save(sessions);
+      const handoff = handoffs.get(replacement.id);
+      handoffs.delete(replacement.id);
+      // A protected host survives; its overlay must not stay behind, inert.
+      if (!hostClosed) await closeOverlay(original);
+      handoff?.deliver(await withContext(result, replacement));
+      return { ...result, handedOff: true };
+    }
+    // The replacement was lost mid-batch and the host kept: the original
+    // continues, reporting exactly what closed.
+    await drop(target.token, target.session);
+    await endAttempt(attempt.id, await load());
+    await back();
+    return withContext(result, original);
   }
 
   // The replacement has applied the handed-over state. The reply waits
@@ -662,6 +762,9 @@ export function createSearchLauncher(api, search, {
           (s.originTabId === tabId && s.scopeWindowId === undefined));
         if (!ended.length) return;
         for (const [token] of ended) delete sessions[token];
+        // Closing a replacement window before it takes over cancels its close.
+        const cancelled = new Set(ended.filter(([, s]) => s.pending && s.launcherTabId === tabId).map(([, s]) => s.pending.attempt));
+        for (const s of Object.values(sessions)) if (cancelled.has(s.handoff?.id)) delete s.handoff;
         await save(sessions);
         // A search window has nothing to return to once its origin is gone.
         await Promise.all(ended.filter(([, s]) => s.launcherTabId !== tabId).map(([, s]) => closeWindow(s)));

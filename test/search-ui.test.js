@@ -575,7 +575,7 @@ describe('select multiple mode', () => {
     ui.key('x');
     await settle();
     expect(closes(ui)).toEqual([{ command: 'closeSearchTabs', token: 'good', tabIds: [2, 1], state: {
-      query: '', mode: 'select', sources: { history: false, content: false }, highlight: 'tab:3', checked: [2, 1], focus: 'list',
+      query: '', mode: 'select', sources: { history: false, content: false }, highlight: 'tab:3', checked: [2, 1], order: [2, 3, 1], focus: 'list',
     } }]);
     expect(ids(ui)).toEqual([3]);
     expect(ui.mode()).toBe('select');
@@ -1569,7 +1569,7 @@ describe('closing the tab that hosts search (0.5.2)', () => {
     ui.keys('j', 'x', 'k', 'x'); // Closes the host (1); the rest is queued.
     await settle();
     expect(closes(ui)[1]).toEqual({ command: 'closeSearchTabs', token: 'good', tabIds: [1], state: {
-      query: '', mode: 'tabs', sources: { history: false, content: false }, highlight: 'tab:1', checked: [], focus: 'list',
+      query: '', mode: 'tabs', sources: { history: false, content: false }, highlight: 'tab:1', checked: [], order: [3, 1], focus: 'list',
     } });
     expect(closes(ui)).toHaveLength(2);
     expect(ui.$('message').textContent).toBe('Search moved to another tab.');
@@ -1658,5 +1658,157 @@ describe('closing the tab that hosts search (0.5.2)', () => {
     expect(contextCalls(ui)).toHaveLength(2);
     expect(ui.$('message').textContent).toBe('Could not close tabs. Check the list and try again.');
     expect(closes(ui)).toHaveLength(0);
+  });
+});
+
+describe('host handoff review fixes (0.5.2)', () => {
+  // The browser marks `first` as the most recently used tabs, in that order.
+  const recency = (ctx, first) => ({ ...ctx, tabs: ctx.tabs.map(tab => (first.includes(tab.id) ? { ...tab, lastAccessed: 1000 - first.indexOf(tab.id) } : tab)) });
+  const hosted = () => ({ ...amazon(), currentTabId: 11 });
+
+  it('keeps the displayed order through a host handoff while the browser changes recency: Tab, x, j, j, x closes original rows 0 then 3', async () => {
+    const original = await ready({ initial: hosted(),
+      closeResponse: msg => ({ ok: true, handedOff: true, closedIds: msg.tabIds, skipped: [], failedIds: [] }) });
+    original.type('amazon');
+    const order = ids(original);
+    expect(order).toEqual([11, 12, 13, 14, 15, 16]);
+    original.keys('Tab', 'x');
+    await settle();
+    const { state } = closes(original)[0];
+    expect(state.order).toEqual(order);
+
+    // The replacement loads after the browser activated other tabs, and the
+    // close itself activates yet another neighbour.
+    const before = recency(hosted(), [14, 16]);
+    const moved = recency(hosted(), [16, 15]);
+    const after = { ...moved, currentTabId: 16, tabs: moved.tabs.filter(tab => tab.id !== 11) };
+    const replacement = await ready({ initial: { ...before, restore: { ...state, closing: [11] } },
+      handoff: () => ({ ok: true, closedIds: [11], skipped: [], failedIds: [], context: after }) });
+    replacement.contexts.good = after;
+    await settle();
+    expect(ids(replacement)).toEqual([12, 13, 14, 15, 16]);
+    expect(activeId(replacement)).toBe(12); // The row that took the host's place.
+    // Every later close also activates something else.
+    replacement.contexts.good = recency(after, [13, 12]);
+    replacement.keys('j', 'j', 'x');
+    await settle();
+    expect(closes(replacement).map(msg => msg.tabIds)).toEqual([[14]]);
+    expect(ids(replacement)).toEqual([12, 13, 15, 16]);
+    expect(activeId(replacement)).toBe(15);
+  });
+
+  it('keeps the displayed order when an ordinary close activates a neighbour, but a new query ranks afresh', async () => {
+    const ui = await ready({ initial: amazon(), closeResponse: msg => {
+      ui.contexts.good = recency(ui.contexts.good, [16, 15]);
+      return { ok: true, closedIds: msg.tabIds, skipped: [], failedIds: [] };
+    } });
+    ui.type('amazon');
+    const order = ids(ui);
+    ui.keys('Tab', 'x', 'j', 'j', 'x');
+    for (let i = 0; i < 8; i++) await flush();
+    expect(closes(ui).map(msg => msg.tabIds)).toEqual([[order[0]], [order[3]]]);
+    expect(ids(ui)).toEqual([order[1], order[2], order[4], order[5]]);
+    ui.contexts.good = recency(ui.contexts.good, [12]);
+    ui.tabEvents.onUpdated.fn(12, { title: 'Amazon 2' }); await flush(); // A refresh keeps places too.
+    expect(ids(ui)).toEqual([order[1], order[2], order[4], order[5]]);
+    ui.$('query').focus();
+    ui.type('amazo');
+    ui.type('amazon');
+    expect(ids(ui)).toEqual([12, 16, 15, 13]); // Most recent first again.
+  });
+
+  describe('restores rows that only History or Contents list', () => {
+    const zebra = () => context({ currentTabId: 1, contentPermission: true, tabs: [
+      { id: 1, windowId: 10, title: 'Zebra host', url: 'https://zebra.example/host', lastAccessed: 99 },
+      { id: 4, windowId: 10, title: 'Notes', url: 'https://notes.example/', lastAccessed: 80 },
+      { id: 6, windowId: 10, title: 'Zebra page', url: 'https://zebra.example/page', lastAccessed: 70 },
+      { id: 7, windowId: 10, title: 'Old', url: 'https://old.example/z', lastAccessed: 60 },
+    ] });
+    const sources = msg => ({
+      content: msg.sources.content ? [{ tabId: 4, url: 'https://notes.example/', snippet: 'a zebra crossing' }] : [],
+      history: msg.sources.history ? [{ url: 'https://old.example/z', title: 'zebra archive', lastVisitTime: 5 }] : [],
+      coverage: { history: { state: 'ready', limited: false }, content: { state: 'ready', searched: 3, total: 3, skipped: 0, truncated: 0 } },
+    });
+    const restored = over => ({ query: 'zebra', mode: 'select', sources: { history: true, content: true }, highlight: 'tab:4',
+      checked: [4, 6, 7], focus: 'row-close', focusTabId: 4, closing: [1], order: [1, 6, 4, 7], ...over });
+    const remaining = () => ({ ...zebra(), tabs: zebra().tabs.filter(tab => tab.id !== 1) });
+    const start = over => ready({ initial: { ...zebra(), restore: restored(over) }, sources,
+      handoff: () => ({ ok: true, closedIds: [1], skipped: [], failedIds: [], context: remaining() }) });
+
+    it('keeps content-only and history-promoted checks and row-X focus until their results arrive', async () => {
+      const ui = await start();
+      await settle();
+      expect(ids(ui)).toEqual([6]); // Contents and History not back yet.
+      vi.advanceTimersByTime(0); await settle();
+      expect(ids(ui)).toEqual([6, 4, 7]);
+      expect(checkedIds(ui)).toEqual([6, 4, 7]);
+      expect(ui.$('selection-status').textContent).toBe('3 of 3 selected');
+      expect(activeId(ui)).toBe(4);
+      expect(ui.document.activeElement.dataset.closeId).toBe('4');
+    });
+
+    it('never arms the row standing in for a held highlight', async () => {
+      const ui = await start({ mode: 'tabs', checked: [], focus: 'list', focusTabId: undefined });
+      await settle();
+      ui.key('x'); await settle();
+      expect(closes(ui)).toEqual([]);
+      vi.advanceTimersByTime(0); await settle();
+      expect(activeId(ui)).toBe(4);
+      ui.key('x'); await settle();
+      expect(closes(ui).map(msg => msg.tabIds)).toEqual([[4]]);
+    });
+
+    it('drops held checks that do not come back', async () => {
+      const ui = await ready({ initial: { ...zebra(), restore: restored() }, sources: msg => ({ ...sources(msg), content: [], history: [] }),
+        handoff: () => ({ ok: true, closedIds: [1], skipped: [], failedIds: [], context: remaining() }) });
+      await settle();
+      vi.advanceTimersByTime(0); await settle();
+      expect(checkedIds(ui)).toEqual([6]);
+      expect(ui.$('selection-status').textContent).toBe('1 of 1 selected');
+    });
+  });
+
+  it('keeps search mode for a row X reached by reverse Tab, and focus on the header Close button', async () => {
+    const searchMode = await ready({ closeResponse: msg => ({ ok: true, handedOff: true, closedIds: msg.tabIds, skipped: [], failedIds: [] }) });
+    searchMode.keys('ArrowDown', 'ArrowDown'); // The host (current tab) is listed last.
+    for (let i = 0; i < 3; i++) searchMode.key('Tab', { shiftKey: true });
+    expect(searchMode.mode()).toBe('search');
+    expect(searchMode.document.activeElement).toBe(searchMode.rowX(2));
+    searchMode.click(searchMode.rowX(2));
+    await settle();
+    const fromRow = closes(searchMode)[0].state;
+    expect(fromRow).toMatchObject({ mode: 'search', focus: 'row-close', focusTabId: 1 });
+
+    const header = await ready({ closeResponse: msg => ({ ok: true, handedOff: true, closedIds: msg.tabIds, skipped: [], failedIds: [] }) });
+    header.keys('Tab', 'm', 'j', 'j', ' ');
+    header.$('close-tabs').focus();
+    header.$('close-tabs').dispatch('click');
+    await settle();
+    const fromHeader = closes(header)[0].state;
+    expect(fromHeader).toMatchObject({ mode: 'select', focus: 'close-tabs', checked: [1] });
+
+    const left = context({ tabs: context().tabs.filter(tab => tab.id !== 1) });
+    for (const [state, mode, focused] of [[fromRow, 'search', 'row-close-'], [fromHeader, 'select', 'close-tabs']]) {
+      let finish;
+      const ui = await ready({ initial: { ...context(), restore: { ...state, closing: [1] } }, handoff: () => new Promise(resolve => { finish = resolve; }) });
+      expect(ui.mode()).toBe(mode);
+      expect(ui.focused()).toMatch(new RegExp(`^${focused}`));
+      finish({ ok: true, closedIds: [1], skipped: [], failedIds: [], context: left });
+      await settle();
+      expect(ui.mode()).toBe(mode);
+      expect(ui.focused()).toMatch(new RegExp(`^${focused}`));
+    }
+  });
+
+  it('reports a cancelled close and a host kept as changed', async () => {
+    const cancelled = await ready({ closeResponse: () => ({ ok: false, cancelled: true, closedIds: [], skipped: [], failedIds: [] }) });
+    cancelled.keys('Tab', 'j', 'j', 'x', 'k', 'x');
+    await settle();
+    expect(cancelled.$('message').textContent).toBe('Closing was cancelled. No tabs were closed.');
+    expect(closes(cancelled)).toHaveLength(1);
+    const kept = await ready({ closeResponse: () => ({ ok: true, closedIds: [2], skipped: [{ tabId: 1, reason: 'changed' }], failedIds: [] }) });
+    kept.keys('Tab', 'm', 'a', 'x');
+    await settle();
+    expect(kept.$('message').textContent).toBe('Closed 1 of 3 tabs. Skipped 1: Current (changed while closing).');
   });
 });

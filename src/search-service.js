@@ -199,8 +199,12 @@ export function createSearchService(api, { contentTimeoutMs = CONTENT_TIMEOUT_MS
    * The active tab (including the one search opened over) may be closed;
    * pinned/audible settings and the last tab of each window are still kept.
    * The origin tab closes last, because closing it can tear down the caller.
+   * keepTabId is never removed: if it otherwise would be, it is skipped as
+   * 'changed'. guard(tabId), when given, runs right before each removal; if
+   * it returns false nothing more is removed, the rest is skipped as
+   * 'changed', and the result has stopped: true.
    */
-  async function closeSelected(tabIds, windowId, { originTabId } = {}) {
+  async function closeSelected(tabIds, windowId, { originTabId, keepTabId, guard } = {}) {
     const ids = validateTabIds(tabIds); // Frozen copy: later caller edits change nothing.
     const { scope, settings, inScope } = await closePolicy(windowId);
     const order = [...ids.filter(id => id !== originTabId), ...ids.filter(id => id === originTabId)];
@@ -208,11 +212,16 @@ export function createSearchService(api, { contentTimeoutMs = CONTENT_TIMEOUT_MS
     const closedIds = [];
     const skipped = [];
     const failedIds = [];
-    for (const tabId of order) {
-      const reason = await skipReason(tabId, windowId, scope, settings, inScope);
+    for (const [index, tabId] of order.entries()) {
+      const reason = await skipReason(tabId, windowId, scope, settings, inScope) ??
+        (tabId === keepTabId ? 'changed' : undefined);
       if (reason) {
         skipped.push({ tabId, reason });
         continue;
+      }
+      if (guard && !await guard(tabId)) {
+        skipped.push(...order.slice(index).map(id => ({ tabId: id, reason: 'changed' })));
+        return { ok: true, closedIds, skipped, failedIds, stopped: true };
       }
       try {
         await api.tabs.remove(tabId);

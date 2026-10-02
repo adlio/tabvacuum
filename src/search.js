@@ -124,6 +124,16 @@ export function startSearch({ document, window, browser }) {
   let rowCloses = [];
   // Rendered rows by result key, reused while their content is unchanged.
   let rowCache = new Map();
+  // Displayed position by result key for the current query. A list that
+  // refreshes (after a close, a tab event, or a search handoff) keeps rows
+  // where the user saw them, even when activation changes recency, so the
+  // next row and the next key act on what is on screen. Typing a new query
+  // starts a fresh ranking.
+  let displayOrder = new Map();
+  // Checked tabs, highlight and row-X focus restored from a handoff that
+  // only appear once History or Contents results arrive. Held, never acted
+  // on, until those results settle.
+  let held = null;
   let hiddenHistory = 0;
   let selected = -1;
   let mode = 'search';
@@ -263,20 +273,22 @@ export function startSearch({ document, window, browser }) {
     modeIndicator.textContent = MODE_LABELS[mode];
     modeIndicator.hidden = mode === 'search';
     $('selection-status').textContent = selecting
-      ? `${checked.size} of ${results.length} selected${hiddenHistory ? ' · Only open tabs can be selected' : ''}`
+      ? `${shownChecked()} of ${results.length} selected${hiddenHistory ? ' · Only open tabs can be selected' : ''}`
       : '';
     selectButton.textContent = selecting ? 'Done' : 'Select multiple';
     selectButton.setAttribute('aria-disabled', String(!selecting && !results.some(isTab)));
     closeButton.hidden = !selecting;
-    closeButton.textContent = `Close ${plural(checked.size, 'tab')}`;
-    closeButton.setAttribute('aria-disabled', String(busy || !checked.size));
+    closeButton.textContent = `Close ${plural(shownChecked(), 'tab')}`;
+    closeButton.setAttribute('aria-disabled', String(busy || !shownChecked()));
     paintSources();
   }
+
+  const shownChecked = () => results.filter(result => isTab(result) && checked.has(result.tab.id)).length;
 
   function setMode(next) {
     if (next !== 'select') checked.clear();
     const changed = next !== mode;
-    if (changed) pendingListKeys.length = 0;
+    if (changed) { pendingListKeys.length = 0; held = null; }
     // Entering the tab menu from search acts on the highlight the user can see.
     if (changed && mode === 'search') highlightCloseReady = true;
     // Select mode lists open tabs only, so entering or leaving it reshapes the list.
@@ -401,17 +413,28 @@ export function startSearch({ document, window, browser }) {
     });
   }
 
+  // Keeps rows already shown in their displayed order; rows new to this
+  // query follow in ranked order. Open tabs stay ahead of history.
+  function arrange(composed) {
+    if (!displayOrder.size) return composed;
+    const known = composed.map((result, index) => ({ result, index, at: displayOrder.get(result.key) ?? Infinity }));
+    const group = tabs => known.filter(item => isTab(item.result) === tabs)
+      .sort((a, b) => (a.at === b.at ? a.index - b.index : a.at - b.at)).map(item => item.result);
+    return [...group(true), ...group(false)];
+  }
+
   function render(preserveKey, fallbackIndex = 0) {
     if (!context) return;
     // Rebuilding rows removes a focused row button; put focus back afterwards.
     const focusedClose = isRowClose(document.activeElement) ? document.activeElement : null;
     const focusedTabId = focusedClose ? Number(focusedClose.dataset.closeId) : undefined;
     const typed = Boolean(query.value.trim());
-    const all = compose();
+    const all = arrange(compose());
+    displayOrder = new Map(all.map((result, index) => [result.key, index]));
     results = mode === 'select' ? all.filter(isTab) : all;
     hiddenHistory = all.length - results.length;
     const shown = new Set(results.filter(isTab).map(result => result.tab.id));
-    for (const id of checked) if (!shown.has(id)) checked.delete(id);
+    for (const id of checked) if (!shown.has(id) && !held?.checked.has(id)) checked.delete(id);
     const { tabs, history } = groups;
     const tabRows = [];
     const historyRows = [];
@@ -496,8 +519,24 @@ export function startSearch({ document, window, browser }) {
       dropSource('content');
       context = { ...context, contentPermission: false };
     }
-    recompose(selectedKey());
+    if (held) release(); else recompose(selectedKey());
     paintSources();
+  }
+
+  // The first History/Contents results after a handoff have settled: the
+  // held identities either reappear (and are restored) or are gone.
+  function release() {
+    const { highlight, focusTabId } = held;
+    held = null;
+    if (highlight === undefined) recompose(selectedKey());
+    else {
+      render(highlight, selected);
+      highlightCloseReady = selectedKey() === highlight;
+      if (!highlightCloseReady) pendingListKeys.length = 0;
+    }
+    const close = focusTabId === undefined ? null
+      : rowCloses.find(button => button && Number(button.dataset.closeId) === focusTabId);
+    if (close && document.activeElement === list) close.focus();
   }
 
   // Automatic changes keep the highlighted item. If it vanished, the row that
@@ -520,6 +559,7 @@ export function startSearch({ document, window, browser }) {
 
   function setSource(name, on) {
     if (!context) return;
+    held = null;
     const allowed = name === 'history' ? !context.incognito : context.contentPermission;
     const before = selectedKey();
     // Keys queued against the old list must not act on the new one.
@@ -657,7 +697,8 @@ export function startSearch({ document, window, browser }) {
     if (!skipped.length && !failed) return `Closed ${plural(closed, 'tab')}.`;
     const parts = [`Closed ${closed} of ${plural(tabIds.length, 'tab')}.`];
     if (skipped.length) {
-      const reasons = { pinned: 'pinned tab', audible: 'playing audio', 'last-tab': 'last tab in its window', unavailable: 'no longer in this search' };
+      const reasons = { pinned: 'pinned tab', audible: 'playing audio', 'last-tab': 'last tab in its window',
+        unavailable: 'no longer in this search', changed: 'changed while closing' };
       const named = skipped.slice(0, MAX_LISTED_SKIPS).map(({ tabId, reason }) =>
         `${titles.get(tabId) ?? 'A tab'} (${reasons[reason] || 'could not be closed'})`);
       const more = skipped.length - named.length;
@@ -671,6 +712,7 @@ export function startSearch({ document, window, browser }) {
   function focusState() {
     const focus = document.activeElement;
     if (focus === query) return { focus: 'query' };
+    if (focus === closeButton) return { focus: 'close-tabs' };
     if (isRowClose(focus)) return { focus: 'row-close', focusTabId: Number(focus.dataset.closeId) };
     return { focus: 'list' };
   }
@@ -697,7 +739,7 @@ export function startSearch({ document, window, browser }) {
     // first; the backend restores this state there, never in the page.
     if (embedded && tabIds.includes(context.currentTabId)) {
       request.state = { query: query.value, mode, sources: { ...sources }, highlight: selectedKey() ?? '',
-        checked: [...checked], ...focusState() };
+        checked: [...checked], order: displayedTabIds(), ...focusState() };
     }
     beginClose();
     let response;
@@ -705,6 +747,8 @@ export function startSearch({ document, window, browser }) {
     if (response?.handedOff === true) { retire(); return; }
     await finishClose(tabIds, response, titles);
   }
+
+  const displayedTabIds = () => [...displayOrder.keys()].filter(key => key.startsWith('tab:')).map(key => Number(key.slice(4)));
 
   // The replacement search now owns the session and the outcome. Nothing
   // queued here may act, and this frame is about to be removed.
@@ -728,14 +772,27 @@ export function startSearch({ document, window, browser }) {
     sources.history = state.sources?.history === true && !context.incognito;
     sources.content = state.sources?.content === true && context.contentPermission;
     mode = MODE_LABELS[state.mode] === undefined ? 'tabs' : state.mode;
-    if (mode === 'search' && state.focus !== 'query') mode = 'tabs';
     checked.clear();
     if (mode === 'select') for (const id of idList(state.checked)) checked.add(id);
-    highlightCloseReady = true;
-    render(state.highlight, 0);
-    const rowFocus = state.focus === 'row-close'
-      ? rowCloses.find(close => close && Number(close.dataset.closeId) === state.focusTabId) : null;
-    (rowFocus ?? (mode === 'search' ? query : list)).focus();
+    // The order the user saw, so the row taking the closed one's place is the
+    // same one, whatever the browser activated meanwhile.
+    displayOrder = new Map(idList(state.order).map((id, index) => [`tab:${id}`, index]));
+    const highlight = typeof state.highlight === 'string' && state.highlight ? state.highlight : undefined;
+    const focusTabId = state.focus === 'row-close' && Number.isInteger(state.focusTabId) ? state.focusTabId : undefined;
+    const closingIds = new Set(tabIds);
+    // Rows that only History or Contents list are not here yet.
+    held = extrasOn() && sourceQuery() ? {
+      checked: new Set(checked),
+      highlight: highlight && !closingIds.has(Number(highlight.slice(4))) ? highlight : undefined,
+      focusTabId: closingIds.has(focusTabId) ? undefined : focusTabId,
+    } : null;
+    render(highlight, 0);
+    // Never arm a row that merely took the place of one not yet listed.
+    highlightCloseReady = highlight === undefined || selectedKey() === highlight;
+    const rowFocus = focusTabId === undefined ? null
+      : rowCloses.find(close => close && Number(close.dataset.closeId) === focusTabId);
+    const control = state.focus === 'query' ? query : state.focus === 'close-tabs' && mode === 'select' ? closeButton : rowFocus;
+    (control ?? (mode === 'search' ? query : list)).focus();
     if (mode !== 'search') announce(MODE_LABELS[mode]);
     const titles = new Map(context.tabs.map(tab => [tab.id, tabLabel(tab)]));
     beginClose();
@@ -750,14 +807,15 @@ export function startSearch({ document, window, browser }) {
     const bundled = ok && isContext(response.context);
     if (ok) {
       const gone = new Set(idList(response.closedIds));
-      for (const id of gone) checked.delete(id);
+      for (const id of gone) { checked.delete(id); held?.checked.delete(id); }
       notice = describeClose(tabIds, response, titles);
       // Remove confirmed closures even if the following refresh fails.
       setContext(bundled ? response.context : { ...context, tabs: context.tabs.filter(tab => !gone.has(tab.id)) });
     } else {
       notice = response?.handoffFailed === true
         ? 'Search could not stay open after closing this tab, so no tabs were closed.'
-        : 'Could not close tabs. Check the list and try again.';
+        : response?.cancelled === true ? 'Closing was cancelled. No tabs were closed.'
+          : 'Could not close tabs. Check the list and try again.';
     }
     awaitingClose = false;
     // The reply usually carries the fresh list. Otherwise read it once; the
@@ -829,6 +887,8 @@ export function startSearch({ document, window, browser }) {
 
   function onQueryInput() {
     if (composing) return;
+    held = null;
+    displayOrder = new Map(); // A new query is ranked afresh.
     checked.clear();
     pendingListKeys.length = 0;
     highlightCloseReady = true;
