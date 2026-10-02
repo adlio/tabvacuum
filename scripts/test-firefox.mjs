@@ -261,7 +261,9 @@ try {
     // Each search UI with its host tab: the overlay frame's top-level tab, or the window itself.
     searchUIs: () => chrome(`${FIXTURE} const [url, origin] = arguments; const out = [];
       for (const kind of ['overlay', 'window']) for (const bc of locate(kind, url)) {
-        const browser = bc.top.embedderElement, w = browser?.ownerGlobal;
+        // The host tab's own window object, so test-set expandos such as __tvKey are visible.
+        const w = [...Services.wm.getEnumerator('navigator:browser')].find(w => w.gBrowser.browsers.some(b => b.browsingContext === bc.top));
+        const browser = w?.gBrowser.browsers.find(b => b.browsingContext === bc.top);
         out.push({ kind, url: kind === 'overlay' ? bc.top.currentURI.spec : null,
           window: kind === 'window' ? null : w === originWindow(origin) ? 'origin' : w?.__tvKey ?? null,
           title: kind === 'window' ? 'Search tabs' : browser?.contentTitle || '' });

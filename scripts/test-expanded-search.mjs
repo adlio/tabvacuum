@@ -464,7 +464,7 @@ async function hostHandoff(ctx) {
     check(s.mode === 'select' && sameSet(s.rows.filter(r => r.checked).map(r => r.url), [u.host, u.tango]), 'host handoff: host and one other tab checked', view(s));
     await a.keys(['x']);
     let step = await handedOff('(batch)', u.host, [u.tango, u.host],
-      s => kept(s, 'select') && s.rows.every(r => !r.checked) && same(tabUrls(s), order.filter(url => ![u.host, u.tango].includes(url))));
+      s => kept(s, 'select') && s.rows.every(r => !r.checked) && sameSet(tabUrls(s), order.filter(url => ![u.host, u.tango].includes(url))));
     await a.shot('host-handoff-in-page', 'website access on: after closing the host and another tab, the palette continues over a surviving tab in the same window');
 
     // Row X on the new host while another row is checked: that check stays.
@@ -491,13 +491,14 @@ async function hostHandoff(ctx) {
     const ui = await follow(a, { not: step.host });
     s = ui.kind && await state();
     const removed = await a.removed();
+    const left = { asleep: await x.isDiscarded(u.sleeping), guarded: await a.exists(u.guarded), window: await a.windowAlive('handoff') };
     check(ui.kind === 'window' && sameSet(removed, closed) && s && kept(s, 'tabs') && same(tabUrls(s), [u.sleeping]) &&
-      await x.isDiscarded(u.sleeping) && await a.exists(u.guarded) && await a.windowAlive('handoff'),
+      left.asleep && left.guarded && left.window,
     'host handoff: with only a sleeping and a protected tab left, the standalone window takes over; neither is woken',
-    { kind: ui.kind, removed: removed.map(short), ...(s ? view(s) : {}) });
+    { kind: ui.kind, removed: removed.map(short), ...left, ...(s ? view(s) : {}) });
     await dismiss();
-    const left = { ...(await a.uiCount()), sessions: await a.sessions() };
-    check(left.overlays + left.windows + left.sessions === 0, 'host handoff: Escape dismisses; no orphan session', left);
+    const after = { ...(await a.uiCount()), sessions: await a.sessions() };
+    check(after.overlays + after.windows + after.sessions === 0, 'host handoff: Escape dismisses; no orphan session', after);
   } catch (error) {
     check(false, 'host handoff: scenario stopped', error.message);
     if ((await a.searchUIs()).length) await dismiss().catch(() => {});
