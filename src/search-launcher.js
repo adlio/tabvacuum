@@ -582,7 +582,22 @@ export function createSearchLauncher(api, search, {
     // session until the replacement takes over.
     try {
       if (replacement.mode === 'overlay') await api.tabs.update(replacement.originTabId, { active: true });
-      else await api.windows.update(replacement.launcherWindowId, { focused: true });
+      else {
+        if (host.active) {
+          // Firefox can load a sleeping neighbour when the active host closes.
+          // Select an already-loaded survivor (even a protected page) first;
+          // this needs no injection or website access and never loads a tab.
+          const eligible = tab => tab && tab.windowId === host.windowId &&
+            Boolean(tab.incognito) === replacement.incognito && !attempt.ids.includes(tab.id) &&
+            tab.status === 'complete' && !tab.discarded && !tab.pendingUrl && !search.isSearchPage(tab.url);
+          const survivor = (await api.tabs.query({ windowId: host.windowId })).find(eligible);
+          if (survivor) {
+            const live = await api.tabs.get(survivor.id).catch(() => undefined);
+            if (eligible(live)) await api.tabs.update(live.id, { active: true });
+          }
+        }
+        await api.windows.update(replacement.launcherWindowId, { focused: true });
+      }
     } catch {
       await drop(target.token, target.session);
       return undefined;

@@ -1747,6 +1747,16 @@ describe('host handoff review fixes (0.5.2)', () => {
       expect(ui.document.activeElement.dataset.closeId).toBe('4');
     });
 
+    it('keeps the handed-over order until content-only and history-promoted rows return', async () => {
+      const ui = await start({ order: [1, 4, 7, 6] });
+      await settle();
+      expect(ids(ui)).toEqual([6]);
+      vi.advanceTimersByTime(0); await settle();
+      expect(ids(ui)).toEqual([4, 7, 6]);
+      expect(activeId(ui)).toBe(4);
+      expect(ui.document.activeElement.dataset.closeId).toBe('4');
+    });
+
     it('never arms the row standing in for a held highlight', async () => {
       const ui = await start({ mode: 'tabs', checked: [], focus: 'list', focusTabId: undefined });
       await settle();

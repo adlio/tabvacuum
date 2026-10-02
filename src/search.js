@@ -430,7 +430,9 @@ export function startSearch({ document, window, browser }) {
     const focusedTabId = focusedClose ? Number(focusedClose.dataset.closeId) : undefined;
     const typed = Boolean(query.value.trim());
     const all = arrange(compose());
-    displayOrder = new Map(all.map((result, index) => [result.key, index]));
+    // The first source reply must still see the transferred positions of
+    // content-only rows that are not in this initial title/URL list.
+    if (!held) displayOrder = new Map(all.map((result, index) => [result.key, index]));
     results = mode === 'select' ? all.filter(isTab) : all;
     hiddenHistory = all.length - results.length;
     const shown = new Set(results.filter(isTab).map(result => result.tab.id));

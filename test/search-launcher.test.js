@@ -1241,6 +1241,37 @@ describe('closing the tab that hosts an embedded search', () => {
     });
   });
 
+  describe('standalone handoff does not select a sleeping successor', () => {
+    async function finishWindow(env, closing) {
+      const { token, sender } = await windowOpened(env);
+      await env.send({ command: 'getSearchContext', token }, sender);
+      const ready = env.send({ command: 'searchHandoffReady', token }, sender);
+      expect(await closing).toMatchObject({ handedOff: true });
+      await ready;
+    }
+
+    it('activates a loaded protected survivor before closing the active host', async () => {
+      const env = await hosted({ permission: false });
+      env.tabs.find(tab => tab.id === 4).discarded = true;
+      const protectedTab = env.tabs.find(tab => tab.id === 6);
+      protectedTab.url = 'about:blank';
+      const closing = startClose(env, [1, 2]);
+      await finishWindow(env, closing);
+      expect(env.api.tabs.update).toHaveBeenCalledWith(6, { active: true });
+      expect(env.api.tabs.update).not.toHaveBeenCalledWith(4, { active: true });
+      const activated = env.api.tabs.update.mock.calls.findIndex(([id]) => id === 6);
+      expect(env.api.tabs.update.mock.invocationCallOrder[activated]).toBeLessThan(env.api.tabs.remove.mock.invocationCallOrder[0]);
+    });
+
+    it('never activates a closing or discarded tab when no loaded survivor exists', async () => {
+      const env = await hosted({ permission: false });
+      env.tabs.find(tab => tab.id === 4).discarded = true;
+      const closing = startClose(env, [1, 6]);
+      await finishWindow(env, closing);
+      expect(env.api.tabs.update).not.toHaveBeenCalled();
+    });
+  });
+
   describe('the destination is checked again at every destructive step', () => {
     it('falls back to the window when activating the overlay destination fails', async () => {
       const env = await hosted();
