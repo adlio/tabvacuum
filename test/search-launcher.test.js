@@ -1292,6 +1292,9 @@ describe('closing the tab that hosts an embedded search', () => {
       expect(await closing).toMatchObject({ ok: false, handoffFailed: true, closedIds: [] });
       expect(env.api.tabs.remove).not.toHaveBeenCalled();
       expect(env.api.windows.remove).toHaveBeenCalledWith(created.id);
+      expect(env.api.tabs.update).toHaveBeenCalledWith(4, { active: true });
+      expect(env.api.tabs.update).toHaveBeenLastCalledWith(1, { active: true });
+      expect(env.api.windows.update).toHaveBeenLastCalledWith(10, { focused: true });
       await expect(usable(env)).resolves.toBeDefined();
     });
 

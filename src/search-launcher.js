@@ -578,6 +578,10 @@ export function createSearchLauncher(api, search, {
       await drop(target.token, target.session);
       return undefined;
     }
+    const back = () => Promise.all([
+      api.tabs.update(attempt.hostId, { active: true }).catch(() => {}),
+      api.windows.update(host.windowId, { focused: true }).catch(() => {}),
+    ]);
     // Brought forward before anything closes; the original keeps its
     // session until the replacement takes over.
     try {
@@ -600,6 +604,7 @@ export function createSearchLauncher(api, search, {
       }
     } catch {
       await drop(target.token, target.session);
+      await back();
       return undefined;
     }
     // Checked again after closeSelected's own reads, right before the first
@@ -614,10 +619,6 @@ export function createSearchLauncher(api, search, {
     try {
       result = await search.closeSelected(attempt.ids, host.windowId, { originTabId: attempt.hostId, guard });
     } catch { /* Nothing was removed. */ }
-    const back = () => Promise.all([
-      api.tabs.update(attempt.hostId, { active: true }).catch(() => {}),
-      api.windows.update(host.windowId, { focused: true }).catch(() => {}),
-    ]);
     if (!result || (!result.closedIds.length && !result.failedIds.length && result.stopped)) {
       await drop(target.token, target.session);
       await back();
