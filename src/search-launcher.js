@@ -4,12 +4,22 @@
 // first valid claim binds it to that frame. Sessions live in storage.session
 // so they survive worker suspension, and expire.
 import { mountSearchOverlay } from './search-overlay.js';
-import { normalizeQuery, normalizeSources } from './search-sources-core.js';
+import { normalizeQuery, normalizeSources, withTimeout } from './search-sources-core.js';
+import { validateTabIds } from './search-service.js';
 
 const TOKEN = /^[A-Za-z0-9_-]{43}$/;
 export const UNCLAIMED_MS = 60_000;
 export const SESSION_MS = 60 * 60_000;
 export const CLAIM_TIMEOUT_MS = 4000;
+// Closing the tab that hosts an embedded search first moves search elsewhere.
+// Each replacement gets READY_MS to initialize; the original stays inert for
+// at most HANDOFF_MS, even if the worker restarts mid-handoff.
+export const READY_MS = 4000;
+export const HANDOFF_MS = 15_000;
+export const HANDOFF_RESULT_MS = 30_000;
+const MAX_STATE_TEXT = 8192;
+const MODES = new Set(['search', 'tabs', 'select']);
+const FOCUS = new Set(['query', 'list', 'row-close']);
 const SIZE = { width: 640, height: 460, margin: 48 };
 
 function randomId(bytes) {
@@ -19,6 +29,28 @@ function randomId(bytes) {
 export const newToken = () => randomId(32); // 43 characters, 256 bits
 
 const denied = () => new Error('This search has expired. Reopen Search tabs.');
+const ints = (value, max) => (Array.isArray(value) ? [...new Set(value.filter(Number.isSafeInteger))].slice(0, max) : []);
+
+/**
+ * What the replacement search restores: copied field by field from the
+ * closing frame's request, so nothing else it sent is ever stored or replayed.
+ */
+export function handoffState(raw, closing) {
+  const state = raw && typeof raw === 'object' ? raw : {};
+  const text = value => (typeof value === 'string' && value.length <= MAX_STATE_TEXT ? value : '');
+  const mode = MODES.has(state.mode) ? state.mode : 'tabs';
+  const focus = FOCUS.has(state.focus) ? state.focus : 'list';
+  return {
+    query: text(state.query), mode,
+    sources: normalizeSources(state.sources),
+    highlight: text(state.highlight),
+    checked: mode === 'select' ? ints(state.checked, closing.length + 10_000) : [],
+    // The query owns focus only in search mode, as in the search page itself.
+    focus: mode === 'search' || focus !== 'query' ? focus : 'list',
+    focusTabId: Number.isSafeInteger(state.focusTabId) ? state.focusTabId : undefined,
+    closing: [...closing],
+  };
+}
 
 /** Center a width×height window over the origin window, when its bounds are known. */
 export function placement(win) {
@@ -62,12 +94,18 @@ export function createSearchLauncher(api, search, {
   // (dismiss, activate, relaunch, tab close, navigation, expiry) saves the
   // sessions without it, so save() is the one place that aborts its scan.
   const sourceQueries = new Map();
+  // Replacement searches waiting to initialize, by replacement session id.
+  // Memory only wakes a waiter; storage stays the authority.
+  const handoffs = new Map();
   const save = sessions => {
     const live = new Set(Object.values(sessions).map(session => session.id));
     for (const [id, controller] of sourceQueries) {
       if (live.has(id)) continue;
       sourceQueries.delete(id);
       controller.abort(denied());
+    }
+    for (const [id, handoff] of handoffs) {
+      if (!live.has(id) || !live.has(handoff.originalId)) handoff.settle(false);
     }
     return api.storage.session.set({ [SESSIONS]: sessions });
   };
@@ -135,10 +173,16 @@ export function createSearchLauncher(api, search, {
   }
 
   async function openWindow(tab, base) {
-    const token = newToken();
-    const session = { ...base, mode: 'window' };
-    await save({ [token]: session });
-    const origin = await api.windows.get(tab.windowId).catch(() => undefined);
+    await createWindow(newToken(), { ...base, mode: 'window' }, tab.windowId, {});
+    return { mode: 'window' };
+  }
+
+  // Adds a window session to `sessions` and opens its window. On failure,
+  // removes both and rethrows. Callers hold the serialized queue.
+  async function createWindow(token, session, windowId, sessions) {
+    sessions[token] = session;
+    await save(sessions);
+    const origin = await api.windows.get(windowId).catch(() => undefined);
     let created;
     try {
       created = await api.windows.create({
@@ -149,10 +193,10 @@ export function createSearchLauncher(api, search, {
       if (Boolean(created.incognito) !== session.incognito || !launcherTab) throw new Error('Wrong window.');
       session.launcherWindowId = created.id;
       session.launcherTabId = launcherTab.id;
-      await save({ [token]: session });
-      return { mode: 'window' };
+      await save(sessions);
     } catch (error) {
-      await save({});
+      delete sessions[token];
+      await save(sessions);
       if (created) await api.windows.remove(created.id).catch(() => {});
       throw error;
     }
@@ -177,12 +221,15 @@ export function createSearchLauncher(api, search, {
   const withoutQuery = url => (typeof url === 'string' ? url.split(/[?#]/, 1)[0] : undefined);
 
   // Returns the token's session only for the frame it was issued to.
-  async function authorize(message, sender, { allowOriginPage = false } = {}) {
+  // A replacement still being prepared may only load and report readiness;
+  // a search handing off may only be dismissed (which cancels the handoff).
+  async function authorize(message, sender, { allowOriginPage = false, allowPending = false, allowHandingOff = false } = {}) {
     const { token } = message;
     if (sender?.id !== api.runtime.id || typeof token !== 'string' || !TOKEN.test(token)) throw denied();
     const sessions = await load();
     if (!Object.hasOwn(sessions, token)) throw denied();
     const session = sessions[token];
+    if ((session.pending && !allowPending) || (handingOff(session) && !allowHandingOff)) throw denied();
     const tab = sender.tab;
     if (!tab || tab.id !== (session.mode === 'overlay' ? session.originTabId : session.launcherTabId) ||
         Boolean(tab.incognito) !== session.incognito) throw denied();
@@ -210,17 +257,36 @@ export function createSearchLauncher(api, search, {
     return { token, session, sessions, fromPage: false };
   }
 
-  // The origin tab, live: it may have moved windows since launch.
+  const handingOff = session => session.handoff?.until > now();
+
+  // The origin tab, live: it may have moved windows since launch. A search
+  // window that replaced a closed host keeps that host's window as its scope.
   async function originOf(session) {
     const origin = await api.tabs.get(session.originTabId).catch(() => undefined);
-    if (!origin || Boolean(origin.incognito) !== session.incognito) throw denied();
-    return origin;
+    if (origin && Boolean(origin.incognito) === session.incognito) return origin;
+    if (origin || session.scopeWindowId === undefined) throw denied();
+    const window = await api.windows.get(session.scopeWindowId).catch(() => undefined);
+    if (!window || Boolean(window.incognito) !== session.incognito) throw denied();
+    const [active] = await api.tabs.query({ windowId: session.scopeWindowId, active: true }).catch(() => []);
+    return { id: active?.id, windowId: session.scopeWindowId };
   }
 
-  async function getSearchContext(message, sender) {
-    const { session } = await authorize(message, sender);
+  const contextOf = async session => {
     const origin = await originOf(session);
     return search.getContext(origin.windowId, { currentTabId: origin.id });
+  };
+
+  async function getSearchContext(message, sender) {
+    const { session, sessions } = await authorize(message, sender, { allowPending: true });
+    if (!session.pending) return contextOf(session);
+    // A replacement gets the closing search's state once, and only while its
+    // destination is still valid.
+    if (!await handoffTarget(session, sessions)) throw denied();
+    const context = await contextOf(session);
+    const restore = session.pending.delivered ? undefined : session.pending.state;
+    session.pending.delivered = true;
+    await save(sessions);
+    return restore ? { ...context, restore } : context;
   }
 
   async function activateSearchTab(message, sender) {
@@ -233,16 +299,19 @@ export function createSearchLauncher(api, search, {
     return { ok: true };
   }
 
+  // Dismissing a search that is handing off, or a replacement being
+  // prepared, cancels the handoff: nothing closes.
   async function dismissSearch(message, sender) {
-    const { token, session, sessions, fromPage } = await authorize(message, sender, { allowOriginPage: true });
+    const { token, session, sessions, fromPage } = await authorize(message, sender,
+      { allowOriginPage: true, allowPending: true, allowHandingOff: true });
     delete sessions[token];
     await save(sessions);
     if (session.mode === 'overlay') {
       if (!fromPage) await closeOverlay(session);
     } else {
       // Return to the page the search was opened from, without navigating it.
-      const origin = await api.tabs.get(session.originTabId).catch(() => undefined);
-      if (origin) {
+      const origin = await originOf(session).catch(() => undefined);
+      if (Number.isInteger(origin?.id)) {
         await api.tabs.update(origin.id, { active: true }).catch(() => {});
         await api.windows.update(origin.windowId, { focused: true }).catch(() => {});
       }
@@ -251,20 +320,230 @@ export function createSearchLauncher(api, search, {
     return { ok: true };
   }
 
+  // The fresh list a search shows after closing, read in the same reply so
+  // the UI need not ask again. A failed read is reported, never retried here.
+  async function withContext(result, session) {
+    try {
+      return { ...result, context: await contextOf(session) };
+    } catch {
+      return { ...result, contextError: true };
+    }
+  }
+
   // Closes only the explicit IDs the user approved. The search stays open
-  // for further work unless its origin tab was among those closed.
+  // for further work. Closing the tab that hosts an embedded search first
+  // moves the search (see handOff). A search window that closes its own
+  // origin keeps working, scoped to that origin's window.
   async function closeSearchTabs(message, sender) {
-    const { token, session, sessions } = await authorize(message, sender);
-    const origin = await originOf(session);
-    const result = await search.closeSelected(message.tabIds, origin.windowId, { originTabId: origin.id });
-    if (result.closedIds.includes(origin.id)) {
-      // Nothing to return to: revoke now rather than waiting for the queued
-      // onRemoved cleanup, and don't leave a fallback window behind.
+    const plan = await serial(async () => {
+      const { token, session, sessions } = await authorize(message, sender);
+      const origin = await originOf(session);
+      const ids = validateTabIds(message.tabIds);
+      if (session.mode === 'overlay' && ids.includes(origin.id) &&
+          await search.closeSkipReason(origin.id, origin.windowId, { closing: ids }) === undefined) {
+        const attempt = { id: randomId(16), token, sessionId: session.id, hostId: origin.id,
+          incognito: session.incognito, ids, state: handoffState(message.state, ids) };
+        session.handoff = { id: attempt.id, until: now() + HANDOFF_MS };
+        await save(sessions);
+        return { attempt };
+      }
+      const result = await search.closeSelected(ids, origin.windowId, { originTabId: origin.id });
+      if (result.closedIds.includes(origin.id) && session.mode === 'window') {
+        // The window outlives an origin it closed itself, keeping that window
+        // as its scope. Saved before the queued onRemoved cleanup runs.
+        session.scopeWindowId ??= origin.windowId;
+        await save(sessions);
+      } else if (result.closedIds.includes(origin.id)) {
+        // An overlay that could not hand off has nothing left: revoke now.
+        delete sessions[token];
+        await save(sessions);
+        await closeUi(session);
+        return { result };
+      }
+      return { result: await withContext(result, session) };
+    });
+    return plan.result ?? handOff(plan.attempt);
+  }
+
+  /**
+   * Moves an embedded search off the tab about to close, then closes the
+   * batch. Tries an overlay on an already-permitted surviving page in the
+   * same window, then a separate search window. Nothing closes unless one
+   * replacement has authenticated, received the state and reported ready.
+   * Waiting happens outside the serialized queue, so the replacement's own
+   * (serialized) messages cannot deadlock behind this close.
+   */
+  async function handOff(attempt) {
+    for (const prepare of [prepareOverlay, prepareWindow]) {
+      const target = await serial(() => prepare(attempt));
+      if (!target) continue;
+      const ready = await target.ready;
+      const result = await serial(() => commit(attempt, target, ready));
+      if (result) return result;
+    }
+    await serial(async () => {
+      const sessions = await load();
+      const original = sessions[attempt.token];
+      if (original?.handoff?.id !== attempt.id) throw denied();
+      delete original.handoff; // Usable again: the request failed as a whole.
+      await save(sessions);
+    });
+    return { ok: false, handoffFailed: true, closedIds: [], skipped: [], failedIds: [] };
+  }
+
+  // The original search, if it is still handing off this attempt.
+  function originalOf(attempt, sessions) {
+    const original = sessions[attempt.token];
+    return original?.handoff?.id === attempt.id && handingOff(original) ? original : undefined;
+  }
+
+  function track(session, originalId) {
+    let settle;
+    const ready = new Promise(resolve => { settle = resolve; });
+    let deliver;
+    const result = new Promise(resolve => { deliver = resolve; });
+    const handoff = { originalId, ready, result, deliver, settle: value => settle(value) };
+    handoffs.set(session.id, handoff);
+    schedule(() => settle(false), READY_MS);
+    return handoff;
+  }
+
+  function pendingSession(attempt, fields) {
+    return {
+      id: randomId(16), incognito: attempt.incognito, createdAt: now(), expiresAt: now() + HANDOFF_MS,
+      pending: { attempt: attempt.id, state: attempt.state, delivered: false, ready: false }, ...fields,
+    };
+  }
+
+  // Uses only website access the user already granted: activeTab does not
+  // carry over to another tab, and nothing here may prompt.
+  async function prepareOverlay(attempt) {
+    const sessions = await load();
+    if (!originalOf(attempt, sessions)) throw denied();
+    const host = await api.tabs.get(attempt.hostId).catch(() => undefined);
+    if (!host || !await search.hasContentPermission()) return undefined;
+    const [tab] = await search.handoffTargets(host, attempt.ids);
+    if (!tab) return undefined;
+    const token = newToken();
+    const session = pendingSession(attempt, { mode: 'overlay', originTabId: tab.id, originUrl: tab.url });
+    sessions[token] = session;
+    await save(sessions);
+    const { ready } = track(session, attempt.sessionId);
+    try {
+      // Bounded: this holds the serialized queue, and a page may never answer.
+      const [injection] = await withTimeout(api.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: overlay,
+        args: [token, session.id, searchUrl, extensionOrigin],
+      }), READY_MS, schedule);
+      if (injection?.result !== 'mounted') throw new Error('Overlay did not mount.');
+      if (injection.documentId) {
+        session.originDocumentId = injection.documentId;
+        await save(sessions);
+      }
+    } catch {
+      await drop(token, session);
+      return undefined;
+    }
+    return { token, session, ready };
+  }
+
+  async function prepareWindow(attempt) {
+    const sessions = await load();
+    if (!originalOf(attempt, sessions)) throw denied();
+    const host = await api.tabs.get(attempt.hostId).catch(() => undefined);
+    if (!host) return undefined;
+    const token = newToken();
+    const session = pendingSession(attempt, { mode: 'window', originTabId: host.id, scopeWindowId: host.windowId });
+    const { ready } = track(session, attempt.sessionId);
+    try {
+      await createWindow(token, session, host.windowId, sessions);
+    } catch {
+      await drop(token, session);
+      return undefined;
+    }
+    return { token, session, ready };
+  }
+
+  // Ends a replacement that will not be used, and its UI.
+  async function drop(token, session) {
+    const handoff = handoffs.get(session.id);
+    handoffs.delete(session.id);
+    handoff?.settle(false);
+    handoff?.deliver({ ok: false });
+    const sessions = await load();
+    if (sessions[token]?.id === session.id) {
       delete sessions[token];
       await save(sessions);
-      await closeUi(session);
     }
-    return result;
+    await closeUi(session);
+  }
+
+  // The replacement's destination, checked again at each step: still in the
+  // host's window and privacy mode, still the same loaded page, and website
+  // access still granted for an overlay. Returns the live host, or undefined.
+  async function handoffTarget(session, sessions) {
+    const original = Object.values(sessions).find(s => s.handoff?.id === session.pending?.attempt && handingOff(s));
+    const host = original && await api.tabs.get(original.originTabId).catch(() => undefined);
+    if (!host || Boolean(host.incognito) !== session.incognito) return undefined;
+    if (session.mode === 'window') return host.windowId === session.scopeWindowId ? host : undefined;
+    const tab = await api.tabs.get(session.originTabId).catch(() => undefined);
+    if (!search.canHostSearch(tab, host) || tab.url !== session.originUrl) return undefined;
+    return await search.hasContentPermission() ? host : undefined;
+  }
+
+  // Serialized. Hands the session over, then closes exactly the accepted IDs.
+  // Returns undefined to try the next replacement; throws if the original
+  // search ended meanwhile (dismissed, navigated, or replaced by a new launch).
+  async function commit(attempt, target, ready) {
+    const sessions = await load();
+    const original = originalOf(attempt, sessions);
+    if (!original) {
+      await drop(target.token, target.session);
+      throw denied();
+    }
+    const replacement = sessions[target.token];
+    const host = ready && replacement?.id === target.session.id && replacement.pending?.ready &&
+      replacement.frameId !== undefined && await handoffTarget(replacement, sessions);
+    if (!host) {
+      await drop(target.token, target.session);
+      return undefined;
+    }
+    // From here the original frame holds nothing: its token is gone.
+    delete sessions[attempt.token];
+    delete replacement.pending;
+    replacement.expiresAt = now() + SESSION_MS;
+    await save(sessions);
+    const handoff = handoffs.get(replacement.id);
+    handoffs.delete(replacement.id);
+    if (replacement.mode === 'overlay') await api.tabs.update(replacement.originTabId, { active: true }).catch(() => {});
+    else await api.windows.update(replacement.launcherWindowId, { focused: true }).catch(() => {});
+    let result;
+    try {
+      result = await search.closeSelected(attempt.ids, host.windowId, { originTabId: host.id });
+    } catch {
+      result = { ok: false, closedIds: [], skipped: [], failedIds: [...attempt.ids] };
+    }
+    // A protected host survives; its overlay must not stay behind, inert.
+    if (!result.closedIds.includes(host.id)) await closeOverlay(original);
+    handoff?.deliver(await withContext(result, replacement));
+    return { ...result, handedOff: true };
+  }
+
+  // The replacement has applied the handed-over state. The reply waits
+  // (bounded) for the close it continues, so it can show the outcome.
+  async function searchHandoffReady(message, sender) {
+    const handoff = await serial(async () => {
+      const { session, sessions } = await authorize(message, sender, { allowPending: true });
+      if (!session.pending?.delivered) throw denied();
+      session.pending.ready = true;
+      await save(sessions);
+      const waiting = handoffs.get(session.id);
+      waiting?.settle(true);
+      return waiting;
+    });
+    if (!handoff) return { ok: false };
+    return withTimeout(handoff.result, HANDOFF_RESULT_MS, schedule).catch(() => ({ ok: false }));
   }
 
   // History result: opened (or focused) only if still in history. Single use, like a tab.
@@ -338,10 +617,10 @@ export function createSearchLauncher(api, search, {
 
   const handlers = {
     getSearchContext, activateSearchTab, dismissSearch, closeSearchTabs,
-    activateHistoryResult, openSearchPermissions, querySearchSources,
+    activateHistoryResult, openSearchPermissions, querySearchSources, searchHandoffReady,
   };
   // Handlers that serialize their own critical sections.
-  const unqueued = new Set(['querySearchSources']);
+  const unqueued = new Set(['querySearchSources', 'closeSearchTabs', 'searchHandoffReady']);
 
   /** Handles search commands; returns undefined for anything else. */
   function handleMessage(message, sender) {
@@ -368,7 +647,8 @@ export function createSearchLauncher(api, search, {
       if (changes.status !== 'loading') return;
       serial(async () => {
         const sessions = await load();
-        const ended = Object.entries(sessions).filter(([, s]) => s.originTabId === tabId);
+        // A window scoped past its origin (scopeWindowId) ends only with its own tab.
+        const ended = Object.entries(sessions).filter(([, s]) => s.originTabId === tabId && s.scopeWindowId === undefined);
         if (!ended.length) return;
         for (const [token] of ended) delete sessions[token];
         await save(sessions);
@@ -378,7 +658,8 @@ export function createSearchLauncher(api, search, {
     api.tabs.onRemoved.addListener(tabId => {
       serial(async () => {
         const sessions = await load();
-        const ended = Object.entries(sessions).filter(([, s]) => s.originTabId === tabId || s.launcherTabId === tabId);
+        const ended = Object.entries(sessions).filter(([, s]) => s.launcherTabId === tabId ||
+          (s.originTabId === tabId && s.scopeWindowId === undefined));
         if (!ended.length) return;
         for (const [token] of ended) delete sessions[token];
         await save(sessions);

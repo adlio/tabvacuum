@@ -49,8 +49,9 @@ export function createSearchService(api, { contentTimeoutMs = CONTENT_TIMEOUT_MS
   // current-window scope, never TabVacuum's own search pages.
   async function loadScope(windowId) {
     if (!Number.isInteger(windowId)) throw new Error('Search window is no longer available. Reopen Search tabs.');
-    const window = await api.windows.get(windowId);
-    const { searchScope = 'all' } = await api.storage.local.get({ searchScope: 'all' });
+    const [window, { searchScope = 'all' }] = await Promise.all([
+      api.windows.get(windowId), api.storage.local.get({ searchScope: 'all' }),
+    ]);
     const tabs = (await api.tabs.query(searchScope === 'current' ? { windowId } : {}))
       .filter(tab => Boolean(tab.incognito) === Boolean(window.incognito) && !isSearchPage(tab.url));
     return { incognito: Boolean(window.incognito), current: searchScope === 'current', tabs };
@@ -62,14 +63,16 @@ export function createSearchService(api, { contentTimeoutMs = CONTENT_TIMEOUT_MS
     const current = currentTabId === undefined
       ? tabs.find(tab => tab.windowId === windowId && tab.active)
       : tabs.find(tab => tab.id === currentTabId);
-    const times = await api.storage.session.get(tabs.map(tab => focusKey(tab.id)));
+    const [times, contentPermission] = await Promise.all([
+      api.storage.session.get(tabs.map(tab => focusKey(tab.id))), hasContentPermission(),
+    ]);
     return {
       windowId, currentTabId: current?.id,
       tabs: tabs.map(tab => ({
         id: tab.id, windowId: tab.windowId, title: tab.title || '', url: tab.url || '',
         lastAccessed: times[focusKey(tab.id)] ?? tab.lastAccessed ?? 0,
       })),
-      incognito, contentPermission: await hasContentPermission(),
+      incognito, contentPermission,
     };
   }
 
@@ -199,26 +202,14 @@ export function createSearchService(api, { contentTimeoutMs = CONTENT_TIMEOUT_MS
    */
   async function closeSelected(tabIds, windowId, { originTabId } = {}) {
     const ids = validateTabIds(tabIds); // Frozen copy: later caller edits change nothing.
-    const scope = await loadScope(windowId);
-    const settings = await api.storage.local.get({ skipPinned: true, skipAudible: true });
-    const skipPinned = settings.skipPinned !== false;
-    const skipAudible = settings.skipAudible !== false;
-    const inScope = new Set(scope.tabs.filter(tab => !isSearchPage(tab.pendingUrl)).map(tab => tab.id));
+    const { scope, settings, inScope } = await closePolicy(windowId);
     const order = [...ids.filter(id => id !== originTabId), ...ids.filter(id => id === originTabId)];
 
     const closedIds = [];
     const skipped = [];
     const failedIds = [];
     for (const tabId of order) {
-      // Re-read live: the tab may have moved, changed, or closed since selection.
-      const tab = inScope.has(tabId) ? await api.tabs.get(tabId).catch(() => undefined) : undefined;
-      const reason = !tab || Boolean(tab.incognito) !== scope.incognito ||
-          isSearchPage(tab.url) || isSearchPage(tab.pendingUrl) || (scope.current && tab.windowId !== windowId)
-        ? 'unavailable' // Missing and out-of-scope look alike, so private tabs stay invisible.
-        : tab.pinned && skipPinned ? 'pinned'
-          : tab.audible && skipAudible ? 'audible'
-            : await isLastInWindow(tab) ? 'last-tab'
-              : undefined;
+      const reason = await skipReason(tabId, windowId, scope, settings, inScope);
       if (reason) {
         skipped.push({ tabId, reason });
         continue;
@@ -233,6 +224,66 @@ export function createSearchService(api, { contentTimeoutMs = CONTENT_TIMEOUT_MS
     return { ok: true, closedIds, skipped, failedIds };
   }
 
+  // Scope and protection settings are independent reads.
+  async function closePolicy(windowId) {
+    const [scope, stored] = await Promise.all([
+      loadScope(windowId), api.storage.local.get({ skipPinned: true, skipAudible: true }),
+    ]);
+    const settings = { skipPinned: stored.skipPinned !== false, skipAudible: stored.skipAudible !== false };
+    const inScope = new Set(scope.tabs.filter(tab => !isSearchPage(tab.pendingUrl)).map(tab => tab.id));
+    return { scope, settings, inScope };
+  }
+
+  async function skipReason(tabId, windowId, scope, settings, inScope) {
+    // Re-read live: the tab may have moved, changed, or closed since selection.
+    const tab = inScope.has(tabId) ? await api.tabs.get(tabId).catch(() => undefined) : undefined;
+    return !tab || Boolean(tab.incognito) !== scope.incognito ||
+        isSearchPage(tab.url) || isSearchPage(tab.pendingUrl) || (scope.current && tab.windowId !== windowId)
+      ? 'unavailable' // Missing and out-of-scope look alike, so private tabs stay invisible.
+      : tab.pinned && settings.skipPinned ? 'pinned'
+        : tab.audible && settings.skipAudible ? 'audible'
+          : await isLastInWindow(tab) ? 'last-tab'
+            : undefined;
+  }
+
+  /**
+   * Why closeSelected(closing) would keep this tab, closed last, or undefined
+   * if it would close it. It is kept as the last tab when every other tab in
+   * its window is in `closing` and would close first.
+   */
+  async function closeSkipReason(tabId, windowId, { closing = [] } = {}) {
+    const { scope, settings, inScope } = await closePolicy(windowId);
+    const reason = await skipReason(tabId, windowId, scope, settings, inScope);
+    if (reason) return reason;
+    const tab = await api.tabs.get(tabId);
+    const others = (await api.tabs.query({ windowId: tab.windowId })).filter(other => other.id !== tabId);
+    const set = new Set(closing);
+    for (const other of others) {
+      if (!set.has(other.id) || await skipReason(other.id, windowId, scope, settings, inScope)) return undefined;
+    }
+    return 'last-tab';
+  }
+
+  /** A loaded web page in the host's window and privacy mode that can carry search. */
+  function canHostSearch(tab, host) {
+    return Boolean(tab) && tab.id !== host.id && tab.windowId === host.windowId &&
+      Boolean(tab.incognito) === Boolean(host.incognito) && tab.status === 'complete' &&
+      !isSearchPage(tab.pendingUrl) && !contentSkipReason(tab, isSearchPage);
+  }
+
+  /**
+   * Tabs that could host search after `host` closes, most recently used first.
+   * Never one of `excludeIds`, the tabs about to close.
+   */
+  async function handoffTargets(host, excludeIds) {
+    const exclude = new Set(excludeIds);
+    const tabs = (await api.tabs.query({ windowId: host.windowId }))
+      .filter(tab => !exclude.has(tab.id) && canHostSearch(tab, host));
+    const times = await api.storage.session.get(tabs.map(tab => focusKey(tab.id)));
+    const used = tab => times[focusKey(tab.id)] ?? tab.lastAccessed ?? 0;
+    return tabs.sort((a, b) => used(b) - used(a));
+  }
+
   async function isLastInWindow(tab) {
     const siblings = await api.tabs.query({ windowId: tab.windowId }).catch(() => []);
     return !siblings.some(other => other.id !== tab.id);
@@ -241,6 +292,7 @@ export function createSearchService(api, { contentTimeoutMs = CONTENT_TIMEOUT_MS
   return {
     getContext, activate, closeSelected, installFocusTracking, isSearchPage,
     searchHistory, activateHistory, searchContent, hasContentPermission,
+    closeSkipReason, canHostSearch, handoffTargets,
   };
 }
 

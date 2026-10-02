@@ -54,7 +54,7 @@ class El {
   }
 }
 
-function setup({ top = false, search = '', noTabsApi = false, platform = 'Linux x86_64', platformInfo, closeResponse, initial, sources } = {}) {
+function setup({ top = false, search = '', noTabsApi = false, platform = 'Linux x86_64', platformInfo, closeResponse, initial, sources, bundle = true, handoff } = {}) {
   const elements = new Map([...html.matchAll(/\sid="([^"]+)"/g)].map(([, id]) => [id, Object.assign(new El('div'), { id })]));
   // Record static nesting (parent links only) so containment checks see the real structure.
   const stack = [];
@@ -90,8 +90,10 @@ function setup({ top = false, search = '', noTabsApi = false, platform = 'Linux 
       // Simulates the backend: closed tabs disappear from later contexts.
       const gone = new Set(response?.closedIds ?? []);
       contexts.good = { ...contexts.good, tabs: contexts.good.tabs.filter(tab => !gone.has(tab.id)) };
-      return response;
+      // Like the backend, a successful close carries the fresh list.
+      return bundle && response?.ok === true && !response.handedOff ? { ...response, context: contexts.good } : response;
     }
+    if (msg.command === 'searchHandoffReady') return handoff ? handoff(msg) : { error: 'unexpected' };
   });
   const runtime = { sendMessage };
   if (platformInfo) runtime.getPlatformInfo = platformInfo;
@@ -572,7 +574,9 @@ describe('select multiple mode', () => {
     ui.keys(' ', 'j', 'j', ' ', 'k'); // Check 2 and 1; highlight ends on 3.
     ui.key('x');
     await settle();
-    expect(closes(ui)).toEqual([{ command: 'closeSearchTabs', token: 'good', tabIds: [2, 1] }]);
+    expect(closes(ui)).toEqual([{ command: 'closeSearchTabs', token: 'good', tabIds: [2, 1], state: {
+      query: '', mode: 'select', sources: { history: false, content: false }, highlight: 'tab:3', checked: [2, 1], focus: 'list',
+    } }]);
     expect(ids(ui)).toEqual([3]);
     expect(ui.mode()).toBe('select');
     ui.key('x'); await settle();
@@ -836,7 +840,7 @@ describe('focus and mode transitions', () => {
 
 describe('closing refresh safety', () => {
   it('keeps closing locked through refresh and replays fast j/x keys in order', async () => {
-    const ui = await ready({ initial: amazon() });
+    const ui = await ready({ initial: amazon(), bundle: false });
     ui.type('amazon');
     const before = ids(ui);
     const original = ui.sendMessage.getMockImplementation();
@@ -873,7 +877,7 @@ describe('closing refresh safety', () => {
   });
 
   it('removes known closed rows and reports failed refresh instead of hiding the error', async () => {
-    const ui = await ready();
+    const ui = await ready({ bundle: false });
     const original = ui.sendMessage.getMockImplementation();
     ui.sendMessage.mockImplementation(msg => msg.command === 'getSearchContext'
       ? Promise.reject(new Error('refresh failed')) : original(msg));
@@ -1476,5 +1480,183 @@ describe('Search in menu', () => {
     expect(ids(ui)).toEqual([3]);
     ui.key('m');
     expect(activeId(ui)).toBe('https://old.example/r');
+  });
+});
+
+describe('fast repeated closing (0.5.2)', () => {
+  const contextCalls = ui => commands(ui.sendMessage).filter(msg => msg.command === 'getSearchContext');
+
+  it('Tab, x, j, j, x closes the exact rows in order using each reply’s bundled list', async () => {
+    const ui = await ready({ initial: amazon() });
+    ui.type('amazon');
+    const order = ids(ui);
+    ui.keys('Tab', 'x', 'j', 'j', 'x'); // All pressed before the first close answers.
+    for (let i = 0; i < 8; i++) await flush();
+    expect(closes(ui).map(msg => msg.tabIds)).toEqual([[order[0]], [order[3]]]);
+    expect(ids(ui)).toEqual([order[1], order[2], order[4], order[5]]);
+    expect(activeId(ui)).toBe(order[4]);
+    expect(contextCalls(ui)).toHaveLength(1); // Only the initial load.
+    expect(ui.mode()).toBe('tabs');
+    expect(ui.focused()).toBe('results');
+    expect(activations(ui)).toEqual([]);
+  });
+
+  it('reads the list once, read-only, when the bundled list is missing, and says so if that fails', async () => {
+    const ui = await ready({ closeResponse: msg => ({ ok: true, closedIds: msg.tabIds, skipped: [], failedIds: [], contextError: true }), bundle: false });
+    const original = ui.sendMessage.getMockImplementation();
+    ui.sendMessage.mockImplementation(msg => (msg.command === 'getSearchContext' ? Promise.reject(new Error('read failed')) : original(msg)));
+    ui.keys('Tab', 'x', 'j', 'x');
+    await settle();
+    expect(closes(ui)).toHaveLength(1); // Never re-sent, and queued keys dropped.
+    expect(contextCalls(ui)).toHaveLength(2);
+    expect(ui.$('message').textContent).toBe('Closed 1 tab. The list may be out of date. Close and reopen search.');
+    expect(ui.rows()).toHaveLength(2); // The confirmed close still leaves the list.
+  });
+
+  it('keeps unchanged row elements, renumbering their ids, indices and ARIA', async () => {
+    const ui = await ready({ initial: amazon() });
+    ui.type('amazon');
+    const before = ui.rows();
+    ui.keys('Tab', 'j', 'x');
+    await settle();
+    const after = ui.rows();
+    expect(after).toEqual([before[0], ...before.slice(2)]);
+    expect(after[0]).toBe(before[0]);
+    expect(after[1]).toBe(before[2]);
+    for (const [i, row] of after.entries()) {
+      expect(row.getAttribute('aria-rowindex')).toBe(String(i + 1));
+      expect(row.children[0].id).toBe(`option-${i}`);
+      expect(row.children[0].dataset.index).toBe(String(i));
+      expect(row.children[1].children[0].id).toBe(`row-close-${i}`);
+    }
+    expect(ui.$('query').getAttribute('aria-activedescendant')).toBe('option-1');
+    expect(after[1].getAttribute('aria-selected')).toBe('true');
+    expect(ui.$('results').getAttribute('aria-rowcount')).toBe('5');
+  });
+
+  it('rebuilds only a row whose title changed, and keeps rows across mode changes', async () => {
+    const ui = await ready({ initial: amazon() });
+    ui.type('amazon');
+    const before = ui.rows();
+    ui.contexts.good = { ...ui.contexts.good, tabs: ui.contexts.good.tabs.map(tab => (tab.id === 12 ? { ...tab, title: 'Amazon renamed' } : tab)) };
+    ui.tabEvents.onUpdated.fn(12, { title: 'Amazon renamed' }); await flush();
+    const after = ui.rows();
+    const changed = before.findIndex(row => row.children[1].children[0].dataset.closeId === '12');
+    for (const [i, row] of after.entries()) {
+      if (i === changed) expect(row).not.toBe(before[i]); else expect(row).toBe(before[i]);
+    }
+    expect(after[changed].textContent).toContain('Amazon renamed');
+    expect(after[changed].children[1].children[0].getAttribute('aria-label')).toBe('Close tab: Amazon renamed');
+    ui.keys('Tab', 'm', ' ');
+    expect(ui.rows()).toEqual(after);
+    expect(ui.$('results').getAttribute('aria-multiselectable')).toBe('true');
+    expect(ui.option(0).getAttribute('aria-selected')).toBe('true'); // Checked, in select mode.
+    expect(ui.option(1).getAttribute('aria-selected')).toBe('false');
+  });
+});
+
+describe('closing the tab that hosts search (0.5.2)', () => {
+  const contextCalls = ui => commands(ui.sendMessage).filter(msg => msg.command === 'getSearchContext');
+  const readies = ui => commands(ui.sendMessage).filter(msg => msg.command === 'searchHandoffReady');
+
+  it('sends the state only when closing the host, then retires without acting again', async () => {
+    const ui = await ready({ closeResponse: msg => (msg.tabIds.includes(1)
+      ? { ok: true, handedOff: true, closedIds: msg.tabIds, skipped: [], failedIds: [] }
+      : { ok: true, closedIds: msg.tabIds, skipped: [], failedIds: [] }) });
+    ui.keys('Tab', 'x'); // Tab 2 is listed first: not the host.
+    await settle();
+    expect(closes(ui)[0]).toEqual({ command: 'closeSearchTabs', token: 'good', tabIds: [2] });
+    ui.keys('j', 'x', 'k', 'x'); // Closes the host (1); the rest is queued.
+    await settle();
+    expect(closes(ui)[1]).toEqual({ command: 'closeSearchTabs', token: 'good', tabIds: [1], state: {
+      query: '', mode: 'tabs', sources: { history: false, content: false }, highlight: 'tab:1', checked: [], focus: 'list',
+    } });
+    expect(closes(ui)).toHaveLength(2);
+    expect(ui.$('message').textContent).toBe('Search moved to another tab.');
+    const sent = ui.sendMessage.mock.calls.length;
+    ui.keys('x', 'Enter');
+    ui.type('roadmap');
+    ui.init('good');
+    vi.advanceTimersByTime(1000);
+    await settle();
+    expect(ui.sendMessage.mock.calls.length).toBe(sent);
+    expect(contextCalls(ui)).toHaveLength(1);
+  });
+
+  it('a standalone window never sends handoff state', async () => {
+    const ui = setup({ top: true, search: '?token=good' });
+    await flush();
+    ui.keys('Tab', 'j', 'j', 'x'); // The current tab is listed last.
+    await settle();
+    expect(closes(ui)).toEqual([{ command: 'closeSearchTabs', token: 'good', tabIds: [1] }]);
+  });
+
+  it('explains a failed handoff, closes nothing, and stays usable', async () => {
+    const ui = await ready({ closeResponse: () => ({ ok: false, handoffFailed: true, closedIds: [], skipped: [], failedIds: [] }) });
+    ui.keys('Tab', 'j', 'j', 'x', 'k', 'x'); // The host is listed last.
+    await settle();
+    expect(ui.$('message').textContent).toBe('Search could not stay open after closing this tab, so no tabs were closed.');
+    expect(ids(ui)).toEqual([2, 3, 1]);
+    expect(closes(ui)).toHaveLength(1); // The queued k, x were cancelled.
+    ui.keys('k', 'x'); await settle();
+    expect(closes(ui).at(-1).tabIds).toEqual([3]);
+  });
+
+  const handedState = over => ({ query: 'amazon', mode: 'tabs', sources: { history: false, content: false },
+    highlight: 'tab:12', checked: [], focus: 'list', closing: [12], ...over });
+  const remaining = gone => ({ ...amazon(), tabs: amazon().tabs.filter(tab => !gone.includes(tab.id)) });
+
+  it('restores query, mode, highlight and focus, then shows the continued close', async () => {
+    let finish;
+    const ui = await ready({ initial: { ...amazon(), restore: handedState() },
+      handoff: () => new Promise(resolve => { finish = resolve; }) });
+    expect(ui.$('query').value).toBe('amazon');
+    expect(ui.mode()).toBe('tabs');
+    expect(ui.focused()).toBe('results');
+    expect(activeId(ui)).toBe(12);
+    expect(readies(ui)).toEqual([{ command: 'searchHandoffReady', token: 'good' }]);
+    const order = ids(ui);
+    ui.keys('j', 'x'); // Busy until the continued close settles.
+    expect(closes(ui)).toHaveLength(0);
+    ui.contexts.good = remaining([12]);
+    finish({ ok: true, closedIds: [12], skipped: [], failedIds: [], context: remaining([12]) });
+    await settle();
+    const next = order.indexOf(12) + 1;
+    // The next row took 12's place; the queued j, x then closed the row after it.
+    expect(closes(ui).map(msg => msg.tabIds)).toEqual([[order[next + 1]]]);
+    expect(ids(ui)).toEqual(order.filter(id => id !== 12 && id !== order[next + 1]));
+    expect(activeId(ui)).toBe(order[next + 2]);
+    expect(contextCalls(ui)).toHaveLength(1);
+  });
+
+  it('keeps the remaining checks and row X focus in select mode', async () => {
+    const ui = await ready({ initial: { ...amazon(), restore: handedState({ mode: 'select', checked: [11, 12, 13], focus: 'row-close', focusTabId: 12 }) },
+      handoff: () => ({ ok: true, closedIds: [12], skipped: [], failedIds: [], context: remaining([12]) }) });
+    await settle();
+    expect(ui.mode()).toBe('select');
+    expect(checkedIds(ui)).toEqual([11, 13]);
+    expect(ui.$('selection-status').textContent).toBe('2 of 5 selected');
+    expect(ui.$('message').textContent).toBe('Closed 1 tab.');
+    expect(ui.focused()).toMatch(/^row-close-/);
+    expect(ui.document.activeElement.dataset.closeId).not.toBe('12');
+  });
+
+  it('turns on only the sources this window allows, after the close', async () => {
+    const sources = vi.fn(() => ({ history: [], content: [], coverage: { history: { state: 'ready' } } }));
+    const ui = await ready({ initial: { ...amazon(), contentPermission: false, restore: handedState({ sources: { history: true, content: true } }) },
+      handoff: () => ({ ok: true, closedIds: [12], skipped: [], failedIds: [], context: { ...remaining([12]), contentPermission: false } }), sources });
+    await settle();
+    vi.advanceTimersByTime(0); await settle();
+    expect(ui.$('source-history').checked).toBe(true);
+    expect(ui.$('source-content').checked).toBe(false);
+    expect(sources.mock.calls.map(([msg]) => msg.sources)).toEqual([{ history: true, content: false }]);
+  });
+
+  it('reads the list once when the continued close cannot report back', async () => {
+    const ui = await ready({ initial: { ...amazon(), restore: handedState() }, handoff: () => ({ ok: false }) });
+    await settle();
+    expect(contextCalls(ui)).toHaveLength(2);
+    expect(ui.$('message').textContent).toBe('Could not close tabs. Check the list and try again.');
+    expect(closes(ui)).toHaveLength(0);
   });
 });

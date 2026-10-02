@@ -120,3 +120,8 @@
 ## 0.5.1 release preparation (R10)
 
 - [x] **T69 (Kiro)** — Prepared the version-only 0.5.1 candidate from merged main, aligned package and lockfile root versions without dependency changes, and verified both browser ZIPs contain version 0.5.1 with 26 files matching each build. All 619 unit tests, both builds/packages and extension lint pass. No code, permission, branding, tag or store-publication changes.
+
+## 0.5.2 search closing fixes and release preparation (R10, R11.11–R11.13)
+
+- [~] **T70 (Kiro)** — Restore and verify faster repeated search closing, preserving ordered keys and protection checks. Prepare the 0.5.2 point release; no branding, keyboard-semantic changes, merge, tag or store publication.
+- [~] **T71 (Kiro)** — Keep search usable after closing its host: prefer a loaded, already-permitted surviving tab in the same window, with an authenticated standalone fallback. Preserve query, mode, sources, selections and focus; close nothing if neither replacement becomes ready. Reconstruct the previously tested but reclaimed uncommitted implementation and obtain fresh verification.

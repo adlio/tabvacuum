@@ -116,10 +116,14 @@ export function startSearch({ document, window, browser }) {
   // Leaving select mode without moving returns to the pre-select highlight.
   let selectReturn = null;
   let token;
+  // Set once this search hands its session to a replacement: it never acts again.
+  let retired = false;
   let context;
   let results = [];
   let rowEls = [];
   let rowCloses = [];
+  // Rendered rows by result key, reused while their content is unchanged.
+  let rowCache = new Map();
   let hiddenHistory = 0;
   let selected = -1;
   let mode = 'search';
@@ -303,14 +307,11 @@ export function startSearch({ document, window, browser }) {
   // Grid rows expose an option cell and an action cell. Open tabs get an
   // independently keyboard-accessible close button there; history rows keep
   // the cell empty so every row has the same two columns.
-  function row({ tab, matchType, kind, snippet }, index) {
+  function row({ tab, matchType, kind, snippet }) {
     const history = kind === 'history';
     const wrapper = el('div', history ? 'result result-history' : 'result');
     wrapper.setAttribute('role', 'row');
-    wrapper.setAttribute('aria-rowindex', String(index + 1));
     const option = el('div', 'result-option');
-    option.id = `option-${index}`;
-    option.dataset.index = String(index);
     option.setAttribute('role', 'gridcell');
     option.setAttribute('aria-selected', 'false');
     const letter = initial(tab);
@@ -340,7 +341,6 @@ export function startSearch({ document, window, browser }) {
     if (!history) {
       // Reached by the dialog's own Tab order (active row only), never natively.
       close = el('button', 'row-close');
-      close.id = `row-close-${index}`;
       close.type = 'button';
       close.setAttribute('tabindex', '-1');
       close.setAttribute('title', 'Close tab');
@@ -352,7 +352,26 @@ export function startSearch({ document, window, browser }) {
       actionCell.append(close);
     }
     wrapper.append(option, actionCell);
-    return { wrapper, close };
+    return { wrapper, option, close };
+  }
+
+  // Everything a row displays, so a changed title, URL, badge or snippet
+  // rebuilds that row and nothing else.
+  const rowSignature = ({ tab, matchType, kind, snippet }) => JSON.stringify([kind, matchType, tab.title, tab.url,
+    kind === 'history' ? '' : snippet, tab.windowId !== context.windowId, tab.id === context.currentTabId]);
+
+  function place({ wrapper, option, close }, index) {
+    wrapper.setAttribute('aria-rowindex', String(index + 1));
+    option.id = `option-${index}`;
+    option.dataset.index = String(index);
+    if (close) close.id = `row-close-${index}`;
+  }
+
+  // Moves nodes only when the order changed: a moved node loses focus.
+  function setChildren(parent, children) {
+    const current = parent.children;
+    if (current.length === children.length && children.every((child, i) => current[i] === child)) return;
+    parent.replaceChildren(...children);
   }
 
   // Row groups carry their labels; the visible headings are decorative so
@@ -366,6 +385,7 @@ export function startSearch({ document, window, browser }) {
     element.append(heading);
     return { element, heading };
   }
+  const groups = { tabs: group('Open tabs'), history: group('History') };
 
   // Open tabs always come first; content matches only for tabs still open.
   function compose() {
@@ -392,19 +412,28 @@ export function startSearch({ document, window, browser }) {
     hiddenHistory = all.length - results.length;
     const shown = new Set(results.filter(isTab).map(result => result.tab.id));
     for (const id of checked) if (!shown.has(id)) checked.delete(id);
-    const tabs = group('Open tabs');
-    const history = group('History');
+    const { tabs, history } = groups;
+    const tabRows = [];
+    const historyRows = [];
+    const cache = new Map();
     rowEls = [];
     rowCloses = [];
     for (const [index, result] of results.entries()) {
-      const { wrapper, close } = row(result, index);
-      rowEls.push(wrapper);
-      rowCloses.push(close);
-      (isTab(result) ? tabs : history).element.append(wrapper);
+      const signature = rowSignature(result);
+      const kept = rowCache.get(result.key);
+      const entry = kept?.signature === signature ? kept : { ...row(result), signature };
+      place(entry, index);
+      cache.set(result.key, entry);
+      rowEls.push(entry.wrapper);
+      rowCloses.push(entry.close);
+      (isTab(result) ? tabRows : historyRows).push(entry.wrapper);
     }
+    rowCache = cache;
     const historyCount = results.length - shown.size;
     tabs.heading.hidden = !historyCount;
-    list.replaceChildren(...[shown.size && tabs.element, historyCount && history.element].filter(Boolean));
+    setChildren(tabs.element, [tabs.heading, ...tabRows]);
+    setChildren(history.element, [history.heading, ...historyRows]);
+    setChildren(list, [shown.size && tabs.element, historyCount && history.element].filter(Boolean));
     list.setAttribute('aria-busy', 'false');
     $('list-label').textContent = typed ? 'Matches' : 'Recent tabs';
     $('result-count').textContent = plural(shown.size, 'tab') + (historyCount ? ` · ${historyCount} history` : '');
@@ -537,7 +566,7 @@ export function startSearch({ document, window, browser }) {
   }
 
   async function tryToken(candidate) {
-    if (token || typeof candidate !== 'string' || !candidate || candidate.length > MAX_TOKEN_LENGTH) return;
+    if (token || retired || typeof candidate !== 'string' || !candidate || candidate.length > MAX_TOKEN_LENGTH) return;
     if (tried.has(candidate) || tried.size >= MAX_INIT_ATTEMPTS) return;
     tried.add(candidate);
     let next;
@@ -549,7 +578,9 @@ export function startSearch({ document, window, browser }) {
     }
     token = candidate;
     clearTimeout(initTimer);
-    setContext(next);
+    const { restore, ...fresh } = next;
+    setContext(fresh);
+    if (restore) resumeHandoff(restore);
     // Firefox exposes runtime but not tabs to embedded extension pages. Poll
     // only this authorized UI there; never relay metadata through the host.
     if (!browser.tabs?.onUpdated) {
@@ -636,6 +667,23 @@ export function startSearch({ document, window, browser }) {
     return parts.join(' ');
   }
 
+  // Where focus is, as the replacement for a closing host should restore it.
+  function focusState() {
+    const focus = document.activeElement;
+    if (focus === query) return { focus: 'query' };
+    if (isRowClose(focus)) return { focus: 'row-close', focusTabId: Number(focus.dataset.closeId) };
+    return { focus: 'list' };
+  }
+
+  function beginClose() {
+    busy = true;
+    closing = true;
+    awaitingClose = true;
+    ++refreshVersion; // Discard any context request started before this close.
+    notice = null;
+    paint();
+  }
+
   // Closes exactly the listed tab IDs asked for. Mode and focus stay where they are.
   async function closeTabs(requested) {
     if (!token || !context || busy) return;
@@ -644,26 +692,77 @@ export function startSearch({ document, window, browser }) {
     const tabIds = requested.filter(id => listed.has(id));
     if (!tabIds.length) return;
     const titles = new Map(listedTabs.map(tab => [tab.id, tabLabel(tab)]));
-    busy = true;
-    closing = true;
-    awaitingClose = true;
-    ++refreshVersion; // Discard any context request started before this close.
-    notice = null;
-    paint();
+    const request = { command: 'closeSearchTabs', token, tabIds };
+    // Closing the page this search is embedded in moves search elsewhere
+    // first; the backend restores this state there, never in the page.
+    if (embedded && tabIds.includes(context.currentTabId)) {
+      request.state = { query: query.value, mode, sources: { ...sources }, highlight: selectedKey() ?? '',
+        checked: [...checked], ...focusState() };
+    }
+    beginClose();
     let response;
-    try { response = await send({ command: 'closeSearchTabs', token, tabIds }); } catch { /* Reported below. */ }
+    try { response = await send(request); } catch { /* Reported below. */ }
+    if (response?.handedOff === true) { retire(); return; }
+    await finishClose(tabIds, response, titles);
+  }
+
+  // The replacement search now owns the session and the outcome. Nothing
+  // queued here may act, and this frame is about to be removed.
+  function retire() {
+    retired = true;
+    token = undefined;
+    pendingListKeys.length = 0;
+    clearTimeout(sourceTimer);
+    sourceBusy = false;
+    showMessage('notice', 'Search moved to another tab.');
+  }
+
+  // Continues a close started by the search this one replaced: same query,
+  // mode, sources, highlight, checks and focus. Keys queued there do not
+  // carry over. The backend closes the tabs once this reports ready.
+  async function resumeHandoff(raw) {
+    const state = raw && typeof raw === 'object' ? raw : {};
+    const tabIds = idList(state.closing);
+    pendingListKeys.length = 0;
+    query.value = typeof state.query === 'string' ? state.query : '';
+    sources.history = state.sources?.history === true && !context.incognito;
+    sources.content = state.sources?.content === true && context.contentPermission;
+    mode = MODE_LABELS[state.mode] === undefined ? 'tabs' : state.mode;
+    if (mode === 'search' && state.focus !== 'query') mode = 'tabs';
+    checked.clear();
+    if (mode === 'select') for (const id of idList(state.checked)) checked.add(id);
+    highlightCloseReady = true;
+    render(state.highlight, 0);
+    const rowFocus = state.focus === 'row-close'
+      ? rowCloses.find(close => close && Number(close.dataset.closeId) === state.focusTabId) : null;
+    (rowFocus ?? (mode === 'search' ? query : list)).focus();
+    if (mode !== 'search') announce(MODE_LABELS[mode]);
+    const titles = new Map(context.tabs.map(tab => [tab.id, tabLabel(tab)]));
+    beginClose();
+    let response;
+    try { response = await send({ command: 'searchHandoffReady', token }); } catch { /* Reported below. */ }
+    await finishClose(tabIds, response, titles);
+  }
+
+  async function finishClose(tabIds, response, titles) {
     // Sent once. A failure is reported, never retried automatically.
-    if (response?.ok === true && Array.isArray(response.closedIds)) {
+    const ok = response?.ok === true && Array.isArray(response.closedIds);
+    const bundled = ok && isContext(response.context);
+    if (ok) {
       const gone = new Set(idList(response.closedIds));
       for (const id of gone) checked.delete(id);
       notice = describeClose(tabIds, response, titles);
       // Remove confirmed closures even if the following refresh fails.
-      setContext({ ...context, tabs: context.tabs.filter(tab => !gone.has(tab.id)) });
+      setContext(bundled ? response.context : { ...context, tabs: context.tabs.filter(tab => !gone.has(tab.id)) });
     } else {
-      notice = 'Could not close tabs. Check the list and try again.';
+      notice = response?.handoffFailed === true
+        ? 'Search could not stay open after closing this tab, so no tabs were closed.'
+        : 'Could not close tabs. Check the list and try again.';
     }
     awaitingClose = false;
-    const refreshed = await refresh(true);
+    // The reply usually carries the fresh list. Otherwise read it once; the
+    // close itself is never sent again.
+    const refreshed = bundled || await refresh(true);
     closing = false;
     busy = false;
     if (!refreshed) notice = `${notice} The list may be out of date. Close and reopen search.`;
