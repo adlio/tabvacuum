@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 16 16" role="img" aria-labelledby="title">
+  <!-- BRIEF: Optical toolbar variant of the approved Little Vacuum. A two-pixel hose, simpler handle and wider nozzle/canister gap keep the silhouette readable at 16px. Coral #c45140 contrasts with both light and dark browser chrome; Firefox also gets a light-ink version. -->
+  <title id="title">TabVacuum little vacuum toolbar mark</title>
+  <g id="vacuum" color="#c45140">
+    <path id="hose" d="M2.5 12.5L7 3.5Q8.5 .5 11.5 1.5Q14.5 2.5 13.5 6L12.5 8.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+    <path id="nozzle" d="M1 12.5Q1 11.5 2 11.5H5Q6 11.5 6.5 12.5L7.5 14.5H1Z" fill="currentColor"/>
+    <path id="canister" d="M11 6H12.5Q14.5 6 14.5 8V13Q14.5 14.5 13 14.5H10.5Q9 14.5 9 13V8Q9 6 11 6Z" fill="currentColor"/>
+    <path id="handle" d="M10.5 4.5H12.5V6H10.5Z" fill="currentColor"/>
+  </g>
+</svg>

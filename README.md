@@ -1,8 +1,8 @@
-# TabVacuum
+# Aaron's Tab Vacuum
 
 <!-- badges will be added once CI and store listings are live (T48) -->
 
-A browser extension for power-user tab management. Works in Firefox and Chrome.
+Aaron's Tab Vacuum (ATV) is a browser extension for power-user tab management. Find tabs fast, sort them your way, and clear duplicates, stale tabs and blank pages, with keyboard control throughout. Works in Firefox and Chrome.
 
 ## Features
 
@@ -49,7 +49,7 @@ Accessible via toolbar popup, tab right-click menu, and keyboard shortcuts.
 | Close Stale Tabs | *(unassigned — set manually)* |
 | Close Blank Tabs | *(unassigned — set manually)* |
 
-Chrome allows at most four suggested shortcuts per extension. **Close Stale Tabs** and **Close Blank Tabs** ship without defaults. Existing user-assigned bindings remain managed by the browser; check the browser's shortcut settings after upgrading. Search uses the same period key across platforms: Firefox reserves Ctrl+Shift+K for its web console on Windows/Linux (the Mac console shortcut is Command+Option+K). TabVacuum never overwrites shortcuts the browser already holds, so an existing install may keep its previous search binding until you change it in the browser's shortcut settings. You can assign shortcuts yourself:
+Chrome allows at most four suggested shortcuts per extension. **Close Stale Tabs** and **Close Blank Tabs** ship without defaults. Existing user-assigned bindings remain managed by the browser; check the browser's shortcut settings after upgrading. Search uses the same period key across platforms: Firefox reserves Ctrl+Shift+K for its web console on Windows/Linux (the Mac console shortcut is Command+Option+K). ATV never overwrites shortcuts the browser already holds, so an existing install may keep its previous search binding until you change it in the browser's shortcut settings. You can assign shortcuts yourself:
 
 **Firefox**: remap in `about:addons` → gear icon → "Manage Extension Shortcuts".
 **Chrome**: remap in `chrome://extensions/shortcuts`.
@@ -67,7 +67,7 @@ Whether system notifications appear depends on your operating system's notificat
 
 ## Settings
 
-Access via the browser's extension settings page (TabVacuum → Preferences/Options).
+Access via the browser's extension settings page (Aaron's Tab Vacuum → Preferences/Options).
 
 - Stale tab threshold (default: 7 days)
 - URL normalization for duplicate detection (ignore fragments, ignore query params)
@@ -98,7 +98,7 @@ See `docs/prd.md` for requirements, `docs/design.md` for architecture, and
 
 ## Tab search and browser tests
 
-Search opens a centered command palette over the current web page, from the TabVacuum toolbar menu or its keyboard command. The scope is **all windows** by default; change it to **current window only** on the Settings page. Normal and private-window results are kept separate. Typing only searches: it never hides, moves, closes, or selects browser tabs as a group. Arrow keys highlight; Enter selects the tab and focuses its window. Escape or a backdrop click dismisses and restores page focus. Tab and Shift+Tab stay inside the palette.
+Search opens a centered command palette over the current web page, from the ATV toolbar menu or its keyboard command. The scope is **all windows** by default; change it to **current window only** on the Settings page. Normal and private-window results are kept separate. Typing only searches: it never hides, moves, closes, or selects browser tabs as a group. Arrow keys highlight; Enter selects the tab and focuses its window. Escape or a backdrop click dismisses and restores page focus. Tab and Shift+Tab stay inside the palette.
 
 ### Close tabs from search
 

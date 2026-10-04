@@ -101,7 +101,7 @@ export function startPopup({ document, window, browser }) {
     // Search errors are complete sentences from the background already.
     if (result?.error) return finishWithError(trigger, command === 'launchSearch' ? String(result.error) : `${failed}: ${result.error}`);
     const done = command === 'launchSearch' ? result && typeof result === 'object' : typeof result?.message === 'string' && result.message.trim();
-    if (!done) return finishWithError(trigger, `${failed}: TabVacuum did not respond.`);
+    if (!done) return finishWithError(trigger, `${failed}: Aaron's Tab Vacuum did not respond.`);
     if (result.notificationError) {
       // The work completed; only the system notification failed. Never present it as a failure.
       setBusy(false);

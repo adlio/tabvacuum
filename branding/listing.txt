@@ -1,0 +1,53 @@
+Name (both stores)
+Aaron's Tab Vacuum
+
+Short description (Chrome; also used by both manifests)
+Find tabs fast, sort them your way, and clear duplicates, stale tabs and blank pages. Built for keyboard control.
+
+Summary (Firefox)
+Find, sort and clean up your tabs with Aaron's Tab Vacuum (ATV). Search across windows, close a selected set, merge windows, or search history and loaded page text.
+
+Promotional descriptor (both stores)
+Tab search, sorting & cleanup.
+
+Detailed description (both stores)
+Find the tab you need. Put the rest in order.
+
+Aaron's Tab Vacuum—ATV for short—brings tab search, sorting and cleanup together in a keyboard-friendly browser extension.
+
+FIND AND SWITCH
+Search open tabs by title or URL across your windows, or limit search to the current window. Results update as you type. Use the arrow keys to choose a tab and Enter to switch to it. Open search with an empty query to see your ten most recently focused tabs.
+
+SORT AND ORGANIZE
+Sort tabs in the current window by URL, title, last accessed, most visited, or Frequent & recent, which combines visit frequency and recency. URL and title sorts work in either direction. Pinned tabs stay in place. Merge windows to bring scattered tabs together.
+
+CLOSE WHAT YOU NO LONGER NEED
+Close individual results or select several tabs and close the set while keeping search open. Use the row's close button, or press Tab to enter the results, move with arrows or j/k, and press x to close. On-screen hints explain multi-select and the other keyboard controls.
+
+CLEAR THE CLUTTER
+Remove duplicate, stale and blank tabs from the toolbar menu or with customizable shortcuts. Choose how long a tab can go untouched, how duplicate URLs are matched, and whether pinned or audio-playing tabs are protected. Toolbar actions show progress while they run and report the result through a system notification, subject to your browser and operating-system settings.
+
+LOOK BEYOND OPEN-TAB TITLES
+Use Search in to add browsing history or text from loaded web pages. History opens a visited page without deleting its history entry. Page-content search shows matching snippets and requires optional website access that you grant in Settings. Both sources start off each time search opens. Sleeping and restricted pages are skipped; history search is unavailable in private windows.
+
+LOCAL PROCESSING
+ATV processes tab information, history matches and page text locally. It does not send your browsing data to the developer or an analytics service. No account is required, and there is no background page-content index.
+
+OPEN SEARCH FROM YOUR KEYBOARD
+Mac: Command + Shift + period (.)
+Windows and Linux: Ctrl + Shift + period (.)
+Existing installations may retain an earlier or custom shortcut. You can change the binding in your browser's extension shortcut settings.
+
+Closing tabs takes effect immediately. You can try your browser's Reopen Closed Tab command to recover a page; unsaved page content may not return.
+
+Closing line (Firefox only)
+To change a shortcut, open Firefox's Add-ons Manager, choose the gear menu, then Manage Extension Shortcuts.
+
+Closing line (Chrome only)
+To change a shortcut, open Chrome's Extensions page and choose Keyboard shortcuts.
+
+Support link (both stores)
+https://github.com/adlio/tabvacuum/issues
+
+Release notes (0.5.3)
+Refreshed the Little Vacuum icon and store artwork. Search, sorting and cleanup work as before. Your settings and assigned shortcuts stay in place. No new permissions are required.

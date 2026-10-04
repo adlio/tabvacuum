@@ -104,7 +104,7 @@ describe('popup actions notify once and keep the reply shape', () => {
     expect(result.notificationError).toBeUndefined();
     expect(messages()).toEqual([result.message]);
     expect(api.notifications.create).toHaveBeenCalledWith(
-      expect.objectContaining({ type: 'basic', title: 'TabVacuum', iconUrl: 'icons/icon-96.png' }));
+      expect.objectContaining({ type: 'basic', title: "Aaron's Tab Vacuum", iconUrl: 'icons/icon-96.png' }));
   });
 
   it('closes the duplicate tab and notifies its message', async () => {

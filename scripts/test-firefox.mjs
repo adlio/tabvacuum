@@ -844,7 +844,7 @@ try {
     const readOptions = () => inOptions('const $ = id => document.getElementById(id); return { state: $("content-access-state").textContent, message: $("content-access-message").textContent };');
     async function clickOptions(selector) {
       // Raise the Settings window first: a real pointer click lands on whatever window is on top.
-      nativeKeys(env, ['Shift_L'], 'TabVacuum Settings');
+      nativeKeys(env, ['Shift_L'], "Aaron's Tab Vacuum Settings");
       await sleep(300);
       const p = await inOptions(`const button = document.querySelector(${JSON.stringify(selector)}); button.scrollIntoView({ block: 'center' }); const r = button.getBoundingClientRect();
         return { x: mozInnerScreenX + r.left + r.width / 2, y: mozInnerScreenY + r.top + r.height / 2 };`);

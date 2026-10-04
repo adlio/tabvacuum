@@ -1,9 +1,9 @@
 {
   "name": "tabvacuum",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "private": true,
   "type": "module",
-  "description": "Power-user tab cleanup: close duplicates, merge windows, sort tabs, prune stale tabs.",
+  "description": "Find tabs fast, sort them your way, and clear duplicates, stale tabs and blank pages. Built for keyboard control.",
   "scripts": {
     "test": "vitest run",
     "test:watch": "vitest",
