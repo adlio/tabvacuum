@@ -1,7 +1,16 @@
 {
   "manifest_version": 3,
-  "name": "TabVacuum",
-  "description": "Power-user tab cleanup: close duplicates, merge windows, sort tabs, prune stale and blank tabs.",
+  "name": "Aaron's Tab Vacuum",
+  "short_name": "ATV",
+  "description": "Find tabs fast, sort them your way, and clear duplicates, stale tabs and blank pages. Built for keyboard control.",
+  "icons": {
+    "16": "icons/toolbar-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "64": "icons/icon-64.png",
+    "96": "icons/icon-96.png",
+    "128": "icons/icon-128.png"
+  },
   "permissions": ["tabs", "history", "notifications", "storage", "contextMenus", "activeTab", "scripting"],
   "optional_permissions": ["http://*/*", "https://*/*"],
   "web_accessible_resources": [
@@ -9,10 +18,20 @@
   ],
   "action": {
     "default_popup": "popup.html",
+    "default_title": "Aaron's Tab Vacuum — Search, Sort & Clean Up",
     "default_icon": {
-      "48": "icons/icon-48.png",
-      "96": "icons/icon-96.png"
-    }
+      "16": "icons/toolbar-16.png",
+      "20": "icons/toolbar-20.png",
+      "24": "icons/toolbar-24.png",
+      "32": "icons/toolbar-32.png",
+      "48": "icons/toolbar-48.png",
+      "64": "icons/toolbar-64.png"
+    },
+    "theme_icons": [
+      { "size": 16, "dark": "icons/toolbar-16.png", "light": "icons/toolbar-light-16.png" },
+      { "size": 32, "dark": "icons/toolbar-32.png", "light": "icons/toolbar-light-32.png" },
+      { "size": 64, "dark": "icons/toolbar-64.png", "light": "icons/toolbar-light-64.png" }
+    ]
   },
   "options_ui": {
     "page": "options.html"

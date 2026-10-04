@@ -12,7 +12,7 @@ launcher.installCleanup();
 
 function openSearch(tab) {
   return launcher.launch(tab).catch(() => {
-    const message = 'Could not open Search tabs. Try again from the TabVacuum menu. For private windows, check that TabVacuum is allowed to run there.';
+    const message = "Could not open Search tabs. Try again from the Aaron's Tab Vacuum menu. For private windows, check that ATV is allowed to run there.";
     notify(message).catch(() => {});
     return { error: message };
   });
@@ -46,7 +46,7 @@ async function saveSettings(settings) {
 async function notify(message) {
   await browser.notifications.create({
     type: 'basic',
-    title: 'TabVacuum',
+    title: "Aaron's Tab Vacuum",
     message,
     iconUrl: 'icons/icon-96.png',
   });

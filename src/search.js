@@ -689,7 +689,7 @@ export function startSearch({ document, window, browser }) {
     if (!token || enableButton.hidden) return;
     let response;
     try { response = await send({ command: 'openSearchPermissions', token }); } catch { /* Reported below. */ }
-    if (response?.ok !== true) showMessage('error', 'Could not open Settings. Open TabVacuum Settings to allow website access.');
+    if (response?.ok !== true) showMessage('error', "Could not open Settings. Open Aaron's Tab Vacuum Settings to allow website access.");
   }
 
   function describeClose(tabIds, response, titles) {

@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32" role="img" aria-labelledby="title">
+  <!-- BRIEF: User-selected B / Little Vacuum. Preserve the approved hose, nozzle and canister geometry and coral color. Transparent master for store and promotional artwork; use the separate optical master for toolbar icons. -->
+  <title id="title">TabVacuum little vacuum</title>
+  <g id="vacuum" color="#ba493b">
+    <path id="hose" d="M5 25L14 7Q17 1 23 3Q29 5 27 12L25 17" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round"/>
+    <path id="nozzle" d="M2 25Q2 23 4 23H11Q13 23 14 25L16 29H2Z" fill="currentColor"/>
+    <path id="canister" d="M21 12H25Q29 12 29 16V26Q29 29 26 29H20Q17 29 17 26V16Q17 12 21 12Z" fill="currentColor"/>
+    <path id="handle" d="M20 9H25V12H20Z" fill="currentColor"/>
+  </g>
+</svg>

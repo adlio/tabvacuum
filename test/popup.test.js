@@ -220,9 +220,9 @@ describe('popup action feedback', () => {
 
   it.each([
     ['a send failure', () => Promise.reject(new Error('Receiving end does not exist')), 'Could not merge windows: Receiving end does not exist'],
-    ['an empty reply', async () => undefined, 'Could not merge windows: TabVacuum did not respond.'],
-    ['a malformed reply', async () => ({ message: 42 }), 'Could not merge windows: TabVacuum did not respond.'],
-    ['a blank message', async () => ({ message: '  ' }), 'Could not merge windows: TabVacuum did not respond.'],
+    ['an empty reply', async () => undefined, "Could not merge windows: Aaron's Tab Vacuum did not respond."],
+    ['a malformed reply', async () => ({ message: 42 }), "Could not merge windows: Aaron's Tab Vacuum did not respond."],
+    ['a blank message', async () => ({ message: '  ' }), "Could not merge windows: Aaron's Tab Vacuum did not respond."],
   ])('stays open with an error after %s', async (_, reply, title) => {
     const ui = setup(reply);
     ui.press(ui.$('btn-merge'));
@@ -301,7 +301,7 @@ describe('popup search launch', () => {
   });
 
   it('shows the background search error without auto-hiding it', async () => {
-    const message = 'Could not open Search tabs. Try again from the TabVacuum menu.';
+    const message = "Could not open Search tabs. Try again from the Aaron's Tab Vacuum menu.";
     const ui = setup(async () => ({ error: message }));
     ui.press(ui.$('btn-search'));
     await settle();
