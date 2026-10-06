@@ -129,3 +129,13 @@
 ## 0.5.3 Aaron's Tab Vacuum branding (R6.1, R10)
 
 - [x] **T72 (Kiro)** — Prepared the branding-only 0.5.3 candidate: display name Aaron's Tab Vacuum, short name ATV, approved Little Vacuum silhouette, store copy and public UI strings. Package name, gecko ID, storage keys, permissions, commands and shortcuts remain unchanged; only package/lockfile root versions changed to 0.5.3, with no dependency changes. All 716 unit tests (37 branding), both builds/packages and extension lint pass; each 55-file ZIP matches its build. Native Linux verification: Firefox 157 full suite 374/0 and action feedback 48/0; Chromium 145 full suite 398/0 and action feedback 48/0. Ten real 1280×800 store screenshots captured. A confirmed Chrome dark-toolbar contrast defect was corrected with six Chrome-only exports using the same silhouette; final native recapture measured 3.22:1 on #3c3c3c and 3.42:1 on white. Existing 24 PNGs and popup SVG remain byte-identical to the approved originals. Independent source review passed; exported PNG pixels now have a regression assertion, capture input methods are documented accurately, and an early setup-failure probe confirms no owned Xvfb process remains. Physical Mac/Windows behavior, arbitrary custom themes and OS notification banners remain unverified. Publication authorized for 0.5.3: commit, PR, merge after CI, and release-tag push. Signed-in store listing copy and image edits remain separate from package submission.
+
+## Stale-tab preview and automatic cleanup specification (R4, R5, R6, R7, R10)
+
+- [x] **T73 (Kiro)** — Prepared docs/automatic-stale-tab-cleanup.code-task.md: exact approved main-menu wording, inline disclosure/review, safe age handling and preview-bound removal, opt-in alarm lifecycle, normal/private isolation, real-browser acceptance criteria, and the proposed 0.6.0 PR/store release plan. Checked the existing code and release workflow; native timestamp semantics remain an explicit implementation verification gate. Documentation only; implementation, commits and publication have not started.
+
+## 0.6.0 stale-tab controls and optional automation (R4, R5, R6, R7)
+
+- [~] **T74 (Kiro)** — Verify browser tab-age semantics, implement conservative stale planning, authorized previews/removal and opt-in alarm lifecycle; cover safety and lifecycle regressions.
+- [~] **T75 (Kiro)** — Implement inline stale controls and exact main-menu automation status, shared Settings, safe shortcut/menu entry points, and UI tests.
+- [~] **T76 (Kiro)** — Verify native Firefox/Chromium flows, update documentation and 0.6.0 package metadata, capture evidence, and open/drive the PR through CI and review. User authorized build/commit/push/PR only; no merge, tag or publication.
