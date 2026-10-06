@@ -1123,3 +1123,47 @@ describe('stale close recovery', () => {
     expect(ui.$('stale-auto-detail').textContent).toContain('turn it off');
   });
 });
+
+describe('stale recovery refresh coordination', () => {
+  beforeEach(fakeClock);
+  afterEach(() => vi.useRealTimers());
+
+  it('does not let periodic refresh steal a pending recovery read', async () => {
+    const recovered = deferred();
+    let hold = false;
+    const ui = staleSetup({
+      getStaleState: () => hold ? recovered.promise : Promise.resolve(staleState({ preview: { count: 2 } })),
+      closeStalePreview: async () => { throw new Error('Reply lost'); },
+    });
+    await settle();
+    ui.press(ui.$('btn-stale'));
+    ui.press(ui.$('stale-close'));
+    await settle();
+    hold = true;
+    const reads = ui.sent('getStaleState').length;
+    ui.press(ui.$('status-review'));
+    await settle();
+    await vi.advanceTimersByTimeAsync(5500);
+    expect(ui.sent('getStaleState').length).toBe(reads + 1);
+    recovered.resolve(staleState({ preview: { id: 'fresh', count: 1 } }));
+    await settle();
+    expect(ui.document.activeElement).toBe(ui.$('stale-review-list'));
+    expect(ui.sent('closeStalePreview')).toHaveLength(1);
+  });
+
+  it('hides an outdated review list after a refresh failure and refuses reopening it', async () => {
+    let fail = false;
+    const ui = staleSetup({ getStaleState: async () => fail ? { error: 'Read failed' } : staleState({ preview: { count: 2 } }) });
+    await settle();
+    ui.press(ui.$('btn-stale'));
+    ui.press(ui.$('stale-review'));
+    expect(ui.$('stale-review-list').hidden).toBe(false);
+    fail = true;
+    await vi.advanceTimersByTimeAsync(5000);
+    await settle();
+    expect(ui.$('stale-review-list').hidden).toBe(true);
+    ui.press(ui.$('stale-review'));
+    expect(ui.$('stale-review-list').hidden).toBe(true);
+    expect(ui.stale().closeDisabled).toBe(true);
+  });
+});

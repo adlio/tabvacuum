@@ -13,7 +13,7 @@ tools to tame tab sprawl without leaving the browser.
 
 ## Terminology
 
-- **Stale tab**: A tab whose `lastAccessed` timestamp is older than a user-configured threshold.
+- **Stale tab**: A tab whose trusted last-viewed time or conservative age baseline meets the configured inactivity threshold; unknown age does not qualify.
 - **Duplicate tab**: Two or more tabs sharing the same URL (after normalization).
 - **Active tab**: The currently focused tab in a window. Never auto-closed or moved destructively.
 - **Protected tab**: A pinned tab or a tab playing audio. Excluded from bulk-close operations by default.
@@ -50,12 +50,17 @@ tools to tame tab sprawl without leaving the browser.
 - **R3.3**: The sort applies to the current window only.
 - **R3.4**: Display the sort criteria used after the operation (e.g., "Sorted 28 tabs by URL").
 
-### R4 - Close Stale Tabs
+### R4 - Stale-Tab Review and Optional Automatic Cleanup
 
-- **R4.1**: Close all tabs whose `lastAccessed` timestamp is older than a user-configured threshold.
-- **R4.2**: The default threshold is 7 days. Configurable via settings (R5).
-- **R4.3**: Never close the active tab, pinned tabs, or tabs currently playing audio.
-- **R4.4**: Display a count of closed tabs and the threshold used (e.g., "Closed 12 tabs not accessed in 7 days").
+- **R4.1**: Treat a tab as stale only when trusted last-viewed data or a conservative observed baseline establishes at least the configured elapsed duration. Unknown or inconsistent age keeps the tab. Background reloads and visits to another tab with the same URL do not count as viewing this tab.
+- **R4.2**: Default to seven days; support positive whole hours/days and preserve existing saved thresholds. Menu and Settings share one threshold. Changing units preserves duration, and Escape abandons an unfinished edit.
+- **R4.3**: Both modes protect active and last-in-window tabs. Manual review honors saved pinned/audio protections within its invoking privacy context. Automatic cleanup always protects pinned/audio tabs, excludes private and non-normal windows, and skips loading, hidden, internal/protected and known media-sharing tabs. Never wake a sleeping tab.
+- **R4.4**: Opening Stale Tabs only expands inline controls. Show the eligible count and a review list before an explicit Close N tabs now action. Removal is bounded to the background-issued preview and rechecks document, scope, age, protection and rule state. Never silently add new candidates.
+- **R4.5**: Automatic cleanup is off by default, including upgrades. Enabling grants explicit permission to close eligible tabs on the next whole local hour, not immediately. Check hourly using browser alarms; disabling prevents further removals not already issued. Open stale editors defer cleanup.
+- **R4.6**: Show exactly Stale Tabs (Auto-Close Enabled) while enabled and, when projected candidates exist, Closing N tabs automatically at TIME. Format the scheduler's actual next run in local time. Zero candidates hide only the caption. Use current eligibility for manual Close now and projected eligibility for the caption, explaining any higher projected count inside the controls.
+- **R4.7**: Serialize manual and automatic batches, consume preview authorization once, and preserve actual partial results. Never retry an uncertain removal. Review remaining tabs is a read-only refresh with visible focus. Report automatic changes but not empty checks; bound repeated failure notifications.
+- **R4.8**: Restore opt-in and scheduling through worker restarts without duplicating sweeps. Full browser restart schedules a future check; device wake may run one delayed sweep, never replaying a backlog. Handle local-hour boundaries, time-zone changes and DST.
+- **R4.9**: Disclose age continuity limits. The current Chrome candidate resets its conservative baseline after full browser/extension restart or tab replacement; repeated restarts can prevent weekly cleanup. A local timestamp persistence design is not approved or implemented. Firefox may use its verified native last-viewed time. Do not claim stronger tracking than the implementation verifies.
 
 ### R5 - User Settings
 
@@ -63,7 +68,8 @@ tools to tame tab sprawl without leaving the browser.
 - **R5.2**: Configurable settings:
   - **R5.2a**: Stale tab threshold (default: 7 days). Input as a number with a unit selector (hours/days).
   - **R5.2b**: URL normalization for duplicate detection: toggle to ignore fragments, toggle to ignore query parameters (both default off).
-  - **R5.2c**: Protected tab behavior: toggle to skip pinned tabs (default on), toggle to skip tabs playing audio (default on).
+  - **R5.2c**: Manual protected-tab behavior: toggle to skip pinned tabs (default on), toggle to skip tabs playing audio (default on). Automatic stale cleanup always protects both.
+  - **R5.2d**: Automatically close stale tabs (default off), shared between the inline toolbar controls and Settings; enabling explains the first future check and warns that tabs are closed, not archived.
 - **R5.3**: Settings are persisted via `browser.storage.local`.
 
 ### R6 - User Interface
@@ -76,7 +82,7 @@ tools to tame tab sprawl without leaving the browser.
   - Sort Tabs: `Alt+Shift+S` (uses last-selected sort criteria)
   - Search Tabs: `Ctrl+Shift+Period` (`Command+Shift+Period` on macOS). Firefox reserves `Ctrl+Shift+K` for its web console on Windows/Linux; the Mac console shortcut is `Command+Option+K`.
   - Close Stale and Close Blank: unassigned (manually assignable)
-- **R6.4**: Report every Sort, Merge and cleanup outcome, from every surface, without new permissions or storage:
+- **R6.4**: Report every explicit Sort, Merge and cleanup outcome consistently from every surface. The stale-tab row, shortcut and context-menu entry first open the same inline review controls; they do not execute cleanup. Automatic stale cleanup separately adds the alarms permission and scheduler state (R4):
   - **R6.4a**: From the toolbar popup, show an action label and spinner in the status area and ignore further action commands until it settles. The background shows a `browser.notifications` notification on completion; close the popup on success or no-op once that notification is accepted.
   - **R6.4b**: From the context menu or a keyboard shortcut, the background shows a `browser.notifications` notification.
   - **R6.4c**: Zero matches (nothing to change) is informational, not an error.
@@ -88,7 +94,8 @@ tools to tame tab sprawl without leaving the browser.
 
 - **R7.1**: Never close the last remaining tab in a window (browsers require at least one tab per window).
 - **R7.2**: Never close the active tab in any window via bulk operations.
-- **R7.3**: All close operations should be undoable via the browser's built-in "Undo Close Tab" (`Ctrl+Shift+T`). The extension relies on the browser's native session restore for this; no custom undo stack is needed.
+- **R7.3**: Explain that closing is not archiving. The browser's Reopen Closed Tab command may recover a page, but unsaved page state and an unlimited recovery window are not guaranteed. No custom undo stack or archive is provided.
+- **R7.4**: Unknown age or safety state cannot authorize automatic closure. A lost reply must not trigger a second removal request; recover by reading a fresh preview. Keep the automation off switch available even when preview loading or alarm scheduling fails.
 
 ### R8 - Platform
 

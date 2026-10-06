@@ -25,7 +25,14 @@ CLOSE WHAT YOU NO LONGER NEED
 Close individual results or select several tabs and close the set while keeping search open. Use the row's close button, or press Tab to enter the results, move with arrows or j/k, and press x to close. On-screen hints explain multi-select and the other keyboard controls.
 
 CLEAR THE CLUTTER
-Remove duplicate, stale and blank tabs from the toolbar menu or with customizable shortcuts. Choose how long a tab can go untouched, how duplicate URLs are matched, and whether pinned or audio-playing tabs are protected. Toolbar actions show progress while they run and report the result through a system notification, subject to your browser and operating-system settings.
+Remove duplicate and blank tabs from the toolbar menu or with customizable shortcuts. Stale Tabs opens inline controls so you can choose an inactivity duration, see how many tabs qualify, and review them before selecting Close N tabs now. The existing stale-tab shortcut opens the same controls.
+
+AUTOMATIC STALE-TAB CLEANUP (0.6.0 DRAFT)
+Optionally enable hourly automatic cleanup, with seven days as the default. The main menu shows Auto-Close Enabled and, when tabs qualify, the count and next local closing time. Nothing closes immediately when you enable it. Automatic cleanup works in normal windows only and always keeps active, pinned, audio-playing and last-in-window tabs. Tabs are closed, not archived; unsaved changes may be lost. The feature uses the alarms permission without additional website access.
+
+Chrome limitation in the current candidate: full browser/extension restarts reset conservative tab ages; discard replacements may also reset them. Frequent restarts can prevent weekly cleanup. The proposal to preserve activity timestamps locally across Chrome restarts is awaiting approval and is not implemented. Finalize this paragraph after that decision, before publishing these listing changes.
+
+Choose how duplicate URLs are matched and which pinned/audio protections manual cleanup uses in Settings. Explicit toolbar actions show progress and report results through a system notification, subject to your browser and operating-system settings.
 
 LOOK BEYOND OPEN-TAB TITLES
 Use Search in to add browsing history or text from loaded web pages. History opens a visited page without deleting its history entry. Page-content search shows matching snippets and requires optional website access that you grant in Settings. Both sources start off each time search opens. Sleeping and restricted pages are skipped; history search is unavailable in private windows.
@@ -51,3 +58,6 @@ https://github.com/adlio/tabvacuum/issues
 
 Release notes (0.5.3)
 Refreshed the Little Vacuum icon and store artwork. Search, sorting and cleanup work as before. Your settings and assigned shortcuts stay in place. No new permissions are required.
+
+Release notes (0.6.0 draft — not submitted)
+Stale Tabs now opens inline review controls with an inactivity duration, eligible count and explicit Close N tabs now action. Optional automatic cleanup checks hourly and shows its enabled state, count and next local closing time on the main menu. It starts off after upgrading, preserves assigned shortcuts, and uses the alarms permission. Unknown ages are kept; automatic cleanup excludes private windows and protects active, pinned, audio-playing and final tabs. Chrome restart-age behavior remains the candidate limitation described above; settle that policy before submission.

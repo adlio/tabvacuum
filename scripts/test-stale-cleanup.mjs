@@ -557,6 +557,23 @@ const OBSERVE = `const send = browser.runtime.sendMessage.bind(browser.runtime);
 // [fault] the popup's transport rejects one command; everything else is real.
 const FAULT = command => `const send = browser.runtime.sendMessage.bind(browser.runtime);
   browser.runtime.sendMessage = msg => msg?.command === ${JSON.stringify(command)} ? Promise.reject(new Error('Test transport failure')) : send(msg);`;
+// [fault] as FAULT, plus an observer that counts every command the popup sends
+// (window.__harnessSent), so a recovery step can prove it sent no second close.
+const FAULT_COUNTED = command => `const send = browser.runtime.sendMessage.bind(browser.runtime);
+  window.__harnessSent = {};
+  browser.runtime.sendMessage = msg => { const c = String(msg?.command); window.__harnessSent[c] = (window.__harnessSent[c] ?? 0) + 1;
+    return c === ${JSON.stringify(command)} ? Promise.reject(new Error('Test transport failure')) : send(msg); };`;
+// Footer geometry: every visible part of the status bar is inside the viewport and unclipped.
+const FOOTER = `const $=id=>document.getElementById(id);
+  window.scrollTo(0, document.documentElement.scrollHeight);
+  const inside = el => { const r = el.getBoundingClientRect(); return { id: el.id, top: Math.round(r.top), bottom: Math.round(r.bottom), left: Math.round(r.left), right: Math.round(r.right),
+    ok: r.width > 0 && r.height > 0 && r.top >= 0 && r.left >= 0 && r.bottom <= innerHeight + 1 && r.right <= innerWidth + 1 && el.scrollWidth <= el.clientWidth + 1 && el.scrollHeight <= el.clientHeight + 1 }; };
+  const parts = ['status','status-title','status-detail','status-review','status-close'].map($).filter(el => !el.hidden).map(inside);
+  const hit = id => { const r = $(id).getBoundingClientRect(); const e = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2); return Boolean(e) && $(id).contains(e); };
+  const result = { h: innerHeight, w: innerWidth, parts, reviewHit: !$('status-review').hidden && hit('status-review'), closeHit: !$('status-close').hidden && hit('status-close'),
+    title: $('status-title').textContent, detail: $('status-detail').textContent, review: $('status-review').hidden ? null : $('status-review').textContent };
+  window.scrollTo(0, 0);
+  return result;`;
 const TABS = 'return (await api.tabs.query({})).map(t => ({ id: t.id, url: t.url, title: t.title, windowId: t.windowId, active: t.active, pinned: t.pinned, audible: t.audible, incognito: t.incognito, status: t.status, lastAccessed: t.lastAccessed }));';
 
 let b;
@@ -708,10 +725,14 @@ try {
     check(s.count === `Close now: ${tabs(manual.length)} not viewed for 7 days, across 1 window.`, 'manual count uses eligibility now, with scope', { got: s.count, manual });
     check(s.close === `Close ${tabs(manual.length)} now`, 'Close N tabs now names the manual count', s.close);
     const nextRun = nextLocalHour(b.nowB());
-    check(s.autoDetail === `If turned on, ${tabs(auto.length)} would close automatically at ${runTime(nextRun, b.nowB())}. Nothing closes before then.`,
-      'pre-enable line: projected count at the next whole local hour', { got: s.autoDetail, auto });
+    // A projected count above the manual count says why: tabs that reach the rule before the run.
+    const horizon = auto.length > manual.length ? ' Includes tabs that reach 7 days before then.' : '';
+    check(s.autoDetail === `If turned on, ${tabs(auto.length)} would close automatically at ${runTime(nextRun, b.nowB())}.${horizon} Nothing closes before then.`,
+      'pre-enable line: projected count at the next whole local hour, explained when above the manual count', { got: s.autoDetail, auto, manual });
     check(auto.length > manual.length, 'projection includes a tab that crosses the threshold before the run', { manual: manual.length, auto: auto.length });
-    check(/pinned tabs/.test(s.protect) && /active tab, pinned tabs, tabs playing audio and the last tab/.test(s.protect), 'protections stated for manual and automatic cleanup', s.protect);
+    check(s.protect.includes('Close now keeps pinned tabs and tabs playing audio.')
+      && s.protect.includes("Both keep each window's active tab and last tab. Automatic cleanup always keeps pinned tabs and tabs playing audio."),
+      'protections: manual keeps pinned/audio by setting; both keep active and last tab; automatic always keeps pinned/audio', s.protect);
 
     // Unit conversion: 7 days shows as 168 hours and saves nothing.
     const rule0 = await local(['staleThresholdMs', 'staleRuleRevision']);
@@ -814,6 +835,16 @@ try {
     await sleep(2000);
     check((await snapshot()).length === before, 'enabling closes nothing immediately', { before });
     s = await waitState(x => x.auto === true && /Closing|No tabs/.test(x.autoDetail), 'enabled detail');
+    {
+      const at = stored.staleNextRunAt, t = b.nowB();
+      const sched = await expected('auto', at), now = await expected('manual', t);
+      const want = sched.length
+        ? `Closing ${tabs(sched.length)} automatically at ${runTime(at, t)}.${sched.length > now.length ? ' Includes tabs that reach 7 days before then.' : ''}`
+        : `No tabs would close automatically at ${runTime(at, t)}.`;
+      check(s.autoDetail === want, 'enabled line: scheduled count, explained when above the manual count', { got: s.autoDetail, want, scheduled: sched, manual: now, count: s.count });
+      record.enabledLine = { autoDetail: s.autoDetail, count: s.count };
+    }
+    await themed('enabled-expanded', 'Automation on, expanded controls: scheduled count vs Close now count');
     await popup('document.getElementById("btn-stale").click(); return true;');
     s = await waitState(x => !x.panel && x.title === ENABLED_TITLE && x.caption, 'enabled caption');
     const auto = await expected('auto', stored.staleNextRunAt);
@@ -923,7 +954,8 @@ try {
     await popup('document.getElementById("stale-review").click(); return true;');
     await waitState(x => !x.listHidden, 'review open');
     const before = (await snapshot()).length;
-    await popup(FAULT('closeStalePreview'));
+    await popup(FAULT_COUNTED('closeStalePreview'));
+    fixture('[fault] closeStalePreview transport rejects; popup commands counted', { observer: 'window.__harnessSent in the popup' });
     await popup('document.getElementById("stale-close").click(); return true;');
     await waitState(x => x.status.tone === 'error', 'close failure shown');
     const sticky = await popup(STICKY);
@@ -931,7 +963,42 @@ try {
     check(sticky.inView && sticky.labelHit && sticky.position === 'sticky' && /Could not close stale tabs/.test(sticky.text), '[fault] close failure label stays visible in the clipped popup', sticky);
     if (!sticky.overflow) limit('sticky status under overflow', 'expanded content fit inside the popup, so clipping was not exercised');
     check((await snapshot()).length === before, '[fault] failed close removes nothing');
+    const footer = await popup(FOOTER);
+    record.closeFailureFooter = footer;
+    check(footer.h <= 600 && footer.review === 'Review remaining tabs' && footer.detail === 'The close result could not be confirmed. Review the remaining tabs before closing again.',
+      '[fault] close failure offers Review remaining tabs with the unconfirmed-result explanation', footer);
+    check(footer.parts.length === 5 && footer.parts.every(p => p.ok) && footer.reviewHit && footer.closeHit, '[fault] error footer, both buttons and copy are unclipped and hittable at <=600px', footer);
     await themed('close-failure', '[fault] close failure with expanded review');
+    // Recovery: the real #status-review button fetches a fresh read-only preview and focuses it.
+    const sentBefore = await popup('return { ...window.__harnessSent };');
+    check(sentBefore.closeStalePreview === 1, '[fault] exactly one close message sent before recovery', sentBefore);
+    await popup('document.getElementById("status-review").click(); return true;');
+    let s = await waitState(x => x.panel && !x.listHidden && x.focus === 'stale-review-list' && x.closeDisabled !== 'true', 'review reopened with a fresh preview', 12000);
+    let sent = await popup('return { ...window.__harnessSent };');
+    const remaining = (await expected('manual', b.nowB())).map(titleOf);
+    check(sent.closeStalePreview === 1 && (sent.getStaleState ?? 0) > (sentBefore.getStaleState ?? 0), 'Review remaining tabs refreshes the preview and sends no second close', { sentBefore, sent });
+    check(s.rows.length === remaining.length && s.rows.every(r => remaining.includes(r.title)) && s.close === `Close ${tabs(remaining.length)} now`,
+      'recovered review lists the remaining candidates and Close names their count', { rows: s.rows, remaining, close: s.close });
+    check((await snapshot()).length === before, 'recovery closes nothing');
+    record.recovery = { sentBefore, sent, focus: s.focus, close: s.close };
+    // The focused list must not sit entirely behind the sticky status footer.
+    const seen = await popup(`const l = document.getElementById('stale-review-list').getBoundingClientRect(), f = document.getElementById('status').getBoundingClientRect();
+      return { listTop: Math.round(l.top), listBottom: Math.round(l.bottom), footerTop: Math.round(f.top), h: innerHeight, scrollY: Math.round(scrollY),
+        visiblePx: Math.round(Math.max(0, Math.min(l.bottom, f.top) - Math.max(l.top, 0))) };`);
+    record.recovery.focusGeometry = seen;
+    check(seen.visiblePx >= 24, 'focused review list is visible above the error footer, not obscured', seen);
+    await themed('close-recovery', '[fault] after Review remaining tabs: fresh review list focused');
+    // From collapsed controls the same button opens both the controls and the list.
+    await popup('document.getElementById("btn-stale").click(); return true;');
+    await waitState(x => !x.panel, 'controls collapsed');
+    const hiddenReview = await popup('return document.getElementById("status-review").hidden;');
+    if (!hiddenReview) {
+      await popup('document.getElementById("status-review").click(); return true;');
+      s = await waitState(x => x.panel && !x.listHidden && x.focus === 'stale-review-list', 'controls and review reopened', 12000);
+      sent = await popup('return { ...window.__harnessSent };');
+      check(s.expanded === 'true' && sent.closeStalePreview === 1, 'from collapsed controls, Review remaining tabs opens controls and list with no close', { expanded: s.expanded, sent });
+    } else check(false, 'Review remaining tabs stays offered after collapsing the controls', { hiddenReview });
+    check((await snapshot()).length === before, 'second recovery closes nothing');
     await popup('document.getElementById("status-close").click(); return true;');
     await until(async () => !await isOpen(), 'failure dismissed');
   });

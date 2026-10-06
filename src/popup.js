@@ -194,6 +194,7 @@ export function startPopup({ document, window, browser, locale }) {
   let current = false;    // state follows every confirmed write and may authorize a close
   let loadError = '';
   let closing = false;
+  let recovering = false;
   let ruleDirty = false;  // the duration fields hold an uncommitted edit
   let shownUnit = ui.unit.value;
   let listed = '';
@@ -208,7 +209,7 @@ export function startPopup({ document, window, browser, locale }) {
   // The shown preview matches the saved rule and every write has settled.
   const settled = () => Boolean(state) && current && !loadError && !rule.busy && !ruleDirty;
 
-  const canClose = () => settled() && !closing && !pending && state.preview.count > 0;
+  const canClose = () => settled() && !closing && !recovering && !pending && state.preview.count > 0;
   const canEnable = () => windowId != null && settled() && !pending && !closing && canEnableAuto(state);
   // Turning automation off never waits for a preview, a save or a close.
   const canDisable = () => windowId != null;
@@ -316,7 +317,8 @@ export function startPopup({ document, window, browser, locale }) {
     }
     // The shared busy gate (setBusy) covers these too; this adds their own conditions.
     setGate(ui.close, canClose());
-    setGate(ui.review, Boolean(state) && !pending);
+    setGate(ui.review, settled() && !pending && !recovering);
+    if (loadError) setReviewOpen(false);
     for (const control of formControls) control.disabled = pending || closing;
     renderList();
   }
@@ -332,8 +334,8 @@ export function startPopup({ document, window, browser, locale }) {
     setText(ui.message, text);
   }
 
-  async function refresh() {
-    if (dismissed || windowId == null || rule.busy || closing) return;
+  async function refresh({ recovery = false } = {}) {
+    if (dismissed || windowId == null || rule.busy || closing || (recovering && !recovery)) return;
     const isLatest = latest.next();
     let reply;
     try {
@@ -434,26 +436,32 @@ export function startPopup({ document, window, browser, locale }) {
   });
 
   status.review.addEventListener('click', async () => {
-    if (pending || dismissed || closing || rule.busy) return;
-    setStaleOpen(true);
-    setReviewOpen(false);
-    current = false;
-    latest.invalidate();
-    renderStale();
-    await refresh();
-    if (dismissed) return;
-    if (current && !loadError) {
-      setReviewOpen(true);
-      ui.list.scrollIntoView?.({ block: 'nearest' });
-      ui.list.focus();
-    } else {
-      ui.button.scrollIntoView?.({ block: 'nearest' });
-      ui.button.focus();
+    if (pending || dismissed || closing || recovering || rule.busy) return;
+    recovering = true;
+    try {
+      setStaleOpen(true);
+      setReviewOpen(false);
+      current = false;
+      latest.invalidate();
+      renderStale();
+      await refresh({ recovery: true });
+      if (dismissed) return;
+      if (current && !loadError) {
+        setReviewOpen(true);
+        ui.list.scrollIntoView?.({ block: 'start' });
+        ui.list.focus({ preventScroll: true });
+      } else {
+        ui.button.scrollIntoView?.({ block: 'nearest' });
+        ui.button.focus();
+      }
+    } finally {
+      recovering = false;
+      if (!dismissed) renderStale();
     }
   });
 
   ui.review.addEventListener('click', () => {
-    if (pending || !state) return;
+    if (pending || recovering || !settled()) return;
     setReviewOpen(ui.list.hidden);
   });
 

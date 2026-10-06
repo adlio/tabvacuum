@@ -150,9 +150,8 @@ export function planSort(tabs, criteria, direction)
 // Returns: { moves: [{tabId, index}], message: string }
 // For visitCount criteria, caller must enrich tabs with visitCount before calling
 
-export function findStaleTabs(tabs, settings)
-// Input: array of tab objects, settings (with staleThresholdMs)
-// Returns: { toClose: number[], message: string }
+// Stale cleanup uses stale-core.js planStale(tabs, records, context),
+// with an explicit clock and manual/automatic policy. See the 0.6.0 section.
 
 export function isProtected(tab, settings)
 // Input: single tab object, settings
@@ -168,7 +167,7 @@ export function normalizeUrl(url, settings)
 Calls browser APIs, passes data to core.js functions, executes the returned plans.
 
 ```js
-import { findDuplicates, planMerge, planSort, findStaleTabs } from './core.js';
+import { findDuplicates, planMerge, planSort } from './core.js';
 
 async function closeDuplicates() {
   const settings = await getSettings();
@@ -202,7 +201,7 @@ const DEFAULTS = {
 };
 ```
 
-**Message listener** — popup and options pages communicate via `browser.runtime.sendMessage`:
+**Message listener** — popup and options pages communicate via `browser.runtime.sendMessage`. This routing sketch is abbreviated: the implementation first checks the trusted extension-page sender and uses the Chrome-compatible asynchronous response wrapper. Embedded search frames cannot invoke these commands.
 
 ```js
 browser.runtime.onMessage.addListener((msg) => {
@@ -210,7 +209,8 @@ browser.runtime.onMessage.addListener((msg) => {
     case "closeDuplicates": return closeDuplicates();
     case "mergeWindows":    return mergeWindows();
     case "sortTabs":        return sortTabs(msg.criteria, msg.direction);
-    case "closeStaleTabs":  return closeStaleTabs();
+    case "getStaleState": return stale.getState(msg.windowId);
+    case "closeStalePreview": return stale.closePreview(msg.windowId, msg.previewId);
     case "getSettings":     return getSettings();
     case "saveSettings":    return saveSettings(msg.settings);
   }
@@ -229,7 +229,7 @@ menuApi.create({ id: "tv-sort-url",    parentId: "tv-sort", title: "by URL",    
 menuApi.create({ id: "tv-sort-title",  parentId: "tv-sort", title: "by Title",         contexts: ["tab"] });
 menuApi.create({ id: "tv-sort-last",   parentId: "tv-sort", title: "by Last Accessed", contexts: ["tab"] });
 menuApi.create({ id: "tv-sort-visit",  parentId: "tv-sort", title: "by Visit Count",   contexts: ["tab"] });
-menuApi.create({ id: "tv-stale",  title: "Close Stale Tabs",     contexts: ["tab"] });
+menuApi.create({ id: "tv-stale",  title: "Review Stale Tabs…",   contexts: ["tab"] });
 ```
 
 **Notifications** (R6.4):
@@ -397,3 +397,19 @@ Content traversal uses the self-contained `searchPageContent` function in the to
 `querySearchSources` enters the launch queue only to authorize and snapshot the origin, then leaves the queue while history/content work runs. It re-authorizes before returning. One abort controller is registered per active source query; new queries supersede older ones. Central session saving cancels scans for removed sessions (dismissal, activation, replacement and origin lifecycle events); expiry is checked by authorization, so expired results are never returned. Per-task checks stop future injections after cancellation, while already-running synchronous scripts finish within their budgets and their results are discarded. Website permission is checked again before delivering snippets. Query/content data is transient memory only; the page receives only the existing data-free dismissal signal.
 
 Native acceptance extends the existing harnesses with real visited-and-closed history pages, exact-URL variants, source menu keyboard interactions, browser-native permission denial/grant/revocation, content-only fixtures, hidden/form/frame/shadow exclusions, discarded tabs, window privacy separation and source reset. Firefox and Chromium use fresh profiles and loopback fixtures, without mocked browser APIs. Grant persistence is checked from another extension page, not across a browser restart; OS-level macOS behavior and minimum-browser versions still require separate validation.
+
+## Stale-tab review and opt-in scheduling (0.6.0 candidate, R4–R7)
+
+The main menu's Stale Tabs row is a disclosure, not a destructive action. Popup and Settings share the threshold and opt-in through the trusted background messages in `docs/automatic-stale-tab-cleanup.code-task.md`. The enabled title and scheduled caption use the user's approved wording. The manual count plans for now; the caption plans for the scheduler's next run. A higher projected count is explained inside the disclosure. Settings and popup failures do not remove access to disabling automation.
+
+`stale-core.js` owns deterministic threshold validation, conservative age evaluation, manual/automatic protection policies, whole-local-hour arithmetic, bounded record validation, preview/lease expiry and actual-result messages. `stale-service.js` owns browser calls, event ordering, previews, leases, one-shot opening intent, preference updates and alarms. The former zero-fallback `findStaleTabs` export and immediate `closeStaleTabs` message are removed. Existing command IDs and assigned shortcuts remain; stale keyboard/context actions open the same toolbar controls through `action.openPopup`, or report a non-destructive opening error.
+
+`storage.local` contains the saved rule, revision and next planned run, not per-tab activity. `storage.session` contains bounded, separate normal/private age records, previews and editor leases. Firefox's single worker owns both contexts; Chrome split workers own only the context they can see, because session storage is shared. Either context's active editor defers automatic sweeps, since the rule itself is shared. Unknown metadata fails toward keeping tabs. Private activity never becomes persistent browsing metadata.
+
+A preview stores a bounded frozen set of tab/window IDs, document generations and URL hashes, tied to a rule revision, invoking window, privacy scope and short expiry. Its first use consumes it. Removal is serial, rechecks the live tab/window/document and protections, then rechecks rule/editor guards immediately before calling `tabs.remove`. Changing a setting or opening an editor during awaited checks stops subsequent automatic removals. Partial-result messages retain actual counts; lost replies never cause automatic removal retries. Review remaining tabs obtains a fresh preview, scrolls it above the sticky footer and focuses it without issuing another close. Passive polling cannot supersede that recovery read; failed refreshes cannot reopen an outdated review list.
+
+The scheduler adds only `alarms`. Enabling schedules a future whole local hour; no immediate sweep runs. Schedule reconciliation and one-shot alarm claiming are serialized. A callback that wakes an idle worker can claim its already-fired alarm once even if initialization has planned the next run. Full browser restarts reject pre-start backlog; device wake can run one delayed sweep. Disabled state prevents removal even if alarm clearing fails. DST, half-hour transitions and time-zone changes replan to whole local hours. Distinct failures are reported once per failure episode rather than every hour.
+
+Native age probes established Firefox's deselection-based timestamp and Chromium's selection-based timestamp in the tested versions. The current Chrome implementation uses session observations and a first-seen baseline; full browser/extension restart or discard replacement can reset that baseline. This affects manual and automatic stale counts and can prevent weekly cleanup for frequent restarters. A proposed local-only timestamp table has not been approved or implemented. Do not represent it as a working cross-restart feature.
+
+Verification uses unit tests for boundaries, races and privacy, the original search/closing suites, and `scripts/test-stale-cleanup.mjs` for native popup controls, safe editing, previews, protection checks, private isolation, shortcuts/context menus, alarm events and visible error recovery. Browser fixtures use disposable profiles on loopback. Firefox age fixtures use privileged native timestamp setup; Chromium fixtures offset only the extension's test clock. Accelerated alarm plans and injected transport failures are labelled in result JSON. These runs do not establish a real week of unattended use, minimum-version execution, physical macOS behavior or full Firefox restart behavior with a signed installed add-on.

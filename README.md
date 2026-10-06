@@ -10,7 +10,7 @@ Aaron's Tab Vacuum (ATV) is a browser extension for power-user tab management. F
 - **Close Duplicate Tabs** — deduplicate by URL across all windows
 - **Merge All Windows** — consolidate every tab into the current window
 - **Sort Tabs** — by URL, title, last accessed, or visit count (ascending/descending)
-- **Close Stale Tabs** — prune tabs untouched for a configurable period
+- **Stale Tabs** — preview tabs untouched for a configurable period, close the reviewed set, or opt into hourly automatic cleanup
 - **Close Blank Tabs** — remove new-tab pages, welcome pages, and search engine homepages
 
 Accessible via toolbar popup, tab right-click menu, and keyboard shortcuts.
@@ -56,7 +56,7 @@ Chrome allows at most four suggested shortcuts per extension. **Close Stale Tabs
 
 ### Action feedback
 
-Sort, Merge and cleanup actions report their result the same way from every surface:
+Sort, Merge, Close Duplicates and Close Blank Tabs report their result the same way from every surface. Stale Tabs first opens review controls; its explicit **Close N tabs now** button uses the same progress and result feedback:
 
 - **Toolbar popup**: the status area shows an action label and spinner while the action runs, and the popup ignores further action clicks until it finishes. On success, or when nothing needed changing, the popup closes and a system notification reports the outcome. A genuine failure keeps the popup open with the error shown inline.
 - **Tab right-click menu and keyboard shortcuts**: a system notification reports the outcome.
@@ -72,6 +72,20 @@ Access via the browser's extension settings page (Aaron's Tab Vacuum → Prefere
 - Stale tab threshold (default: 7 days)
 - URL normalization for duplicate detection (ignore fragments, ignore query params)
 - Protected tab behavior (skip pinned, skip audio-playing)
+
+## Stale-tab review and automatic cleanup (0.6.0 candidate)
+
+Choose **Stale Tabs** in the toolbar menu to expand its controls inline. The chevron changes direction; opening it never closes tabs or opens another window. The existing stale-tab shortcut and context-menu entry also open these controls. Change the duration (seven days by default), inspect the eligible count, use **Review tabs**, and select **Close N tabs now** only when ready. Changing days to hours preserves the duration. Escape cancels an unfinished duration edit before collapsing the controls.
+
+**Automatically close stale tabs** is off by default, including after upgrading. The toolbar row shows **Stale Tabs (Auto-Close Enabled)** while enabled. When tabs are expected to qualify, its caption says, for example, *Closing 6 tabs automatically at 10p.* The time is local. The caption counts candidates at the next scheduled check, while Close now counts candidates eligible now; the expanded text explains when more tabs cross the threshold before that check. With no projected candidates, the enabled title remains and the caption is hidden.
+
+Enabling schedules the next whole local hour and removes nothing immediately. Automatic cleanup checks normal windows only, always protecting active, pinned, audio-playing and last-in-window tabs. It also skips loading, hidden, protected/internal and known media-sharing pages. Sleeping tabs are not loaded. Both manual and automatic cleanup keep tabs with unknown age; manual cleanup honors the configured pinned/audio protections and stays within the invoking normal/private context.
+
+The menu and Settings share one saved threshold and opt-in. Disabling stops future removals. An open stale editor defers automatic cleanup. A full browser restart schedules a future check rather than replaying missed runs; after device sleep, one delayed check may run on wake. Scheduling uses the `alarms` permission and needs no additional website access.
+
+Manual closing is limited to the previewed set. Tabs that changed, became active or protected, or moved out of scope are kept. Failures retain actual partial counts where known. If the reply is lost, **Review remaining tabs** fetches a fresh list without repeating the close. Tabs are closed, not archived; native Reopen Closed Tab may help, but unsaved page state is not guaranteed to return.
+
+**Chrome limitation in this candidate:** a full browser/extension restart starts a fresh conservative age baseline, because Chromium's native timestamp records selection rather than the end of viewing. Discard replacements can also reset the baseline. Frequent restarts can therefore prevent weekly cleanup, including manual stale candidates. Firefox uses its native last-viewed time together with current-session observations. A proposed local-only timestamp store for Chrome is awaiting a product decision and is not implemented; do not describe this candidate as providing uninterrupted week-long Chrome tracking.
 
 ## Development
 
