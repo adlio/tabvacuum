@@ -14,6 +14,12 @@ const UNIT_MS = { days: DAY_MS, hours: HOUR_MS };
 export const NO_REPLY = "Aaron's Tab Vacuum did not respond.";
 export const UNKNOWN_AUTO_TEXT = 'Automatic cleanup status is unknown. You can still turn it off.';
 
+export function describeUnavailable(enabled) {
+  if (enabled === true) return "Couldn't check which tabs will close. Auto-close is enabled; turn it off above to stop it.";
+  if (enabled === false) return "Couldn't check which tabs are stale. Auto-close is disabled.";
+  return UNKNOWN_AUTO_TEXT;
+}
+
 export const tabCount = n => (n === 1 ? '1 tab' : `${n} tabs`);
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 const isCount = n => Number.isSafeInteger(n) && n >= 0;
@@ -158,12 +164,14 @@ export function describeAuto(state, now, locale) {
   if (auto.error) return { text: auto.error, tone: 'error' };
   if (!autoReady(auto)) return { text: 'Automatic cleanup is not scheduled.', tone: 'error' };
   const at = formatRunTime(auto.nextRunAt, now, locale);
+  const horizon = auto.count > state.preview.count
+    ? ` Includes tabs that reach ${durationText(settings.staleThresholdMs)} before then.` : '';
   if (settings.autoCloseStaleEnabled) {
-    return { text: auto.count ? `Closing ${tabCount(auto.count)} automatically at ${at}.` : `No tabs would close automatically at ${at}.`, tone: '' };
+    return { text: auto.count ? `Closing ${tabCount(auto.count)} automatically at ${at}.${horizon}` : `No tabs would close automatically at ${at}.`, tone: '' };
   }
   return {
     text: auto.count
-      ? `If turned on, ${tabCount(auto.count)} would close automatically at ${at}. Nothing closes before then.`
+      ? `If turned on, ${tabCount(auto.count)} would close automatically at ${at}.${horizon} Nothing closes before then.`
       : `If turned on, the first automatic cleanup is at ${at}. No tabs would close then.`,
     tone: '',
   };
@@ -180,7 +188,7 @@ export function describeManual(state, incognito) {
   const kept = [settings.skipPinned && 'pinned tabs', settings.skipAudible && 'tabs playing audio'].filter(Boolean);
   const notes = [kept.length ? `Close now keeps ${kept.join(' and ')}.` : 'Close now includes pinned tabs and tabs playing audio.'];
   if (preview.unknownCount) notes.push(`${tabCount(preview.unknownCount)} with an unknown last viewed time ${preview.unknownCount === 1 ? 'is' : 'are'} kept.`);
-  notes.push("Automatic cleanup always keeps each window's active tab, pinned tabs, tabs playing audio and the last tab in a window.");
+  notes.push("Both keep each window's active tab and last tab. Automatic cleanup always keeps pinned tabs and tabs playing audio.");
   return { count, protections: notes.join(' ') };
 }
 

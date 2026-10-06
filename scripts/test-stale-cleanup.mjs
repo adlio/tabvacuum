@@ -21,8 +21,12 @@
 //              it. The browser process and machine clocks are untouched.
 //   schedule - the scheduler's own plan is the next whole local hour. To see a
 //              real browser.alarms event reach the product within the run, the
-//              recorded plan and the same alarm are moved ~20 s ahead through
-//              storage and the alarms API. No product hook is used.
+//              recorded plan and the same alarm are moved ~15 s ahead through
+//              storage and the alarms API, with no extension view open (an open
+//              view re-checks the schedule and replaces an off-hour plan). No
+//              product hook is used.
+//   toolbar  - Chromium only: the button is pinned through chrome://extensions
+//              in the throwaway profile, then found on screen by its icon.
 // None of this proves week-long native age tracking; scripts/probe-stale-age.mjs
 // covers the native timestamp semantics.
 import assert from 'node:assert/strict';
@@ -123,6 +127,22 @@ xtst.XTestFakeMotionEvent(d, -1, int(sys.argv[1]), int(sys.argv[2]), 0); x11.XFl
 xtst.XTestFakeButtonEvent(d, b, 1, 0); x11.XFlush(d); time.sleep(0.05)
 xtst.XTestFakeButtonEvent(d, b, 0, 0); x11.XFlush(d)
 x11.XCloseDisplay(d)`;
+// The extension's toolbar button on screen: pixels close to the icon's own
+// saturated colour in the toolbar band, accepted only as one icon-sized cluster.
+const FIND_ICON = `
+import json, sys
+from PIL import Image
+shot = Image.open(sys.argv[1]).convert('RGB'); icon = Image.open(sys.argv[2]).convert('RGBA')
+px = [p[:3] for p in icon.getdata() if p[3] > 200]
+sat = [p for p in px if max(p) - min(p) > 80] or px
+ref = tuple(sum(c[i] for c in sat) / len(sat) for i in range(3))
+W, H = shot.size
+hits = [(x, y) for y in range(30, 110) for x in range(W // 3, W) if sum((a - b) ** 2 for a, b in zip(shot.getpixel((x, y)), ref)) < 3600]
+if len(hits) < 10:
+    print(json.dumps({'found': False, 'hits': len(hits)})); sys.exit(0)
+xs, ys = [h[0] for h in hits], [h[1] for h in hits]
+box = [min(xs), min(ys), max(xs), max(ys)]
+print(json.dumps({'found': box[2] - box[0] <= 32 and box[3] - box[1] <= 32, 'x': round(sum(xs) / len(xs)), 'y': round(sum(ys) / len(ys)), 'hits': len(hits), 'box': box}))`;
 function nativeClick(x, y, button = 1) {
   if (!env.DISPLAY?.startsWith(':')) throw new Error('An isolated local DISPLAY is required');
   execFileSync('python3', ['-c', CLICK, String(Math.round(x)), String(Math.round(y)), String(button)], { env });
@@ -190,16 +210,22 @@ async function firefoxAdapter() {
     await (await AddonManager.getAddonByID(arguments[0])).reload(); return true;`, ADDON);
   await until(() => driver.executeScript('return WebExtensionPolicy.getByID(arguments[0])?.privateBrowsingAllowed === true', ADDON), 'private allowed');
   let evaluatorReady;
+  let viaBackground = false; // see bg() below
   async function openEvaluator() {
     await until(() => driver.executeScript('return !!WebExtensionPolicy.getByID(arguments[0])?.extension', ADDON), 'add-on running');
     await execute(`window.__staleOptions=gBrowser.addTab(arguments[0], {triggeringPrincipal:Services.scriptSecurityManager.getSystemPrincipal(),inBackground:true}); return true;`, `${ext}/options.html`);
     evaluatorReady = until(async () => (await api('return !!api.runtime.id;')) === true, 'extension evaluator', 15000);
     await evaluatorReady;
   }
-  const api = body => execute(`const bc=window.__staleOptions.linkedBrowser.browsingContext;
+  const api = body => (viaBackground ? bg(body) : execute(`const bc=window.__staleOptions.linkedBrowser.browsingContext;
     return bc.currentWindowGlobal.getActor('MarionetteCommands').sendQuery('MarionetteCommandsParent:executeScript',
-      {script:arguments[0],args:[],opts:{}});`, `return (async()=>{const api=browser;${body}})()`);
+      {script:arguments[0],args:[],opts:{}});`, `return (async()=>{const api=browser;${body}})()`));
   await openEvaluator();
+  // The background page itself, for windows where no extension view may be open.
+  const bg = body => execute(`const bc=WebExtensionPolicy.getByID(arguments[1])?.extension?.backgroundContext?.xulBrowser?.browsingContext;
+    if (!bc) throw new Error('background page not running');
+    return bc.currentWindowGlobal.getActor('MarionetteCommands').sendQuery('MarionetteCommandsParent:executeScript',
+      {script:arguments[0],args:[],opts:{}});`, `return (async()=>{const api=browser;${body}})()`, ADDON);
   const VIEWS = `const views=[]; for (const w of Services.wm.getEnumerator('navigator:browser'))
     for (const b of w.document.querySelectorAll('browser.webextension-popup-browser')) if (b.getClientRects().length > 0) views.push(b);`;
   const isOpen = () => driver.executeScript(`${VIEWS} return views.length > 0;`);
@@ -273,6 +299,13 @@ async function firefoxAdapter() {
       await openEvaluator();
     },
     restart: null,
+    // No extension view open (each one re-checks the schedule): evaluate in the background page.
+    async noViews() {
+      await execute('gBrowser.removeTab(window.__staleOptions); window.__staleOptions = null; return true;');
+      viaBackground = true;
+      await until(async () => (await api('return !!api.runtime.id;')) === true, 'background evaluator', 15000);
+    },
+    async restoreViews() { viaBackground = false; await openEvaluator(); },
     async shutdown() { await driver.quit(); },
   };
 }
@@ -399,7 +432,36 @@ async function chromiumAdapter() {
         { extensionId: id, commandName: 'close-stale', keybinding: key }, () => (chrome.runtime.lastError ? reject(new Error(chrome.runtime.lastError.message)) : resolve(true)))),
       [extId, SHORTCUT.chromium]);
     },
-    contextMenu: null,
+    // A native right-click on the toolbar button, found on screen by the
+    // extension's own icon colour, then native keys to the stale item.
+    async contextMenu() {
+      await developerPrivate(id => new Promise((resolve, reject) => chrome.developerPrivate.updateExtensionConfiguration(
+        { extensionId: id, pinnedToToolbar: true }, () => (chrome.runtime.lastError ? reject(new Error(chrome.runtime.lastError.message)) : resolve(true)))), extId);
+      await page.bringToFront();
+      await sleep(800);
+      capture('toolbar-pinned', 'Chromium toolbar with the extension button pinned [fixture: pinned in the throwaway profile]');
+      const file = path.join(directory, 'toolbar-pinned.png');
+      const found = JSON.parse(execFileSync('python3', ['-c', FIND_ICON, file, path.join(extension, 'icons/toolbar-chrome-16.png')], { encoding: 'utf8' }));
+      fixture('chromium toolbar button located from screenshot', found);
+      if (!found.found) throw new Error(`toolbar button not found on screen: ${JSON.stringify(found)}`);
+      nativeClick(found.x, found.y, 3);
+      await sleep(1200);
+      capture('context-menu', 'Native toolbar-button context menu');
+      // Menu order is the registration order in background.js: the disabled
+      // extension-name header, then Close Duplicate Tabs, Merge All Windows,
+      // Sort Tabs, Review Stale Tabs…. Only that item opens the stale controls.
+      for (let i = 0; i < 4; i++) { nativeKeys(env, ['Down']); await sleep(150); }
+      await sleep(300);
+      capture('context-menu-stale-highlighted', 'Native context menu with Review Stale Tabs… highlighted');
+      nativeKeys(env, ['Return']);
+      return found;
+    },
+    // The split-mode incognito worker, evaluated in place.
+    async privateApi(body) {
+      const sw = await incognitoWorker();
+      if (!sw) throw new Error('No incognito worker');
+      return evalIn(sw.targetId, `(async()=>{const api=chrome; ${body}})()`);
+    },
     async openPrivate(url) {
       // In split mode the normal worker cannot see the incognito window it creates.
       await api(`await api.windows.create({incognito:true, url:${JSON.stringify(url)}, left:0, top:0, width:${W}, height:${H}}); return true;`);
@@ -443,6 +505,9 @@ async function chromiumAdapter() {
       sessions.clear();
       normalContextId = (await workerTarget())?.browserContextId ?? normalContextId;
     },
+    // The worker is the evaluator; close any extension page (each one re-checks the schedule).
+    async noViews() { for (const p of context.pages()) if (p.url().startsWith(ext)) await p.close(); },
+    async restoreViews() {},
     async shutdown() { await context.close().catch(() => {}); await rm(profile, { recursive: true, force: true }); },
   };
 }
@@ -542,6 +607,9 @@ try {
 
   await phase('fixtures', async () => {
     check(!(await local(['autoCloseStaleEnabled'])).autoCloseStaleEnabled && !(await alarm()), 'fresh profile: automation off and no stale alarm');
+    const meta = await local(['autoCloseStaleEnabled', 'staleNextRunAt', 'staleThresholdMs']);
+    check(meta.autoCloseStaleEnabled !== true && meta.staleNextRunAt == null && (meta.staleThresholdMs ?? 7 * DAY) === 7 * DAY,
+      'fresh profile metadata: opt-in not set, no recorded run, 7-day default', meta);
     for (const slug of STALE) ids[slug] = await create(slug);
     ids['stale-pinned'] = await create('stale-pinned', { pinned: true });
     ids['audio-stale'] = await create('audio-stale');
@@ -788,25 +856,38 @@ try {
     if (name === 'chromium') await b.context.pages().find(p => p.url().startsWith(`${b.ext}/options.html`))?.close();
   });
 
-  // ---- C1. A real alarm defers while the stale controls are open ------------------
-  await phase('C defer while editing', async () => {
+  // ---- C1. An open menu re-checks the schedule -------------------------------------
+  // Since 7b22590 a plan off the whole local hour counts as a clock or time-zone
+  // change, and every status refresh from an open menu replaces it. So a test
+  // plan ~20 s ahead cannot survive an open menu; that replacement is checked
+  // here. Deferral at a real alarm while editing needs a real whole hour.
+  const OBSERVE_ALARM = `if (!self.__harnessAlarms) { self.__harnessAlarms = [];
+    api.alarms.onAlarm.addListener(a => self.__harnessAlarms.push({ name: a.name, scheduledTime: a.scheduledTime })); }
+    self.__harnessAlarms.length = 0; return true;`;
+  const observedAlarms = () => api('return self.__harnessAlarms ?? null;');
+  await phase('C open menu replaces an off-hour plan', async () => {
     const before = await openUrls();
     await b.open();
     await expandStale();
     await waitState(x => x.panel, 'controls open');
-    await sleep(1500); // editor lease acquired
+    await api(OBSERVE_ALARM);
     const at = Date.now() + 20000;
     await api(`await api.storage.local.set({ staleNextRunAt: ${at} }); await api.alarms.create(${JSON.stringify(STALE_ALARM)}, { when: ${at} }); return true;`);
-    fixture('schedule moved ~20s ahead (controls open)', { at: new Date(at).toISOString() });
-    await until(async () => { const a = await alarm(); return a && a.scheduledTime > at + 1000; }, 'alarm fired and replanned', 60000);
-    await sleep(1500);
-    const after = await openUrls();
-    check(before.every(u => after.includes(u)), 'alarm while controls are open removes nothing (deferred)', { before: before.length, after: after.length });
+    fixture('off-hour plan ~20s ahead (controls open)', { at: new Date(at).toISOString() });
+    await until(async () => { const a = await alarm(); return a && a.scheduledTime !== at; }, 'plan replaced', 15000);
+    const replacedAt = Date.now();
     const stored = await local(['staleNextRunAt']);
     const a = await alarm();
-    check(a.scheduledTime === stored.staleNextRunAt && stored.staleNextRunAt === nextLocalHour(b.nowB()), 'deferred sweep replans the next whole local hour', { a, stored });
-    const s = await waitState(x => x.caption && x.caption.endsWith(`at ${runTime(stored.staleNextRunAt, b.nowB())}.`), 'caption shows revised time', 12000);
-    check(true, 'caption shows the revised next time', s.caption);
+    check(replacedAt < at && a.scheduledTime === stored.staleNextRunAt && stored.staleNextRunAt === nextLocalHour(b.nowB()),
+      'open menu replaces an off-hour plan with the next whole local hour before it is due', { a, stored, msBeforeDue: at - replacedAt });
+    await sleep(Math.max(0, at - Date.now()) + 4000);
+    const seen = await observedAlarms();
+    check(Array.isArray(seen) && seen.length === 0, 'the replaced off-hour alarm never fired', seen);
+    const after = await openUrls();
+    check(before.every(u => after.includes(u)), 'nothing closed while the controls were open', { before: before.length, after: after.length });
+    const s = await waitState(x => x.caption && x.caption.endsWith(`at ${runTime(stored.staleNextRunAt, b.nowB())}.`), 'caption shows the whole-hour time', 12000);
+    check(true, 'caption shows the replanned whole-hour time', s.caption);
+    limit('deferral at a real alarm while editing', 'needs a real whole local hour with the controls open; the open menu replaces any earlier test plan (see above)');
     await closePopup();
     await until(async () => {
       const leases = await api('return (await api.storage.session.get("stale.lease.normal"))["stale.lease.normal"] ?? {};');
@@ -829,6 +910,9 @@ try {
     await until(async () => (await local(['autoCloseStaleEnabled'])).autoCloseStaleEnabled === false, 'disabled saved');
     await until(async () => !(await alarm()), 'alarm cleared');
     check(true, '[fault] disable saved and the alarm cleared despite the status failure');
+    await until(async () => (await local(['staleNextRunAt'])).staleNextRunAt == null, 'recorded run cleared', 5000).catch(() => {});
+    check((await local(['staleNextRunAt'])).staleNextRunAt == null && (await api('return (await api.alarms.getAll()).length;')) === 0,
+      '[fault] disabled metadata: no recorded run and no alarm of any name');
     await closePopup();
   });
 
@@ -870,10 +954,17 @@ try {
     const keep = ['stale-pinned', 'origin', 'lonely', ...(audible ? ['audio-stale'] : [])];
     await sleep(500);
     await until(async () => { const l = await api('return (await api.storage.session.get("stale.lease.normal"))["stale.lease.normal"] ?? {};'); const t = b.nowB(); return Object.values(l).every(x => !(x.exp > t)); }, 'lease released', 25000);
+    // The menu is dismissed and no extension view stays open, as when a user
+    // enables cleanup and walks away; an open view would replace the off-hour plan.
+    await closePopup();
+    await b.noViews();
+    await api(OBSERVE_ALARM);
     const at = Date.now() + 15000;
     await api(`await api.storage.local.set({ staleNextRunAt: ${at} }); await api.alarms.create(${JSON.stringify(STALE_ALARM)}, { when: ${at} }); return true;`);
-    fixture('schedule moved ~15s ahead (menu collapsed)', { at: new Date(at).toISOString(), due });
-    await until(async () => { const a = await alarm(); return a && a.scheduledTime > at + 1000; }, 'alarm fired', 60000);
+    fixture('schedule moved ~15s ahead (no extension view open)', { at: new Date(at).toISOString(), due, evaluator: name === 'firefox' ? 'background page' : 'service worker' });
+    await until(async () => (await observedAlarms())?.length > 0, 'alarm event', 60000);
+    const seen = await observedAlarms();
+    check(seen.length === 1 && seen[0].name === STALE_ALARM && seen[0].scheduledTime === at, 'the browser fired the planned alarm itself (not replaced)', seen);
     await until(async () => { const open = await openUrls(); return due.every(slug => !open.includes(urlOf(slug))); }, 'sweep removed due tabs', 15000).catch(() => {});
     await sleep(2500);
     const open = await openUrls();
@@ -882,6 +973,8 @@ try {
     const stored = await local(['staleNextRunAt']);
     const a = await alarm();
     check(a && a.scheduledTime === stored.staleNextRunAt && stored.staleNextRunAt === nextLocalHour(b.nowB()), 'after the sweep, one alarm at the next whole local hour', { a, stored });
+    await b.restoreViews();
+    await b.open();
     // Tabs still projected for the next run (e.g. the crossing tab) keep a
     // caption, correctly. Closing them by hand leaves an enabled-zero state.
     const projected = await expected('auto', stored.staleNextRunAt);
@@ -917,11 +1010,13 @@ try {
     check(s.expanded === 'false' && !s.panel, 'next toolbar open does not inherit the consumed intent', s);
     await closePopup();
     if (b.contextMenu) {
+      const beforeMenu = await openUrls();
       await b.raiseMain();
       await b.contextMenu();
       await b.attachOpen();
       s = await waitState(x => x.expanded === 'true' && x.panel, 'context menu opens stale controls', 8000);
-      check(s.expanded === 'true' && s.panel, 'native tab context-menu item opens the menu with Stale Tabs expanded', s);
+      check(JSON.stringify((await openUrls()).sort()) === JSON.stringify(beforeMenu.sort()), 'context-menu entry closes and moves nothing');
+      check(s.expanded === 'true' && s.panel, `native ${name === 'firefox' ? 'tab' : 'toolbar-button'} context-menu item opens the menu with Stale Tabs expanded`, s);
       await closePopup();
     } else {
       limit('context-menu entry', 'Chromium registers the item on the toolbar action context menu; no stable native pixel target for the browser-UI action icon in this harness');
@@ -976,6 +1071,55 @@ try {
     check(s.caption === null || !/Closing \d/.test(s.caption), 'private menu shows no normal-window projection', s.caption);
     check(/^Close now: no tabs have gone unviewed/.test(s.count), 'private manual preview is scoped to private tabs', s.count);
     await shot('private-window', 'Private window: automation count unavailable');
+    // Nothing from normal windows may appear in private-scope state.
+    const normalTabs = (await snapshot()).filter(t => !t.incognito && t.url.startsWith(base));
+    const leaks = text => normalTabs.filter(t => text.includes(t.url) || text.includes(t.title)).map(t => t.title);
+    const privateReply = await popup('const w = await browser.windows.getCurrent(); return await browser.runtime.sendMessage({ command: "getStaleState", windowId: w.id });');
+    check(privateReply?.preview && leaks(JSON.stringify(privateReply)).length === 0, 'private status reply names no normal-window tab', { leaks: leaks(JSON.stringify(privateReply ?? {})), count: privateReply?.preview?.count });
+    const sessionAll = await api('return await api.storage.session.get(null);');
+    const privateKeys = Object.fromEntries(Object.entries(sessionAll).filter(([k]) => k.endsWith('.private')));
+    check(leaks(JSON.stringify(privateKeys)).length === 0, 'private session records hold no normal-window URL or title', { keys: Object.keys(privateKeys) });
+    if (name === 'chromium') {
+      const contexts = { normal: await api('return api.extension.inIncognitoContext;'), private: await b.privateApi('return api.extension.inIncognitoContext;') };
+      check(contexts.normal === false && contexts.private === true, 'split mode: separate normal and incognito workers', contexts);
+      const normalWindow = await api('return (await api.windows.getAll()).find(w => !w.incognito)?.id ?? null;');
+      const privateWindow = await b.privateApi('return (await api.windows.getAll()).find(w => w.incognito)?.id ?? null;');
+      // Wrong context: the private menu asks about a normal window.
+      const wrong = await popup(`return await browser.runtime.sendMessage({ command: "getStaleState", windowId: ${normalWindow} });`);
+      check(typeof wrong?.error === 'string' && !wrong.preview && !wrong.settings && leaks(JSON.stringify(wrong)).length === 0,
+        'private worker refuses a normal window id with a plain error and no data', wrong);
+      // Wrong context the other way: a normal extension page asks about the private window.
+      const page = await b.context.newPage();
+      await page.goto(`${b.ext}/options.html`);
+      const reverse = await page.evaluate(id => chrome.runtime.sendMessage({ command: 'getStaleState', windowId: id }), privateWindow);
+      await page.close();
+      check(typeof reverse?.error === 'string' && !reverse.preview && !reverse.settings && !JSON.stringify(reverse).includes('private-only'),
+        'normal worker refuses the private window id with a plain error and no data', reverse);
+      // Each worker writes only its own age records.
+      const ages = async () => { const all = await api('return await api.storage.session.get(["stale.age.normal","stale.age.private"]);');
+        return { normal: Object.keys(all['stale.age.normal']?.tabs ?? {}).sort(), private: all['stale.age.private']?.tabs ?? {} }; };
+      const before = await ages();
+      check(Object.keys(before.private).length > 0, 'incognito worker recorded private tab ages', before);
+      const normals = await snapshot();
+      const other = normals.find(t => !t.incognito && !t.active && t.windowId === normalWindow);
+      const activeTab = normals.find(t => !t.incognito && t.active && t.windowId === normalWindow);
+      if (other && activeTab) {
+        await api(`await api.tabs.update(${other.id}, { active: true }); await new Promise(r => setTimeout(r, 400)); await api.tabs.update(${activeTab.id}, { active: true }); return true;`);
+      }
+      await api(`await api.tabs.create({ url: ${JSON.stringify(urlOf('normal-after-private'))}, active: false, windowId: ${normalWindow} }); return true;`);
+      await sleep(1500);
+      const mid = await ages();
+      // "Untouched" means no record dropped or re-baselined; the incognito worker
+      // itself may still mark its own active tab viewed when focus moves.
+      const kept = (a, z) => Object.keys(a).every(id => z[id] && z[id].s === a[id].s && z[id].v >= a[id].v);
+      check(kept(before.private, mid.private) && Object.keys(mid.private).length === Object.keys(before.private).length,
+        'normal-worker activity leaves private age records in place (no record dropped or re-baselined)', { before: before.private, after: mid.private });
+      await b.privateApi(`await api.tabs.create({ url: ${JSON.stringify(urlOf('private-second'))}, active: true, windowId: ${privateWindow} }); return true;`);
+      await sleep(1500);
+      const end = await ages();
+      check(mid.normal.every(id => end.normal.includes(id)) && Object.keys(end.private).length > Object.keys(mid.private).length,
+        'incognito-worker activity adds private ages and leaves normal ages untouched', { mid, end });
+    }
     await closePopup();
     const keys = Object.keys(await api('return await api.storage.local.get(null);'));
     check(!keys.some(k => /private|age|preview|lease|intent/i.test(k)), 'no private or per-tab metadata in persistent storage', keys);

@@ -127,7 +127,7 @@ describe('describeMain', () => {
 describe('describeAuto and describeManual', () => {
   it('explains the first run before enabling', () => {
     const off = state({ settings: { autoCloseStaleEnabled: false } });
-    expect(describeAuto(off, NOW, 'en-US').text).toBe('If turned on, 6 tabs would close automatically at 10p. Nothing closes before then.');
+    expect(describeAuto(off, NOW, 'en-US').text).toBe('If turned on, 6 tabs would close automatically at 10p. Includes tabs that reach 7 days before then. Nothing closes before then.');
     expect(describeAuto(state({ settings: { autoCloseStaleEnabled: false }, auto: { count: 0 } }), NOW, 'en-US').text).toBe('If turned on, the first automatic cleanup is at 10p. No tabs would close then.');
     expect(describeAuto(state({ auto: { count: 0 } }), NOW, 'en-US').text).toBe('No tabs would close automatically at 10p.');
   });
@@ -135,7 +135,7 @@ describe('describeAuto and describeManual', () => {
   it('keeps manual scope and protections distinct from automatic ones', () => {
     const manual = describeManual(state({ settings: { skipPinned: true, skipAudible: false }, preview: { count: 3, windowCount: 2, unknownCount: 2 } }), false);
     expect(manual.count).toBe('Close now: 3 tabs not viewed for 7 days, across 2 windows.');
-    expect(manual.protections).toBe("Close now keeps pinned tabs. 2 tabs with an unknown last viewed time are kept. Automatic cleanup always keeps each window's active tab, pinned tabs, tabs playing audio and the last tab in a window.");
+    expect(manual.protections).toBe("Close now keeps pinned tabs. 2 tabs with an unknown last viewed time are kept. Both keep each window's active tab and last tab. Automatic cleanup always keeps pinned tabs and tabs playing audio.");
     expect(describeManual(state({ settings: { staleThresholdMs: HOUR }, preview: { count: 1, windowCount: 1 } }), true).count).toBe('Close now: 1 tab not viewed for 1 hour, across 1 private window.');
   });
 
@@ -260,5 +260,19 @@ describe('createEditorLease', () => {
     expect(send.mock.calls.map(([p]) => p)).toEqual([{ open: true }, { open: true, editorId: 'e1' }, { open: true }]);
     lease.close();
     expect(send).toHaveBeenLastCalledWith({ open: false, editorId: 'e2' });
+  });
+});
+
+describe('stale cleanup clarity', () => {
+  it('explains why the next-run count exceeds the close-now count without changing the main caption', () => {
+    const upcoming = state({ preview: { count: 4 }, auto: { count: 6 } });
+    expect(describeAuto(upcoming, NOW, 'en-US').text).toContain('Includes tabs that reach 7 days before then.');
+    expect(describeMain({ state: upcoming, now: NOW, locale: 'en-US' }).caption).toBe('Closing 6 tabs automatically at 10p.');
+    expect(describeAuto(state({ preview: { count: 6 } }), NOW, 'en-US').text).not.toContain('Includes tabs');
+  });
+
+  it('states that manual cleanup also protects active and last tabs', () => {
+    const text = describeManual(state(), false).protections;
+    expect(text).toContain("Both keep each window's active tab and last tab");
   });
 });

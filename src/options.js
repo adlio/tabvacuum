@@ -1,7 +1,7 @@
 // TabVacuum settings page
 import {
-  NO_REPLY, REFRESH_MS, UNKNOWN_AUTO_TEXT, canEnableAuto, convertDuration, createEditorLease, createLatest,
-  createRuleWriter, describeAuto, durationFromMs, isStaleState, parseDuration, scopeState, watchStaleSources,
+  NO_REPLY, REFRESH_MS, canEnableAuto, convertDuration, createEditorLease, createLatest,
+  createRuleWriter, describeAuto, describeUnavailable, durationFromMs, isStaleState, parseDuration, scopeState, watchStaleSources,
 } from './stale-ui.js';
 
 const errorText = err => String(err?.message ?? err ?? 'Unknown error');
@@ -81,8 +81,8 @@ export function startOptions({ document, window, browser, locale }) {
     const allowed = on === false ? canEnable() : canDisable();
     if (allowed) stale.auto.removeAttribute('aria-disabled');
     else stale.auto.setAttribute('aria-disabled', 'true');
-    const unknown = on == null && loadError ? ` ${UNKNOWN_AUTO_TEXT}` : '';
-    const line = loadError ? { text: `Stale-tab status unavailable: ${loadError}${unknown}`, tone: 'error' }
+    const line = rule.busy ? { text: 'Saving…', tone: 'muted' }
+      : loadError ? { text: `${describeUnavailable(on)} ${loadError}`, tone: 'error' }
       : state && !current ? { text: 'Updating…', tone: 'muted' }
       : describeAuto(state, Date.now(), locale);
     if (stale.detail.textContent !== line.text) stale.detail.textContent = line.text;

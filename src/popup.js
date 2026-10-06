@@ -1,8 +1,8 @@
 // TabVacuum popup UI
 import { renderShortcuts } from './shortcuts.js';
 import {
-  NO_REPLY, REFRESH_MS, UNKNOWN_AUTO_TEXT, canEnableAuto, convertDuration, createEditorLease, createLatest,
-  createRuleWriter, describeAuto, describeMain, describeManual, domainOf, durationFromMs, formatViewedAgo,
+  NO_REPLY, REFRESH_MS, canEnableAuto, convertDuration, createEditorLease, createLatest,
+  createRuleWriter, describeAuto, describeMain, describeManual, describeUnavailable, domainOf, durationFromMs, formatViewedAgo,
   isStaleState, parseDuration, scopeState, tabCount, watchStaleSources,
 } from './stale-ui.js';
 
@@ -42,7 +42,7 @@ export function startPopup({ document, window, browser, locale }) {
     $('btn-search'), $('btn-merge'), $('btn-sort'), $('btn-dupes'), $('btn-stale'), $('btn-blank'),
     ...sortOptions.querySelectorAll('button'), $('stale-review'), $('stale-close'),
   ];
-  const status = { box: $('status'), spinner: $('status-spinner'), title: $('status-title'), detail: $('status-detail'), close: $('status-close') };
+  const status = { box: $('status'), spinner: $('status-spinner'), title: $('status-title'), detail: $('status-detail'), close: $('status-close'), review: $('status-review') };
   let pending = false;
   let dismissed = false;
   let teardown = () => {};
@@ -50,7 +50,7 @@ export function startPopup({ document, window, browser, locale }) {
   // A dismissed menu is gone for good: late replies must not touch it or reopen anything.
   window.addEventListener('pagehide', () => { dismissed = true; teardown(); });
 
-  function render({ tone, title, detail = '', busy = false, closable = false }) {
+  function render({ tone, title, detail = '', busy = false, closable = false, reviewable = false }) {
     status.box.dataset.tone = tone;
     status.box.classList.add('visible');
     status.spinner.hidden = !busy;
@@ -58,6 +58,7 @@ export function startPopup({ document, window, browser, locale }) {
     status.detail.textContent = detail;
     status.detail.hidden = !detail;
     status.close.hidden = !closable;
+    status.review.hidden = !reviewable;
   }
 
   function clearStatus() {
@@ -68,6 +69,7 @@ export function startPopup({ document, window, browser, locale }) {
     status.detail.textContent = '';
     status.detail.hidden = true;
     status.close.hidden = true;
+    status.review.hidden = true;
   }
 
   // aria-disabled keeps focus on the pressed control, so keyboard users are not dropped to <body>.
@@ -82,9 +84,13 @@ export function startPopup({ document, window, browser, locale }) {
     renderStale();
   }
 
-  function finishWithError(trigger, text) {
+  function finishWithError(trigger, text, staleClose = false) {
     setBusy(false);
-    render({ tone: 'error', title: text, detail: 'Try again, or close this menu.', closable: true });
+    render({
+      tone: 'error', title: text,
+      detail: staleClose ? 'The close result could not be confirmed. Review the remaining tabs before closing again.' : 'Try again, or close this menu.',
+      closable: true, reviewable: staleClose,
+    });
     if (!document.activeElement || document.activeElement === document.body) trigger?.focus();
   }
 
@@ -109,7 +115,7 @@ export function startPopup({ document, window, browser, locale }) {
       result = await browser.runtime.sendMessage({ command, ...params });
     } catch (error) {
       if (dismissed) return undefined;
-      finishWithError(trigger, `${failed}: ${errorText(error)}`);
+      finishWithError(trigger, `${failed}: ${errorText(error)}`, command === 'closeStalePreview');
       return 'error';
     }
     if (dismissed) return undefined;
@@ -118,16 +124,16 @@ export function startPopup({ document, window, browser, locale }) {
       // A stale close cut short still reports what it actually closed.
       if (command === 'closeStalePreview' && Number.isSafeInteger(result.closed) && typeof result.message === 'string' && result.message.trim()) {
         setBusy(false);
-        render({ tone: 'error', title: result.message, detail: String(result.error), closable: true });
+        render({ tone: 'error', title: result.message, detail: String(result.error), closable: true, reviewable: true });
         if (!document.activeElement || document.activeElement === document.body) trigger?.focus();
         return 'error';
       }
-      finishWithError(trigger, command === 'launchSearch' ? String(result.error) : `${failed}: ${result.error}`);
+      finishWithError(trigger, command === 'launchSearch' ? String(result.error) : `${failed}: ${result.error}`, command === 'closeStalePreview');
       return 'error';
     }
     const done = command === 'launchSearch' ? result && typeof result === 'object' : typeof result?.message === 'string' && result.message.trim();
     if (!done) {
-      finishWithError(trigger, `${failed}: ${NO_REPLY}`);
+      finishWithError(trigger, `${failed}: ${NO_REPLY}`, command === 'closeStalePreview');
       return 'error';
     }
     if (result.notificationError) {
@@ -293,7 +299,8 @@ export function startPopup({ document, window, browser, locale }) {
     ui.auto.checked = on === true;
     setGate(ui.auto, on === false ? canEnable() : canDisable());
 
-    const autoLine = loadError ? { text: on == null ? UNKNOWN_AUTO_TEXT : '', tone: '' } : describeAuto(shown, now, locale);
+    const autoLine = rule.busy ? { text: 'Saving…', tone: 'muted' }
+      : loadError ? { text: describeUnavailable(on), tone: 'error' } : describeAuto(shown, now, locale);
     setText(ui.autoDetail, autoLine.text);
     if (autoLine.tone) ui.autoDetail.dataset.tone = autoLine.tone;
     else delete ui.autoDetail.dataset.tone;
@@ -424,6 +431,25 @@ export function startPopup({ document, window, browser, locale }) {
   ui.button.addEventListener('click', () => {
     if (pending) return;
     setStaleOpen(ui.panel.hidden);
+  });
+
+  status.review.addEventListener('click', async () => {
+    if (pending || dismissed || closing || rule.busy) return;
+    setStaleOpen(true);
+    setReviewOpen(false);
+    current = false;
+    latest.invalidate();
+    renderStale();
+    await refresh();
+    if (dismissed) return;
+    if (current && !loadError) {
+      setReviewOpen(true);
+      ui.list.scrollIntoView?.({ block: 'nearest' });
+      ui.list.focus();
+    } else {
+      ui.button.scrollIntoView?.({ block: 'nearest' });
+      ui.button.focus();
+    }
   });
 
   ui.review.addEventListener('click', () => {

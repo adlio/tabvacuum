@@ -113,3 +113,5 @@ main[aria-busy="true"] button[aria-disabled="true"]:hover { background: transpar
 main[aria-busy="true"] .search-action[aria-disabled="true"]:hover { background: var(--accent-soft); }
 body:not(.ready) { visibility: hidden; }
 @media (forced-colors: active) { button:focus-visible { outline-color: Highlight; } }
+
+.status-actions { display: flex; flex-direction: column; align-items: stretch; align-self: center; gap: 5px; flex: none; max-width: 126px; }

@@ -85,7 +85,7 @@ describe('settings: stale tabs', () => {
     expect(ui.$('stale-value').value).toBe('3');
     expect(ui.$('stale-unit').value).toBe('days');
     expect(ui.$('stale-auto').checked).toBe(false);
-    expect(ui.$('stale-auto-detail').textContent).toBe('If turned on, 2 tabs would close automatically at 10p. Nothing closes before then.');
+    expect(ui.$('stale-auto-detail').textContent).toBe('If turned on, 2 tabs would close automatically at 10p. Includes tabs that reach 3 days before then. Nothing closes before then.');
     expect(html).toContain('Tabs are closed, not archived. Unsaved changes may be lost.');
     expect(html).toContain('Close tabs not viewed for');
     expect(html).toContain('Automatically close stale tabs');

@@ -743,7 +743,7 @@ describe('popup stale tabs: automation checkbox', () => {
     });
     await settle();
     ui.press(ui.$('btn-stale'));
-    expect(ui.stale().detail).toBe('If turned on, 6 tabs would close automatically at 10p. Nothing closes before then.');
+    expect(ui.stale().detail).toBe('If turned on, 6 tabs would close automatically at 10p. Includes tabs that reach 7 days before then. Nothing closes before then.');
     expect(html).toMatch(/id="stale-warning"[^>]*>Tabs are closed, not archived\. Unsaved changes may be lost\.</);
     expect(ui.$('stale-auto').getAttribute('aria-describedby')).toContain('stale-warning');
     ui.toggleAuto(true);
@@ -894,7 +894,7 @@ describe('popup stale tabs: manual close', () => {
     const ui = staleSetup({ getStaleState: async () => staleState({ settings: { skipPinned: false, skipAudible: false }, preview: { count: 2, unknownCount: 1 } }) });
     await settle();
     expect(ui.$('stale-protect').textContent).toBe(
-      "Close now includes pinned tabs and tabs playing audio. 1 tab with an unknown last viewed time is kept. Automatic cleanup always keeps each window's active tab, pinned tabs, tabs playing audio and the last tab in a window.",
+      "Close now includes pinned tabs and tabs playing audio. 1 tab with an unknown last viewed time is kept. Both keep each window's active tab and last tab. Automatic cleanup always keeps pinned tabs and tabs playing audio.",
     );
   });
 });
@@ -1085,5 +1085,41 @@ describe('popup stale tabs: review fixes', () => {
     expect(css).toMatch(/#status\.visible\s*\{[^}]*position:\s*sticky[^}]*bottom:\s*0/);
     expect(html).toMatch(/id="stale-review-list"[^>]*tabindex="0"/);
     expect(html).not.toMatch(/id="stale-value"[^>]*\smax=/);
+  });
+});
+
+describe('stale close recovery', () => {
+  it('offers read-only review after a lost reply, never claims zero closures or repeats the close', async () => {
+    let count = 4;
+    const ui = staleSetup({
+      getStaleState: async () => staleState({ preview: { id: `remaining-${count}`, count } }),
+      closeStalePreview: async () => { count = 2; throw new Error('Reply lost'); },
+    });
+    await settle();
+    ui.press(ui.$('btn-stale'));
+    ui.press(ui.$('stale-close'));
+    await settle();
+    expect(ui.status().detail).toContain('could not be confirmed');
+    expect(ui.status().detail).not.toContain('No tabs were closed');
+    expect(ui.$('status-review').hidden).toBe(false);
+    const reads = ui.sent('getStaleState').length;
+    ui.press(ui.$('status-review'));
+    await settle();
+    expect(ui.sent('getStaleState').length).toBeGreaterThan(reads);
+    expect(ui.sent('closeStalePreview')).toHaveLength(1);
+    expect(ui.$('stale-panel').hidden).toBe(false);
+    expect(ui.$('stale-review-list').hidden).toBe(false);
+    expect(ui.document.activeElement).toBe(ui.$('stale-review-list'));
+    expect(ui.window.close).not.toHaveBeenCalled();
+  });
+
+  it('explains that a saved enabled preference still needs turning off when preview loading fails', async () => {
+    const ui = staleSetup({
+      getSettings: async () => ({ staleThresholdMs: 7 * DAY, autoCloseStaleEnabled: true }),
+      getStaleState: async () => { throw new Error('Unavailable'); },
+    });
+    await settle();
+    expect(ui.$('stale-auto-detail').textContent).toContain('Auto-close is enabled');
+    expect(ui.$('stale-auto-detail').textContent).toContain('turn it off');
   });
 });
