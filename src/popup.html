@@ -52,10 +52,35 @@
           <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="3" y="7" width="13" height="14" rx="2"/><path d="M8 4V3h13v13h-2M7 12l5 5m0-5-5 5"/></svg>
           <span>Close duplicates</span><span class="shortcut" data-shortcut="close-duplicates" role="img" hidden></span>
         </button></li>
-        <li><button id="btn-stale">
+        <li><button id="btn-stale" aria-expanded="false" aria-controls="stale-panel">
           <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
-          <span>Close stale tabs</span><span class="shortcut" data-shortcut="close-stale" role="img" hidden></span>
-        </button></li>
+          <span class="stale-copy"><span id="stale-title" class="stale-title">Stale Tabs</span><span id="stale-caption" class="stale-caption" hidden></span></span>
+          <span class="shortcut" data-shortcut="close-stale" role="img" hidden></span>
+          <svg class="chevron" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="m6 4 4 4-4 4"/></svg>
+        </button>
+          <div id="stale-panel" class="stale-panel" hidden>
+            <div class="stale-rule">
+              <label for="stale-value">Close tabs not viewed for</label>
+              <input id="stale-value" type="number" min="1" step="1" inputmode="numeric" required aria-describedby="stale-rule-error">
+              <select id="stale-unit" aria-label="Time unit">
+                <option value="days">days</option>
+                <option value="hours">hours</option>
+              </select>
+            </div>
+            <p id="stale-rule-error" class="stale-error" hidden></p>
+            <label class="stale-check"><input id="stale-auto" type="checkbox" aria-describedby="stale-auto-detail stale-warning"><span>Automatically close stale tabs</span></label>
+            <p id="stale-auto-detail" class="stale-note"></p>
+            <p id="stale-warning" class="stale-note">Tabs are closed, not archived. Unsaved changes may be lost.</p>
+            <p id="stale-count" class="stale-count"></p>
+            <p id="stale-protect" class="stale-note"></p>
+            <div class="stale-buttons">
+              <button id="stale-review" type="button" aria-expanded="false" aria-controls="stale-review-list">Review tabs</button>
+              <button id="stale-close" type="button" class="stale-primary">Close tabs now</button>
+            </div>
+            <ul id="stale-review-list" class="stale-review" aria-label="Stale tabs" tabindex="0" hidden></ul>
+            <p id="stale-message" class="stale-error" aria-live="polite"></p>
+          </div>
+        </li>
         <li><button id="btn-blank">
           <svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 8h18m-12 6h6"/></svg>
           <span>Close blank tabs</span><span class="shortcut" data-shortcut="close-blank" role="img" hidden></span>

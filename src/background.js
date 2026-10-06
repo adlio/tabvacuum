@@ -1,9 +1,10 @@
 // background.js — Wiring layer for TabVacuum
 import './polyfill.js';
-import { findDuplicates, planMerge, planSort, findStaleTabs, findBlankTabs, computeFrecency } from './core.js';
+import { findDuplicates, planMerge, planSort, findBlankTabs, computeFrecency } from './core.js';
 
 import { createSearchService } from './search-service.js';
 import { createSearchLauncher } from './search-launcher.js';
+import { createStaleService, OPEN_FAILED } from './stale-service.js';
 
 const search = createSearchService(browser);
 search.installFocusTracking();
@@ -21,6 +22,7 @@ function openSearch(tab) {
 const DEFAULTS = {
   searchScope: 'all',
   staleThresholdMs: 7 * 24 * 60 * 60 * 1000,
+  autoCloseStaleEnabled: false,
   ignoreFragments: false,
   ignoreQueryParams: false,
   skipPinned: true,
@@ -38,9 +40,10 @@ async function getSettings() {
   return { ...DEFAULTS, ...stored };
 }
 
-async function saveSettings(settings) {
-  await browser.storage.local.set(settings);
-  return { message: 'Settings saved' };
+// Every settings write, Settings page included, goes through the stale
+// service's gate, which validates stale-rule fields and reconciles the schedule.
+function saveSettings(settings, windowId) {
+  return stale.saveSettings(settings, { windowId, generalKeys: Object.keys(DEFAULTS) });
 }
 
 async function notify(message) {
@@ -53,6 +56,18 @@ async function notify(message) {
 }
 
 const errorText = err => String(err?.message ?? err ?? 'Unknown error');
+
+const stale = createStaleService(browser, { notify });
+stale.install();
+
+// Keyboard and context-menu entry: open the toolbar menu with Stale Tabs
+// expanded. Called synchronously from the listener so the user gesture is
+// still valid. Never closes tabs or opens another window.
+function openStaleControls(tab) {
+  return stale.openControls(tab).then(result => {
+    if (result.error) return notify(OPEN_FAILED).catch(() => {});
+  });
+}
 
 // Runs a tab action and reports its outcome in exactly one system
 // notification, whichever surface started it (R6.4). Never rejects: an action
@@ -155,7 +170,6 @@ async function sortTabs(criteria, direction) {
   return { message };
 }
 
-const closeStaleTabs = () => closeMatchingTabs(findStaleTabs);
 const closeBlankTabs = () => closeMatchingTabs(findBlankTabs);
 
 // Message handler for popup and options pages
@@ -184,11 +198,15 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
     launchSearch: () => openSearch(),
     closeDuplicates: () => runAction(closeDuplicates),
     mergeWindows: () => runAction(mergeWindows),
-    closeStaleTabs: () => runAction(closeStaleTabs),
     closeBlankTabs: () => runAction(closeBlankTabs),
     getSettings,
     sortTabs: () => runAction(() => sortTabs(message.criteria, message.direction)),
-    saveSettings: () => saveSettings(message.settings)
+    saveSettings: () => saveSettings(message.settings, message.windowId),
+    getStaleState: () => stale.getState(message.windowId),
+    setStaleRule: () => stale.saveSettings(message.settings, { windowId: message.windowId, staleOnly: true }),
+    closeStalePreview: () => runAction(() => stale.closePreview(message.windowId, message.previewId)),
+    staleEditor: () => stale.editor(message.windowId, message.editorId, message.open),
+    consumeStaleIntent: () => stale.consumeIntent(message.windowId),
   };
 
   if (!Object.hasOwn(handlers, message?.command)) return;
@@ -217,12 +235,16 @@ browser.runtime.onInstalled.addListener(() => {
   menus.create({ id: 'tv-sort-last', parentId: 'tv-sort', title: 'by Last Accessed', contexts: tabContext });
   menus.create({ id: 'tv-sort-visit', parentId: 'tv-sort', title: 'by Visit Count', contexts: tabContext });
   menus.create({ id: 'tv-sort-frecency', parentId: 'tv-sort', title: 'by Frecency', contexts: tabContext });
-  menus.create({ id: 'tv-stale', title: 'Close Stale Tabs', contexts: tabContext });
+  menus.create({ id: 'tv-stale', title: 'Review Stale Tabs…', contexts: tabContext });
   menus.create({ id: 'tv-blank', title: 'Close Blank Tabs', contexts: tabContext });
 });
 
 // Handle context menu clicks
-browser.contextMenus.onClicked.addListener(async (info) => {
+browser.contextMenus.onClicked.addListener(async (info, tab) => {
+  if (info.menuItemId === 'tv-stale') {
+    await openStaleControls(tab);
+    return;
+  }
   const menuActions = {
     'tv-dupes': closeDuplicates,
     'tv-merge': mergeWindows,
@@ -231,7 +253,6 @@ browser.contextMenus.onClicked.addListener(async (info) => {
     'tv-sort-last': () => sortTabs('lastAccessed', 'desc'),
     'tv-sort-visit': () => sortTabs('visitCount', 'desc'),
     'tv-sort-frecency': () => sortTabs('frecency', 'desc'),
-    'tv-stale': closeStaleTabs,
     'tv-blank': closeBlankTabs
   };
 
@@ -241,6 +262,10 @@ browser.contextMenus.onClicked.addListener(async (info) => {
 
 // Handle keyboard shortcuts
 browser.commands.onCommand.addListener(async (command, tab) => {
+  if (command === 'close-stale') {
+    await openStaleControls(tab);
+    return;
+  }
   if (command === 'search-tabs') {
     // The command grants activeTab for the tab that was active when pressed.
     await openSearch(tab);
@@ -250,7 +275,6 @@ browser.commands.onCommand.addListener(async (command, tab) => {
     'close-duplicates': closeDuplicates,
     'merge-windows': mergeWindows,
     'sort-tabs': sortTabs,
-    'close-stale': closeStaleTabs,
     'close-blank': closeBlankTabs
   };
 

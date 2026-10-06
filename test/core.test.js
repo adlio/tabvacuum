@@ -5,7 +5,6 @@ import {
   findDuplicates,
   planMerge,
   planSort,
-  findStaleTabs,
   findBlankTabs,
   isBlankTab,
   parseCustomMatchers,
@@ -485,103 +484,10 @@ describe('computeFrecency', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// findStaleTabs
-// ---------------------------------------------------------------------------
-describe('findStaleTabs', () => {
-  const ONE_DAY = 24 * 60 * 60 * 1000;
-  const SEVEN_DAYS = 7 * ONE_DAY;
-
-  const defaultSettings = {
-    staleThresholdMs: SEVEN_DAYS,
-    skipPinned: true,
-    skipAudible: true,
-  };
-
-  it('closes stale tabs', () => {
-    const now = Date.now();
-    const tabs = [
-      { id: 1, url: 'https://a.com', lastAccessed: now - SEVEN_DAYS - 1000, active: false, pinned: false, audible: false, windowId: 1 },
-      { id: 2, url: 'https://b.com', lastAccessed: now - 1000, active: false, pinned: false, audible: false, windowId: 1 },
-    ];
-    const result = findStaleTabs(tabs, defaultSettings);
-    expect(result.toClose).toEqual([1]);
-    expect(result.message).toContain('Closed 1 tab');
-    expect(result.message).toContain('7 days');
-  });
-
-  it('skips active tab', () => {
-    const now = Date.now();
-    const tabs = [
-      { id: 1, url: 'https://a.com', lastAccessed: now - SEVEN_DAYS - 1000, active: true, pinned: false, audible: false, windowId: 1 },
-      { id: 2, url: 'https://b.com', lastAccessed: now - 1000, active: false, pinned: false, audible: false, windowId: 1 },
-    ];
-    const result = findStaleTabs(tabs, defaultSettings);
-    expect(result.toClose).toEqual([]);
-  });
-
-  it('skips pinned tab when skipPinned is true', () => {
-    const now = Date.now();
-    const tabs = [
-      { id: 1, url: 'https://a.com', lastAccessed: now - SEVEN_DAYS - 1000, active: false, pinned: true, audible: false, windowId: 1 },
-      { id: 2, url: 'https://b.com', lastAccessed: now - 1000, active: false, pinned: false, audible: false, windowId: 1 },
-    ];
-    const result = findStaleTabs(tabs, defaultSettings);
-    expect(result.toClose).toEqual([]);
-  });
-
-  it('skips audible tab when skipAudible is true', () => {
-    const now = Date.now();
-    const tabs = [
-      { id: 1, url: 'https://a.com', lastAccessed: now - SEVEN_DAYS - 1000, active: false, pinned: false, audible: true, windowId: 1 },
-      { id: 2, url: 'https://b.com', lastAccessed: now - 1000, active: false, pinned: false, audible: false, windowId: 1 },
-    ];
-    const result = findStaleTabs(tabs, defaultSettings);
-    expect(result.toClose).toEqual([]);
-  });
-
-  it('will not close the last tab in a window', () => {
-    const now = Date.now();
-    const tabs = [
-      { id: 1, url: 'https://a.com', lastAccessed: now - SEVEN_DAYS - 1000, active: false, pinned: false, audible: false, windowId: 1 },
-    ];
-    const result = findStaleTabs(tabs, defaultSettings);
-    expect(result.toClose).toEqual([]);
-  });
-
-  it('returns empty when no stale tabs', () => {
-    const now = Date.now();
-    const tabs = [
-      { id: 1, url: 'https://a.com', lastAccessed: now - 1000, active: false, pinned: false, audible: false, windowId: 1 },
-      { id: 2, url: 'https://b.com', lastAccessed: now - 2000, active: false, pinned: false, audible: false, windowId: 1 },
-    ];
-    const result = findStaleTabs(tabs, defaultSettings);
-    expect(result.toClose).toEqual([]);
-    expect(result.message).toBe('No stale tabs found');
-  });
-
-  it('tab exactly at threshold boundary is stale (>= threshold)', () => {
-    const now = Date.now();
-    const tabs = [
-      { id: 1, url: 'https://a.com', lastAccessed: now - SEVEN_DAYS, active: false, pinned: false, audible: false, windowId: 1 },
-      { id: 2, url: 'https://b.com', lastAccessed: now - 1000, active: false, pinned: false, audible: false, windowId: 1 },
-    ];
-    const result = findStaleTabs(tabs, defaultSettings);
-    // now - lastAccessed = SEVEN_DAYS, which is NOT < SEVEN_DAYS, so it doesn't skip
-    // The tab is considered stale at exactly the threshold
-    expect(result.toClose).toEqual([1]);
-  });
-
-  it('tab just under threshold is not stale', () => {
-    const now = Date.now();
-    const tabs = [
-      { id: 1, url: 'https://a.com', lastAccessed: now - SEVEN_DAYS + 1, active: false, pinned: false, audible: false, windowId: 1 },
-      { id: 2, url: 'https://b.com', lastAccessed: now - 1000, active: false, pinned: false, audible: false, windowId: 1 },
-    ];
-    const result = findStaleTabs(tabs, defaultSettings);
-    // now - lastAccessed = SEVEN_DAYS - 1, which IS < SEVEN_DAYS, so it skips
-    expect(result.toClose).toEqual([]);
-  });
+// Stale-tab planning moved to stale-core.js (see stale-core.test.js), which
+// never treats a missing last-access time as old age.
+it('no longer exports the zero-fallback stale planner', async () => {
+  expect(await import('../src/core.js')).not.toHaveProperty('findStaleTabs');
 });
 
 // ---------------------------------------------------------------------------

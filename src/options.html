@@ -18,16 +18,26 @@
       </select>
       <p>Search titles and URLs as you type. Empty searches show the 10 most recent tabs, with the current tab last.</p>
     </fieldset>
-    <fieldset>
-      <legend>Stale Tab Threshold</legend>
-      <label>
-        Close tabs not accessed in
-        <input type="number" id="stale-value" min="1" value="7">
-        <select id="stale-unit">
+    <fieldset id="stale-fieldset">
+      <legend>Stale Tabs</legend>
+      <div class="stale-rule">
+        <label for="stale-value">Close tabs not viewed for</label>
+        <input type="number" id="stale-value" min="1" step="1" inputmode="numeric" required aria-describedby="stale-error">
+        <select id="stale-unit" aria-label="Time unit">
           <option value="days" selected>days</option>
           <option value="hours">hours</option>
         </select>
+      </div>
+      <p id="stale-error" class="field-error" hidden></p>
+      <label>
+        <input type="checkbox" id="stale-auto" aria-describedby="stale-auto-detail stale-warning">
+        Automatically close stale tabs
       </label>
+      <p id="stale-auto-detail" class="help"></p>
+      <p id="stale-warning" class="help">Tabs are closed, not archived. Unsaved changes may be lost.</p>
+      <p class="help">Automatic cleanup checks once an hour, in normal windows only. Turning it on closes nothing right away: the first check is at the next hour. It always keeps each window's active tab, pinned tabs, tabs playing audio, the last tab in a window, and tabs whose last viewed time is unknown.</p>
+      <p class="help">After a browser restart, cleanup waits for the next hourly check and does not catch up. After your device sleeps, at most one check runs when it wakes; missed hours are not replayed. To recover a closed tab, use your browser's Reopen Closed Tab.</p>
+      <p id="stale-message" class="field-error" aria-live="polite"></p>
     </fieldset>
 
     <fieldset>
@@ -85,7 +95,7 @@
     <p id="content-access-message" role="status" aria-live="polite"></p>
   </section>
   <script src="browser-polyfill.js"></script>
-  <script src="options.js"></script>
+  <script type="module" src="options.js"></script>
   <script type="module" src="content-permissions.js"></script>
 </body>
 </html>

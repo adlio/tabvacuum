@@ -70,8 +70,8 @@ for (const [browser, manifest] of manifests) {
       expect(listing).toContain(manifest.description);
     });
 
-    it('keeps released permissions, IDs and commands unchanged from 0.5.2', () => {
-      expect(manifest.permissions).toEqual(['tabs', 'history', 'notifications', 'storage', 'contextMenus', 'activeTab', 'scripting']);
+    it('adds only alarms while preserving released IDs, host access and shortcut bindings', () => {
+      expect(manifest.permissions).toEqual(['tabs', 'history', 'notifications', 'storage', 'contextMenus', 'activeTab', 'scripting', 'alarms']);
       const hosts = browser === 'firefox' ? manifest.optional_permissions : manifest.optional_host_permissions;
       expect(hosts).toEqual(['http://*/*', 'https://*/*']);
       expect(manifest.host_permissions).toBeUndefined();
@@ -84,7 +84,7 @@ for (const [browser, manifest] of manifests) {
         'merge-windows': { suggested_key: { default: 'Alt+Shift+M' }, description: 'Merge all windows' },
         'sort-tabs': { suggested_key: { default: 'Alt+Shift+S' }, description: 'Sort tabs' },
         'search-tabs': { suggested_key: { default: 'Ctrl+Shift+Period', mac: 'Command+Shift+Period' }, description: 'Search tabs' },
-        'close-stale': { description: 'Close stale tabs' },
+        'close-stale': { description: 'Review stale tabs' },
         'close-blank': { description: 'Close blank tabs' },
       });
       expect(manifest.version).toBeUndefined(); // Build stamps the package version.
@@ -136,14 +136,14 @@ describe('Little Vacuum artwork', () => {
   });
 });
 
-describe('0.5.3 brand surfaces', () => {
+describe('0.6.0 brand surfaces', () => {
   it('keeps the package identity and aligns package and lockfile root versions', () => {
     const pkg = json('package.json');
     const lock = json('package-lock.json');
     expect(pkg.name).toBe('tabvacuum');
-    expect(pkg.version).toBe('0.5.3');
-    expect([lock.name, lock.version]).toEqual(['tabvacuum', '0.5.3']);
-    expect([lock.packages[''].name, lock.packages[''].version]).toEqual(['tabvacuum', '0.5.3']);
+    expect(pkg.version).toBe('0.6.0');
+    expect([lock.name, lock.version]).toEqual(['tabvacuum', '0.6.0']);
+    expect([lock.packages[''].name, lock.packages[''].version]).toEqual(['tabvacuum', '0.6.0']);
     expect(lock.packages[''].devDependencies).toEqual(pkg.devDependencies);
   });
 

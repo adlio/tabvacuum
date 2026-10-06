@@ -1,6 +1,6 @@
 {
   "name": "tabvacuum",
-  "version": "0.5.3",
+  "version": "0.6.0",
   "private": true,
   "type": "module",
   "description": "Find tabs fast, sort them your way, and clear duplicates, stale tabs and blank pages. Built for keyboard control.",

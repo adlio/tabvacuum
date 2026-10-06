@@ -47,3 +47,39 @@ select {
   padding: var(--space-md) var(--space-lg);
   font-size: var(--font-size-base);
 }
+
+.stale-rule {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-sm);
+  margin: var(--space-md) 0;
+}
+
+.stale-rule label {
+  display: inline;
+  margin: 0;
+}
+
+input[aria-invalid="true"] {
+  outline: 2px solid var(--danger, #b91c1c);
+}
+
+.help {
+  margin: var(--space-md) 0;
+  color: var(--text-secondary);
+  font-size: var(--font-size-base);
+}
+
+.field-error,
+.help[data-tone="error"] {
+  color: var(--danger, #b91c1c);
+}
+
+.field-error:empty {
+  display: none;
+}
+
+input[aria-disabled="true"] {
+  opacity: 0.55;
+}

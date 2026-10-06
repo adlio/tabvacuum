@@ -36,9 +36,47 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .action-group + .action-group { margin-top: 7px; }
 h2 { padding: 4px 10px 5px; font-size: 12px; font-weight: 600; color: var(--muted-foreground); letter-spacing: 0.015em; }
 .chevron { flex: none; width: 14px; height: 14px; color: var(--muted-foreground); transition: transform 0.12s; }
-#btn-sort[aria-expanded="true"] .chevron { transform: rotate(90deg); }
+#btn-sort[aria-expanded="true"] .chevron, #btn-stale[aria-expanded="true"] .chevron { transform: rotate(90deg); }
 #btn-sort > span:nth-child(2) { margin-right: auto; }
-.sort-options { margin: 3px 10px 6px 18px; padding-left: 10px; border-left: 1px solid var(--border); }
+/* Stale Tabs row: the enabled title and caption wrap rather than truncate. */
+.stale-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; margin-right: auto; }
+.stale-caption { color: var(--muted-foreground); font-size: 11px; font-style: italic; line-height: 16px; }
+.stale-caption[data-tone="error"], .stale-note[data-tone="error"] { color: var(--danger); font-style: normal; }
+.sort-options, .stale-panel { margin: 3px 10px 6px 18px; padding-left: 10px; border-left: 1px solid var(--border); }
+.stale-panel { display: flex; flex-direction: column; gap: 7px; padding-top: 4px; padding-bottom: 4px; font-size: 12px; line-height: 17px; }
+.stale-panel[hidden] { display: none; }
+.stale-rule { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.stale-panel input[type="number"], .stale-panel select {
+  min-height: 28px; padding: 3px 6px;
+  border: 1px solid var(--border); border-radius: 6px;
+  background: var(--background); color: var(--foreground); font: inherit;
+}
+.stale-panel input[type="number"] { width: 64px; }
+.stale-panel input[aria-invalid="true"] { border-color: var(--danger); }
+.stale-panel input:focus-visible, .stale-panel select:focus-visible { outline: 2px solid var(--accent); outline-offset: 0; }
+.stale-check { display: flex; align-items: center; gap: 7px; }
+.stale-check input { width: 15px; height: 15px; margin: 0; accent-color: var(--accent); }
+.stale-note { color: var(--muted-foreground); }
+.stale-error { color: var(--danger); }
+.stale-error:empty { display: none; }
+.stale-buttons { display: flex; gap: 8px; }
+.stale-buttons button {
+  min-height: 30px; padding: 5px 10px;
+  border: 1px solid var(--border); border-radius: 6px;
+  background: var(--background); color: var(--foreground); font: inherit; font-size: 12px;
+}
+.stale-buttons button:hover { background: var(--hover); }
+.stale-buttons .stale-primary { margin-left: auto; border-color: var(--accent); color: var(--accent); }
+.stale-panel button[aria-disabled="true"] { cursor: default; opacity: 0.55; }
+.stale-panel button[aria-disabled="true"]:hover { background: var(--background); }
+.stale-panel input[aria-disabled="true"] { opacity: 0.55; }
+/* Bounded so the whole menu stays within the browser's popup height limit. */
+.stale-review { list-style: none; max-height: 168px; overflow-y: auto; border: 1px solid var(--border); border-radius: 6px; }
+.stale-review:focus-visible { outline: 2px solid var(--accent); outline-offset: 0; }
+.stale-review li { display: flex; flex-direction: column; padding: 5px 8px; border-top: 1px solid var(--border); }
+.stale-review li:first-child { border-top: 0; }
+.stale-tab-title { overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.stale-tab-meta, .stale-tab-more { color: var(--muted-foreground); font-size: 11px; }
 .sort-options button {
   display: flex; align-items: center; justify-content: space-between;
   width: 100%; min-height: 32px; padding: 6px 10px;
@@ -51,6 +89,9 @@ h2 { padding: 4px 10px 5px; font-size: 12px; font-weight: 600; color: var(--mute
 /* The live region stays rendered while empty so its first message is announced. */
 #status { display: flex; align-items: flex-start; gap: 10px; margin: 0; border-radius: 0; background: var(--muted); color: var(--foreground); font-size: 12px; line-height: 18px; text-align: left; }
 #status.visible { padding: 10px 18px; border-top: 1px solid var(--border); }
+/* The expanded stale controls can be taller than the browser's popup limit
+   (600px), which then scrolls; keep progress and results in view. */
+#status.visible { position: sticky; bottom: 0; z-index: 1; }
 .status-copy { flex: 1; min-width: 0; }
 .status-title, .status-detail { display: block; }
 .status-detail { color: var(--muted-foreground); }
