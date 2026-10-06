@@ -13,7 +13,7 @@
 import {
   DEFAULT_THRESHOLD_MS, INTENT_TTL_MS, LEASE_TTL_MS, MAX_PREVIEW_TABS, MAX_TRACKED_TABS,
   PREVIEW_LIST_LIMIT, PREVIEW_TTL_MS, autoCloseMessage, classifyTab, isLiveIntent, isPlausibleRun,
-  manualCloseMessage, nextLocalHour, normalizeRule, observeTabs, planStale, pruneLeases, prunePreviews,
+  isValidThreshold, manualCloseMessage, nextLocalHour, normalizeRule, observeTabs, planStale, pruneLeases, prunePreviews,
   readAgeStore, recordActivation, urlHash, validateRulePatch,
 } from './stale-core.js';
 
@@ -22,6 +22,7 @@ export const PREVIEW_EXPIRED = 'This list of stale tabs is out of date. Review t
 export const OPEN_FAILED = "Could not open Stale Tabs. Click the Aaron's Tab Vacuum toolbar button, then choose Stale Tabs.";
 export const RULE_CHANGED = 'The stale-tab rule changed, so the remaining tabs were kept. Review the tabs again.';
 const ENABLE_NORMAL_ONLY = 'Turn on automatic cleanup from the Stale Tabs controls in a normal (not private) window.';
+const AUTO_THRESHOLD = 'Automatic cleanup needs a positive whole number of hours or days. Change the duration first.';
 
 const RULE_DEFAULTS = {
   staleThresholdMs: DEFAULT_THRESHOLD_MS, autoCloseStaleEnabled: false,
@@ -36,6 +37,7 @@ const SCHEDULE_DEFAULTS = { autoCloseStaleEnabled: false, staleNextRunAt: null }
 const ALARM_MATCH_MS = 60 * 1000;
 const NAMESPACES = ['normal', 'private'];
 const SESSION_KEY = 'stale.session';
+const NOTICE_KEY = 'stale.notice'; // last failure notified, so it is not repeated every hour
 
 const ns = incognito => (incognito === true ? 'private' : 'normal');
 const keyOf = (kind, space) => `stale.${kind}.${space}`;
@@ -64,15 +66,26 @@ export function createStaleService(api, {
   // Chromium "split" incognito runs a second worker. It serves private
   // windows only and never schedules or runs automatic cleanup.
   const incognitoContext = api.extension?.inIncognitoContext === true;
+  // The age namespaces this worker can see, and so may write. Firefox runs one
+  // background for both. Chromium split workers each see one profile but share
+  // storage.session, so a worker must never prune the other's records.
+  const split = api.runtime.getManifest?.()?.incognito === 'split';
+  const owned = incognitoContext ? ['private'] : split ? ['normal'] : NAMESPACES;
+  const owns = space => owned.includes(space);
 
   const sessionWrite = serial(); // every read-modify-write of storage.session
   const scheduling = serial();   // alarm reconciliation
   const settingsWrite = serial();
   const closing = serial();      // tab removal: one batch at a time, manual or automatic
-  // Bumped synchronously by any rule change this worker sees, so a running
-  // batch stops before its next removal without waiting for storage.
+  // Bumped synchronously by any rule change (ruleEpoch) or editor open/renewal
+  // (editorEpoch) this worker sees, so a running batch stops before its next
+  // removal without waiting for storage.
   let ruleEpoch = 0;
+  let editorEpoch = 0;
   let sweeping = false;
+  // A run whose one-shot alarm the browser had already removed when reconcile
+  // replaced the plan. Its alarm callback, still on the way, may claim it once.
+  let unclaimedDue = null;
   let pendingIntent = Promise.resolve();
   let sessionStarted;
 
@@ -95,13 +108,14 @@ export function createStaleService(api, {
     return ages.get(space);
   }
 
-  function updateAges(space, change) {
-    return sessionWrite(async () => {
-      const store = await loadAges(space);
-      if (change(store)) await session.set({ [keyOf('age', space)]: store });
-      return store;
-    });
+  // Call only inside sessionWrite.
+  async function applyAges(space, change) {
+    const store = await loadAges(space);
+    if (owns(space) && change(store)) await session.set({ [keyOf('age', space)]: store });
+    return store;
   }
+
+  const updateAges = (space, change) => sessionWrite(() => applyAges(space, change));
 
   // Waits for queued event updates, then returns the current records.
   const currentAges = space => sessionWrite(() => loadAges(space));
@@ -129,7 +143,7 @@ export function createStaleService(api, {
     if (!isId(windowId)) throw new Error('The current window is unavailable.');
     const window = await api.windows.get(windowId);
     if (!window || window.id !== windowId) throw new Error('The current window is unavailable.');
-    if (incognitoContext && window.incognito !== true) throw new Error('The current window is unavailable.');
+    if (!owns(ns(window.incognito))) throw new Error('The current window is unavailable.');
     return window;
   }
 
@@ -155,14 +169,17 @@ export function createStaleService(api, {
     const { fields, error } = validateRulePatch(pick(patch, staleOnly ? STALE_RULE_KEYS : RULE_KEYS));
     if (error) return Promise.reject(new Error(error));
     const general = staleOnly ? {} : pick(patch, allowed.filter(key => !RULE_KEYS.includes(key)));
-    // Disabling or a new threshold interrupts a running batch immediately.
-    if (fields.autoCloseStaleEnabled === false || 'staleThresholdMs' in fields) ruleEpoch++;
+    // Any rule change except enabling interrupts a running batch immediately.
+    if (Object.entries(fields).some(([key, value]) => !(key === 'autoCloseStaleEnabled' && value === true))) ruleEpoch++;
 
     return settingsWrite(async () => {
       const before = normalizeRule(await local.get(RULE_DEFAULTS));
       const changed = Object.fromEntries(Object.entries(fields).filter(([key, value]) => before[key] !== value));
       const enabling = changed.autoCloseStaleEnabled === true;
-      if (enabling) await assertCanEnable(windowId);
+      if (enabling) {
+        await assertCanEnable(windowId);
+        if (!isValidThreshold(fields.staleThresholdMs ?? before.staleThresholdMs)) throw new Error(AUTO_THRESHOLD);
+      }
       const write = { ...general, ...changed };
       if (Object.keys(changed).length) {
         ruleEpoch++;
@@ -189,11 +206,21 @@ export function createStaleService(api, {
 
   // ---- Scheduling ----
 
+  const matches = (at, planned) => Number.isFinite(at) && Number.isFinite(planned) && Math.abs(at - planned) <= ALARM_MATCH_MS;
+
   async function plan(at) {
     // Metadata first: an alarm that does not match it is ignored as stray.
     await local.set({ staleNextRunAt: at });
     await api.alarms.create(STALE_ALARM, { when: at });
     return at;
+  }
+
+  // Disabled: no alarm and no plan. Call only inside scheduling.
+  async function clearSchedule(stored) {
+    unclaimedDue = null;
+    await api.alarms?.clear?.(STALE_ALARM);
+    if (stored.staleNextRunAt != null) await local.set({ staleNextRunAt: null });
+    return null;
   }
 
   /**
@@ -205,11 +232,7 @@ export function createStaleService(api, {
     if (incognitoContext) return Promise.resolve(null);
     return scheduling(async () => {
       const stored = await local.get(SCHEDULE_DEFAULTS);
-      if (stored.autoCloseStaleEnabled !== true) {
-        await api.alarms?.clear?.(STALE_ALARM);
-        if (stored.staleNextRunAt != null) await local.set({ staleNextRunAt: null });
-        return null;
-      }
+      if (stored.autoCloseStaleEnabled !== true) return clearSchedule(stored);
       if (typeof api.alarms?.create !== 'function' || typeof api.alarms.get !== 'function') {
         throw new Error('Scheduling is unavailable in this browser.');
       }
@@ -218,43 +241,79 @@ export function createStaleService(api, {
       if (!replace) {
         const alarm = await api.alarms.get(STALE_ALARM);
         const at = alarm?.scheduledTime;
-        if (isPlausibleRun(at, t) && Number.isFinite(recorded) && Math.abs(at - recorded) <= ALARM_MATCH_MS) return at;
-        // Alarm lost (e.g. worker or browser restart): keep a still-future plan.
-        if (!alarm && isPlausibleRun(recorded, t) && recorded > t) return plan(recorded);
+        if (isPlausibleRun(at, t) && matches(at, recorded)) return at;
+        if (!alarm && isPlausibleRun(recorded, t)) {
+          // Alarm lost (e.g. worker or browser restart): keep a still-future plan.
+          if (recorded > t) return plan(recorded);
+          // Overdue with no alarm: the browser removes a one-shot alarm as it
+          // fires, so its callback may still be on the way (it is what woke
+          // this worker). Let that callback claim the run.
+          unclaimedDue = recorded;
+        }
       }
       return plan(nextLocalHour(t));
     });
   }
 
+  // One failure notice per distinct failure, not one per hourly alarm; a
+  // completed run clears it so a later recurrence is reported again.
+  async function reportFailure(message) {
+    const repeated = await sessionWrite(async () => {
+      if (await readSession(NOTICE_KEY) === message) return true;
+      await session.set({ [NOTICE_KEY]: message });
+      return false;
+    }).catch(() => false);
+    if (!repeated) await notify(message).catch(() => {});
+  }
+
+  const clearFailure = () => sessionWrite(() => session.remove(NOTICE_KEY)).catch(() => {});
+
   async function handleAlarm(alarm) {
     if (alarm?.name !== STALE_ALARM || incognitoContext) return;
-    const startedAt = await sessionStart();
-    const stored = await local.get(SCHEDULE_DEFAULTS);
-    if (stored.autoCloseStaleEnabled !== true) {
-      await reconcile().catch(() => {}); // Disabled: never sweeps, whatever the alarm API does.
+    let genuine;
+    try {
+      // Reading the preference, claiming the run and planning the next one
+      // is one scheduling step, so a disable or reconcile cannot interleave.
+      genuine = await scheduling(async () => {
+        const stored = await local.get(SCHEDULE_DEFAULTS);
+        if (stored.autoCloseStaleEnabled !== true) {
+          await clearSchedule(stored).catch(() => {}); // Disabled: never sweeps, whatever the alarm API does.
+          return undefined;
+        }
+        const startedAt = await sessionStart();
+        const t = now();
+        const due = alarm.scheduledTime;
+        const claimed = matches(due, stored.staleNextRunAt) || matches(due, unclaimedDue);
+        unclaimedDue = null;
+        // The next run is planned before sweeping, so a failed sweep cannot
+        // stop the schedule, and a delayed (slept) alarm runs once, never per
+        // missed hour. An alarm that fires a little early still counts as its
+        // own hour, so the next run is the hour after it.
+        await plan(nextLocalHour(isPlausibleRun(due, t) ? Math.max(t, due) : t));
+        // Only the recorded plan from this browser session runs. An alarm due
+        // before startup is a pre-restart backlog: no startup bulk-close.
+        return claimed && due >= startedAt;
+      });
+    } catch (err) {
+      // Unknown scheduler state: no sweep, and say automation has stopped.
+      await reportFailure(`Automatic stale-tab cleanup is not scheduled: ${errorText(err)}`);
       return;
     }
-    const due = alarm.scheduledTime;
-    // Only the recorded plan from this browser session runs. An alarm due
-    // before startup is a pre-restart backlog: no startup bulk-close.
-    const genuine = Number.isFinite(due) && Number.isFinite(stored.staleNextRunAt) &&
-      Math.abs(due - stored.staleNextRunAt) <= ALARM_MATCH_MS && due >= startedAt;
-    // The next run is planned before sweeping, so a failed sweep cannot stop
-    // the schedule, and a delayed (slept) alarm runs once, never per missed hour.
-    await scheduling(() => plan(nextLocalHour(now())));
-    if (!genuine || sweeping) return;
-    // Someone is looking at the rule: defer to the next run.
-    if (await hasEditor('normal')) return;
-    await sweep();
+    if (genuine && await sweep()) await clearFailure();
   }
 
   // ---- Leases and intents ----
 
-  async function hasEditor(space) {
-    return Object.keys(pruneLeases(await readSession(keyOf('lease', space)), now())).length > 0;
+  // The rule is shared by normal and private windows, so an editor open in
+  // either defers automation. Read-only: leases stay in storage.session.
+  async function hasEditor() {
+    const t = now();
+    const stored = await session.get(NAMESPACES.map(space => keyOf('lease', space)));
+    return Object.values(stored).some(leases => Object.keys(pruneLeases(leases, t)).length > 0);
   }
 
   async function editor(windowId, editorId, open) {
+    if (open === true) editorEpoch++; // stops a running automatic batch at once
     const space = ns((await callerWindow(windowId)).incognito);
     return sessionWrite(async () => {
       const key = keyOf('lease', space);
@@ -428,19 +487,26 @@ export function createStaleService(api, {
     }
   }
 
-  /** One tab at a time, each freshly checked; guard() runs before every removal. */
-  async function removeCandidates(candidates, space, rule, policy, guard) {
+  /**
+   * One tab at a time, each freshly checked. current() is a synchronous check
+   * of this worker's rule/editor counters; guard() also re-reads storage.
+   * Both run after the fresh checks, and nothing is awaited between the last
+   * check and the removal call.
+   */
+  async function removeCandidates(candidates, space, rule, policy, { guard, current }) {
     const result = { closed: 0, skipped: 0, failed: 0 };
+    const stop = index => {
+      result.skipped += candidates.length - index;
+      result.stopped = true;
+    };
     for (const [index, candidate] of candidates.entries()) {
-      if (!await guard()) {
-        result.skipped += candidates.length - index;
-        result.stopped = true;
-        break;
-      }
+      if (!current()) { stop(index); break; }
       if (!await stillEligible(candidate, space, rule, policy)) {
         result.skipped++;
         continue;
       }
+      // stillEligible awaited the browser: check the rule again, then remove.
+      if (!await guard() || !current()) { stop(index); break; }
       try {
         await api.tabs.remove(candidate.id);
         result.closed++;
@@ -462,13 +528,14 @@ export function createStaleService(api, {
       .map(([id, w, gen, hash]) => ({ id, windowId: w, gen, hash }));
     // An accepted close continues if the popup is dismissed.
     return closing(async () => {
+      const current = () => ruleEpoch === epoch;
       const guard = async () => {
-        if (ruleEpoch !== epoch) return false;
+        if (!current()) return false;
         try { return (await readRule()).revision === preview.r; } catch { return false; }
       };
       if (!await guard()) throw new Error(PREVIEW_EXPIRED);
       const rule = await readRule();
-      const { closed, skipped, failed, stopped } = await removeCandidates(candidates, space, rule, 'manual', guard);
+      const { closed, skipped, failed, stopped } = await removeCandidates(candidates, space, rule, 'manual', { guard, current });
       const result = { message: manualCloseMessage({ closed, skipped, failed }), closed, skipped, failed };
       // Actual counts stay in the reply even when the batch was cut short.
       if (stopped) result.error = RULE_CHANGED;
@@ -476,34 +543,44 @@ export function createStaleService(api, {
     });
   }
 
+  /**
+   * One automatic run. Returns true when it ran to completion (whether or not
+   * anything closed), false when deferred, stopped or failed.
+   */
   async function sweep() {
-    if (sweeping) return;
+    if (sweeping) return false;
     sweeping = true;
+    // Any rule change or editor seen from here on stops the run.
+    const epoch = ruleEpoch;
+    const editors = editorEpoch;
+    const current = () => ruleEpoch === epoch && editorEpoch === editors;
     try {
-      await closing(async () => {
-        const epoch = ruleEpoch;
+      return await closing(async () => {
         const rule = await readRule();
         const guard = async () => {
-          if (ruleEpoch !== epoch) return false;
+          if (!current()) return false;
           try {
-            const current = await readRule();
-            return current.autoCloseStaleEnabled && current.revision === rule.revision && !await hasEditor('normal');
+            const latest = await readRule();
+            return latest.autoCloseStaleEnabled && latest.revision === rule.revision && !await hasEditor();
           } catch {
             return false;
           }
         };
-        if (!rule.autoCloseStaleEnabled || !await guard()) return;
+        // Someone is looking at the rule: defer to the next run.
+        if (!rule.autoCloseStaleEnabled || !await guard()) return false;
         const { tabs, records, now: t } = await loadScope('normal');
         const scoped = await normalWindowTabs(tabs);
         const { candidates } = planStale(scoped, records, context(rule, 'auto', t, t));
         const result = await removeCandidates(
           candidates.map(c => ({ id: c.id, windowId: c.windowId, gen: c.gen, hash: urlHash(c.url) })),
-          'normal', rule, 'auto', guard);
+          'normal', rule, 'auto', { guard, current });
         const message = autoCloseMessage(result);
         if (message) await notify(message).catch(() => {});
+        return !result.stopped;
       });
     } catch (err) {
-      await notify(`Automatic stale-tab cleanup did not run: ${errorText(err)}`).catch(() => {});
+      await reportFailure(`Automatic stale-tab cleanup did not run: ${errorText(err)}`);
+      return false;
     } finally {
       sweeping = false;
     }
@@ -530,8 +607,12 @@ export function createStaleService(api, {
     // never earlier than its last focus.
     on(api.tabs.onActivated, info => {
       const t = now();
-      quiet(Promise.resolve(api.windows.get(info?.windowId))
-        .then(window => window && updateAges(ns(window.incognito), store => recordActivation(store, info ?? {}, t))));
+      // Queued at once, so switches apply in event order (Chromium has no
+      // previousTabId and relies on the order); the window is looked up inside.
+      quiet(sessionWrite(async () => {
+        const window = await api.windows.get(info?.windowId);
+        if (window) await applyAges(ns(window.incognito), store => recordActivation(store, info ?? {}, t));
+      }));
     });
 
     // A navigation or reload is a new document: it invalidates previews but
@@ -550,7 +631,7 @@ export function createStaleService(api, {
     });
 
     on(api.tabs.onRemoved, tabId => {
-      for (const space of NAMESPACES) {
+      for (const space of owned) {
         quiet(updateAges(space, store => {
           if (!Object.hasOwn(store.tabs, tabId)) return false;
           delete store.tabs[tabId];
@@ -563,7 +644,7 @@ export function createStaleService(api, {
     // inherits the replaced tab's age or document.
     on(api.tabs.onReplaced, (addedTabId, removedTabId) => {
       const t = now();
-      for (const space of NAMESPACES) {
+      for (const space of owned) {
         quiet(updateAges(space, store => {
           if (!Object.hasOwn(store.tabs, removedTabId)) return false;
           delete store.tabs[removedTabId];
@@ -589,7 +670,7 @@ export function createStaleService(api, {
     // Worker start: record the session start, start age baselines for tabs
     // already open, then restore one schedule.
     quiet(sessionStart().then(() => reconcile()));
-    for (const space of incognitoContext ? ['private'] : NAMESPACES) quiet(loadScope(space));
+    for (const space of owned) quiet(loadScope(space));
   }
 
   return {

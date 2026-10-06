@@ -26,13 +26,16 @@ export function isValidThreshold(ms) {
 
 /**
  * Settings as stored, normalized for planning. A previously saved positive
- * threshold is preserved even if the current editor would not accept it.
+ * threshold is preserved for manual cleanup even if the current editor would
+ * not accept it; automatic cleanup requires isValidThreshold.
  * Anything not strictly true leaves automation off.
  */
 export function normalizeRule(stored = {}) {
   const ms = stored.staleThresholdMs;
   return {
-    staleThresholdMs: Number.isSafeInteger(ms) && ms > 0 ? ms : DEFAULT_THRESHOLD_MS,
+    // 0.5.3 could save fractional values (1.1 hours): keep them to the millisecond.
+    staleThresholdMs: Number.isFinite(ms) && ms > 0
+      ? Math.min(Math.max(Math.round(ms), 1), Number.MAX_SAFE_INTEGER) : DEFAULT_THRESHOLD_MS,
     autoCloseStaleEnabled: stored.autoCloseStaleEnabled === true,
     skipPinned: stored.skipPinned !== false,
     skipAudible: stored.skipAudible !== false,
@@ -65,26 +68,41 @@ export function validateRulePatch(patch) {
   return { fields: out };
 }
 
+const QUARTER_MS = 15 * 60 * 1000;
+
+/** True when `at` is on a whole local hour in the current time zone. */
+export function isWholeLocalHour(at) {
+  const date = new Date(at);
+  return Number.isFinite(at) && date.getMinutes() === 0 && date.getSeconds() === 0 && date.getMilliseconds() === 0;
+}
+
 /**
- * The next whole local hour strictly after `now`. Adding elapsed hours from the
- * start of the current local hour stays on whole local hours across DST (which
- * shifts by an hour); the loop covers an ambiguous fall-back hour.
+ * The next whole local hour strictly after `now`. Current zone offsets are
+ * multiples of 15 minutes, so every whole local hour falls on a UTC quarter
+ * hour. Scanning those handles 30-minute offsets, 30-minute DST (Lord Howe)
+ * and the repeated fall-back hour. A zone with no whole hour in two days (a
+ * historical offset) falls back to an hour after the current local hour began.
  */
 export function nextLocalHour(now) {
+  let at = Math.floor(now / QUARTER_MS) * QUARTER_MS + QUARTER_MS;
+  for (let i = 0; i < 4 * 48; i++, at += QUARTER_MS) {
+    if (isWholeLocalHour(at)) return at;
+  }
   const start = new Date(now);
   start.setMinutes(0, 0, 0);
-  let at = start.getTime() + HOUR_MS;
+  at = start.getTime() + HOUR_MS;
   while (at <= now) at += HOUR_MS;
   return at;
 }
 
 /**
- * Is a scheduled run plausible for this clock? Overdue runs stay valid (a
- * delayed alarm fires once on wake); a run more than an hour ahead means the
- * clock moved back, so it is rescheduled.
+ * Is a scheduled run plausible for this clock and zone? Overdue runs stay
+ * valid (a delayed alarm fires once on wake). A run more than an hour ahead
+ * means the clock moved back, and one off the whole local hour means the time
+ * zone changed; either is rescheduled.
  */
 export function isPlausibleRun(at, now) {
-  return isTime(at) && at <= nextLocalHour(now);
+  return isTime(at) && at <= nextLocalHour(now) && isWholeLocalHour(at);
 }
 
 /** Only ordinary web pages are automatic candidates. */

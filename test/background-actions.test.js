@@ -439,6 +439,16 @@ describe('stale tabs', () => {
     expect(api.notifications.create).not.toHaveBeenCalled();
   });
 
+  it('setStaleRule will not enable automation on a legacy threshold the editor would reject', async () => {
+    await api.storage.local.set({ staleThresholdMs: 90 * 60 * 1000 });
+    vi.clearAllMocks();
+    const reply = await send({ command: 'setStaleRule', windowId: 1, settings: { autoCloseStaleEnabled: true } }).replied;
+    expect(reply.error).toMatch(/whole number of hours or days/);
+    expect(api.storage.local.set).not.toHaveBeenCalled();
+    expect(api.alarms.create).not.toHaveBeenCalled();
+    expect(api.tabs.remove).not.toHaveBeenCalled();
+  });
+
   it('the generic saveSettings goes through the same gate', async () => {
     const bad = await send({ command: 'saveSettings', settings: { staleThresholdMs: -1 } }, OPTIONS).replied;
     expect(bad.error).toMatch(/whole number/);

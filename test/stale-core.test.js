@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import {
   DAY_MS, HOUR_MS, DEFAULT_THRESHOLD_MS, LEASE_TTL_MS, MAX_PREVIEWS, MAX_TRACKED_TABS, PREVIEW_TTL_MS,
-  autoCloseMessage, classifyTab, isLiveIntent, isPlausibleRun, isValidThreshold, lastViewedAt,
+  autoCloseMessage, classifyTab, isLiveIntent, isPlausibleRun, isValidThreshold, isWholeLocalHour, lastViewedAt,
   manualCloseMessage, nextLocalHour, normalizeRule, observeTabs, planStale, pruneLeases, prunePreviews,
   readAgeStore, recordActivation, urlHash, validateRulePatch,
 } from '../src/stale-core.js';
@@ -210,6 +210,15 @@ describe('rule validation', () => {
     expect(normalizeRule({ autoCloseStaleEnabled: 'true' }).autoCloseStaleEnabled).toBe(false);
     expect(normalizeRule({})).toMatchObject({ skipPinned: true, skipAudible: true, revision: '' });
   });
+
+  it('keeps fractional or oversized legacy thresholds as safe integers instead of resetting them', () => {
+    expect(normalizeRule({ staleThresholdMs: 1.1 * HOUR_MS }).staleThresholdMs).toBe(3_960_000);
+    expect(normalizeRule({ staleThresholdMs: 0.3 }).staleThresholdMs).toBe(1);
+    expect(normalizeRule({ staleThresholdMs: 1e20 }).staleThresholdMs).toBe(Number.MAX_SAFE_INTEGER);
+    for (const bad of [-1, NaN, Infinity, '604800000', null]) {
+      expect(normalizeRule({ staleThresholdMs: bad }).staleThresholdMs).toBe(DEFAULT_THRESHOLD_MS);
+    }
+  });
 });
 
 describe('nextLocalHour', () => {
@@ -241,6 +250,46 @@ describe('nextLocalHour', () => {
     expect(isPlausibleRun(NOW - DAY_MS, NOW)).toBe(true); // overdue: fires once
     expect(isPlausibleRun(NOW + 3 * HOUR_MS, NOW)).toBe(false);
     expect(isPlausibleRun(undefined, NOW)).toBe(false);
+  });
+
+  it('treats a run off the whole local hour as a time-zone change', () => {
+    expect(isPlausibleRun(nextLocalHour(NOW) - 30 * 60_000, NOW)).toBe(false);
+    expect(isPlausibleRun(nextLocalHour(NOW) + 1, NOW)).toBe(false);
+  });
+});
+
+describe('nextLocalHour in other zones', () => {
+  let tz;
+  beforeAll(() => { tz = process.env.TZ; });
+  afterAll(() => { if (tz === undefined) delete process.env.TZ; else process.env.TZ = tz; });
+  const next = (zone, at) => { process.env.TZ = zone; return nextLocalHour(at); };
+
+  it('handles fixed 30- and 45-minute offsets', () => {
+    // 17:50 IST -> 18:00 IST; 18:05 NPT -> 19:00 NPT.
+    expect(next('Asia/Kolkata', Date.UTC(2026, 9, 6, 12, 20))).toBe(Date.UTC(2026, 9, 6, 12, 30));
+    expect(next('Asia/Kathmandu', Date.UTC(2026, 9, 6, 12, 20))).toBe(Date.UTC(2026, 9, 6, 13, 15));
+  });
+
+  it('handles Lord Howe\'s 30-minute DST in both directions', () => {
+    // 4 Oct 2026, 01:30 LHST (+10:30) -> 03:00 LHDT (+11): 02:00-02:30 does not exist.
+    expect(next('Australia/Lord_Howe', Date.UTC(2026, 9, 3, 15))).toBe(Date.UTC(2026, 9, 3, 16));
+    // 5 Apr 2026, 01:45 LHDT -> 02:00 LHST: 01:30-02:00 repeats; 15:00Z shows 01:30.
+    expect(next('Australia/Lord_Howe', Date.UTC(2026, 3, 4, 14, 45))).toBe(Date.UTC(2026, 3, 4, 15, 30));
+    expect(isWholeLocalHour(Date.UTC(2026, 3, 4, 15))).toBe(false);
+  });
+
+  it('every result is a whole local hour, strictly later, with none skipped', () => {
+    for (const zone of ['America/New_York', 'Asia/Kolkata', 'Australia/Lord_Howe', 'Asia/Kathmandu', 'UTC']) {
+      process.env.TZ = zone;
+      for (let t = Date.UTC(2026, 2, 1); t < Date.UTC(2026, 11, 1); t += 7 * HOUR_MS + 13 * 60_000) {
+        const at = nextLocalHour(t);
+        expect(at).toBeGreaterThan(t);
+        expect(isWholeLocalHour(at)).toBe(true);
+        for (let q = Math.ceil((t + 1) / (15 * 60_000)) * 15 * 60_000; q < at; q += 15 * 60_000) {
+          expect(isWholeLocalHour(q)).toBe(false);
+        }
+      }
+    }
   });
 });
 
