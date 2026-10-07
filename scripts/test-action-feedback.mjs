@@ -141,8 +141,10 @@ try {
   const criteria = [['url','asc'],['url','desc'],['title','asc'],['title','desc'],['lastAccessed','desc'],['visitCount','desc'],['frecency','desc']];
   async function observeResult() {
     await api('await api.storage.session.remove("feedback.test.result");');
-    await popup(`const send=browser.runtime.sendMessage.bind(browser.runtime); browser.runtime.sendMessage=async msg=>{
-      const result=await send(msg); await browser.storage.session.set({'feedback.test.result':result}); return result;};`);
+    // Records tab-action replies only; the menu's stale-status reads must not overwrite them.
+    await popup(`const send=browser.runtime.sendMessage.bind(browser.runtime); const actions=['closeDuplicates','mergeWindows','closeBlankTabs','sortTabs'];
+      browser.runtime.sendMessage=async msg=>{
+      const result=await send(msg); if(actions.includes(msg?.command)) await browser.storage.session.set({'feedback.test.result':result}); return result;};`);
   }
   const readResult = () => api('return (await api.storage.session.get("feedback.test.result"))["feedback.test.result"];');
   async function action(selector) {
@@ -169,7 +171,19 @@ try {
   await api(`await api.tabs.create({url:${JSON.stringify(site.base + '/disposable/alpha')},active:false});`);
   await action('#btn-dupes');
   await action('#btn-dupes'); // no-op stays informational
-  await action('#btn-stale'); // protected/recent tabs => no-op
+  // Stale Tabs opens inline controls; the row itself never closes tabs or starts an action.
+  {
+    const before = await api('return (await api.tabs.query({})).length;');
+    await open();
+    const stale = await popup(`document.getElementById('btn-stale').click();
+      return {expanded:document.getElementById('btn-stale').getAttribute('aria-expanded'), panel:!document.getElementById('stale-panel').hidden,
+        busy:document.querySelector('main').getAttribute('aria-busy'), status:document.getElementById('status').dataset.tone||''};`);
+    check(stale.expanded === 'true' && stale.panel && stale.busy !== 'true' && stale.status === '', '#btn-stale: opens inline stale controls, no busy state');
+    await sleep(1000);
+    check(await isOpen() && (await api('return (await api.tabs.query({})).length;')) === before, '#btn-stale: menu stays open and no tab closes');
+    await popup('window.close();');
+    await until(async () => !await isOpen(), 'stale controls dismissed');
+  }
   await api('await api.tabs.create({url:"about:blank",active:false});');
   await action('#btn-blank');
   await action('#btn-merge'); // single window => no-op
@@ -178,7 +192,10 @@ try {
   // rejection/delay only; these screenshots are NOT evidence of OS notification display.
   for (const theme of ['light','dark']) {
     await open(); await scheme(theme);
-    await popup(`browser.runtime.sendMessage=()=>new Promise((resolve,reject)=>{window.__feedbackReject=reject;});
+    // Only the sort is held; the menu's own stale-status refreshes stay real, so
+    // they cannot take over the held promise.
+    await popup(`const send=browser.runtime.sendMessage.bind(browser.runtime);
+      browser.runtime.sendMessage=msg=>msg?.command==='sortTabs'?new Promise((resolve,reject)=>{window.__feedbackReject=reject;}):send(msg);
       document.getElementById('btn-sort').click(); document.querySelector('[data-criteria="frecency"]').click();`);
     await sleep(300);
     const state = await popup(`const box=document.getElementById('status').getBoundingClientRect();

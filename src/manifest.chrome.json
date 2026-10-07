@@ -13,7 +13,7 @@
   },
   "minimum_chrome_version": "127",
   "incognito": "split",
-  "permissions": ["tabs", "history", "notifications", "storage", "contextMenus", "activeTab", "scripting"],
+  "permissions": ["tabs", "history", "notifications", "storage", "contextMenus", "activeTab", "scripting", "alarms"],
   "optional_host_permissions": ["http://*/*", "https://*/*"],
   "web_accessible_resources": [
     { "resources": ["search.html"], "matches": ["http://*/*", "https://*/*"] }
@@ -64,7 +64,7 @@
       "description": "Search tabs"
     },
     "close-stale": {
-      "description": "Close stale tabs"
+      "description": "Review stale tabs"
     },
     "close-blank": {
       "description": "Close blank tabs"

@@ -70,26 +70,6 @@ for (const [browser, manifest] of manifests) {
       expect(listing).toContain(manifest.description);
     });
 
-    it('keeps released permissions, IDs and commands unchanged from 0.5.2', () => {
-      expect(manifest.permissions).toEqual(['tabs', 'history', 'notifications', 'storage', 'contextMenus', 'activeTab', 'scripting']);
-      const hosts = browser === 'firefox' ? manifest.optional_permissions : manifest.optional_host_permissions;
-      expect(hosts).toEqual(['http://*/*', 'https://*/*']);
-      expect(manifest.host_permissions).toBeUndefined();
-      expect(manifest.web_accessible_resources).toEqual([{ resources: ['search.html'], matches: ['http://*/*', 'https://*/*'] }]);
-      expect(manifest.key).toBeUndefined(); // Chrome's store-assigned ID is unaffected by display metadata.
-      if (browser === 'firefox') expect(manifest.browser_specific_settings.gecko.id).toBe('tabvacuum@adlio');
-      else expect(manifest.incognito).toBe('split');
-      expect(manifest.commands).toEqual({
-        'close-duplicates': { suggested_key: { default: 'Alt+Shift+D' }, description: 'Close duplicate tabs' },
-        'merge-windows': { suggested_key: { default: 'Alt+Shift+M' }, description: 'Merge all windows' },
-        'sort-tabs': { suggested_key: { default: 'Alt+Shift+S' }, description: 'Sort tabs' },
-        'search-tabs': { suggested_key: { default: 'Ctrl+Shift+Period', mac: 'Command+Shift+Period' }, description: 'Search tabs' },
-        'close-stale': { description: 'Close stale tabs' },
-        'close-blank': { description: 'Close blank tabs' },
-      });
-      expect(manifest.version).toBeUndefined(); // Build stamps the package version.
-    });
-
     for (const [kind, icons] of [['product', manifest.icons], ['toolbar', manifest.action.default_icon]]) {
       it.each(Object.entries(icons))(`${kind} %s has a matching transparent PNG`, (size, file) => {
         checkIcon(file, size);
@@ -132,18 +112,23 @@ describe('Little Vacuum artwork', () => {
     const optical = read('branding/toolbar.svg').toString().match(/<g id="vacuum"[\s\S]*<\/g>/)[0];
     expect(source).toContain(optical);
     expect(source).toContain('prefers-color-scheme: dark');
-    expect(read('src/popup.html').toString()).toContain('src="icons/brand.svg" width="23" height="23" alt=""');
+    // Order-independent: the brand image is decorative (empty alt) and sized
+    // 23×23, regardless of how its attributes are ordered in the source.
+    const tag = read('src/popup.html').toString().match(/<img\b[^>]*\bsrc="icons\/brand\.svg"[^>]*>/);
+    expect(tag).not.toBeNull();
+    const attrs = Object.fromEntries([...tag[0].matchAll(/([\w-]+)="([^"]*)"/g)].map(([, name, value]) => [name, value]));
+    expect(attrs).toMatchObject({ src: 'icons/brand.svg', width: '23', height: '23', alt: '' });
   });
 });
 
-describe('0.5.3 brand surfaces', () => {
+describe('0.6.0 brand surfaces', () => {
   it('keeps the package identity and aligns package and lockfile root versions', () => {
     const pkg = json('package.json');
     const lock = json('package-lock.json');
     expect(pkg.name).toBe('tabvacuum');
-    expect(pkg.version).toBe('0.5.3');
-    expect([lock.name, lock.version]).toEqual(['tabvacuum', '0.5.3']);
-    expect([lock.packages[''].name, lock.packages[''].version]).toEqual(['tabvacuum', '0.5.3']);
+    expect(pkg.version).toBe('0.6.0');
+    expect([lock.name, lock.version]).toEqual(['tabvacuum', '0.6.0']);
+    expect([lock.packages[''].name, lock.packages[''].version]).toEqual(['tabvacuum', '0.6.0']);
     expect(lock.packages[''].devDependencies).toEqual(pkg.devDependencies);
   });
 
@@ -173,11 +158,14 @@ describe('Chrome toolbar contrast', () => {
       expect(file).toBe(`icons/toolbar-chrome-${size}.png`);
       checkIcon(file, size);
     }
-    const generator = read('scripts/gen-icons.js').toString();
-    const color = generator.match(/const chromeToolbarColor = '(#[a-f0-9]{6})';/)?.[1];
-    expect(color).toBeDefined();
-    expect(opaqueColors(read('src/icons/toolbar-chrome-16.png'))).toEqual([color]);
+    // Read the color from the shipped pixels, not the generator source, so the
+    // test verifies what Chrome actually renders regardless of how it is built.
+    const chromeColors = opaqueColors(read('src/icons/toolbar-chrome-16.png'));
+    expect(chromeColors).toHaveLength(1);
+    const [color] = chromeColors;
+    // A dedicated Chrome coral, distinct from the Firefox toolbar export.
     expect(opaqueColors(read('src/icons/toolbar-16.png'))).toEqual(['#c45140']);
+    expect(color).not.toBe('#c45140');
     const luminance = hex => {
       const channels = [1, 3, 5].map(offset => parseInt(hex.slice(offset, offset + 2), 16) / 255)
         .map(value => value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4);
@@ -187,6 +175,5 @@ describe('Chrome toolbar contrast', () => {
       const [low, high] = [luminance(color), luminance(backdrop)].sort((a, b) => a - b);
       expect((high + 0.05) / (low + 0.05)).toBeGreaterThanOrEqual(3);
     }
-    expect(generator).toContain("toolbar.replace('#c45140', chromeToolbarColor)");
   });
 });

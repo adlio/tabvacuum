@@ -11,7 +11,7 @@
     "96": "icons/icon-96.png",
     "128": "icons/icon-128.png"
   },
-  "permissions": ["tabs", "history", "notifications", "storage", "contextMenus", "activeTab", "scripting"],
+  "permissions": ["tabs", "history", "notifications", "storage", "contextMenus", "activeTab", "scripting", "alarms"],
   "optional_permissions": ["http://*/*", "https://*/*"],
   "web_accessible_resources": [
     { "resources": ["search.html"], "matches": ["http://*/*", "https://*/*"] }
@@ -77,7 +77,7 @@
       "description": "Search tabs"
     },
     "close-stale": {
-      "description": "Close stale tabs"
+      "description": "Review stale tabs"
     },
     "close-blank": {
       "description": "Close blank tabs"

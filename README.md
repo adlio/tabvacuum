@@ -10,7 +10,7 @@ Aaron's Tab Vacuum (ATV) is a browser extension for power-user tab management. F
 - **Close Duplicate Tabs** — deduplicate by URL across all windows
 - **Merge All Windows** — consolidate every tab into the current window
 - **Sort Tabs** — by URL, title, last accessed, or visit count (ascending/descending)
-- **Close Stale Tabs** — prune tabs untouched for a configurable period
+- **Stale Tabs** — preview tabs untouched for a configurable period, close the reviewed set, or opt into hourly automatic cleanup
 - **Close Blank Tabs** — remove new-tab pages, welcome pages, and search engine homepages
 
 Accessible via toolbar popup, tab right-click menu, and keyboard shortcuts.
@@ -56,7 +56,7 @@ Chrome allows at most four suggested shortcuts per extension. **Close Stale Tabs
 
 ### Action feedback
 
-Sort, Merge and cleanup actions report their result the same way from every surface:
+Sort, Merge, Close Duplicates and Close Blank Tabs report their result the same way from every surface. Stale Tabs first opens review controls; its explicit **Close N tabs now** button uses the same progress and result feedback:
 
 - **Toolbar popup**: the status area shows an action label and spinner while the action runs, and the popup ignores further action clicks until it finishes. On success, or when nothing needed changing, the popup closes and a system notification reports the outcome. A genuine failure keeps the popup open with the error shown inline.
 - **Tab right-click menu and keyboard shortcuts**: a system notification reports the outcome.
@@ -72,6 +72,20 @@ Access via the browser's extension settings page (Aaron's Tab Vacuum → Prefere
 - Stale tab threshold (default: 7 days)
 - URL normalization for duplicate detection (ignore fragments, ignore query params)
 - Protected tab behavior (skip pinned, skip audio-playing)
+
+## Stale-tab review and automatic cleanup (0.6.0 candidate)
+
+Choose **Stale Tabs** in the toolbar menu to expand its controls inline. The chevron changes direction; opening it never closes tabs or opens another window. The existing stale-tab shortcut and context-menu entry also open these controls. Change the duration (seven days by default), inspect the eligible count, use **Review tabs**, and select **Close N tabs now** only when ready. Changing days to hours preserves the duration. Escape cancels an unfinished duration edit before collapsing the controls.
+
+**Automatically close stale tabs** is off by default, including after upgrading. The toolbar row shows **Stale Tabs (Auto-Close Enabled)** while enabled. When tabs are expected to qualify, its caption says, for example, *Closing 6 tabs automatically at 10p.* The time is local. The caption counts candidates at the next scheduled check, while Close now counts candidates eligible now; the expanded text explains when more tabs cross the threshold before that check. With no projected candidates, the enabled title remains and the caption is hidden.
+
+Enabling schedules the next whole local hour and removes nothing immediately. Automatic cleanup checks normal windows only, always protecting each window's active tab—kept regardless of how long since it was active—plus pinned, audio-playing and last-in-window tabs. It also skips loading, hidden, protected/internal and known media-sharing pages. Sleeping tabs are not loaded. Both manual and automatic cleanup keep tabs with unknown age; manual cleanup honors the configured pinned/audio protections and stays within the invoking normal/private context.
+
+The menu and Settings share one saved threshold and opt-in. Disabling stops future removals. An open stale editor defers automatic cleanup. A full browser restart schedules a future check rather than replaying missed runs; after device sleep, one delayed check may run on wake. Scheduling uses the `alarms` permission and needs no additional website access.
+
+Manual closing is limited to the previewed set. Tabs that changed, became active or protected, or moved out of scope are kept. Failures retain actual partial counts where known. If the reply is lost, **Review remaining tabs** fetches a fresh list without repeating the close. Tabs are closed, not archived; native Reopen Closed Tab may help, but unsaved page state is not guaranteed to return.
+
+**Age tracking in this candidate:** Firefox uses the tab's native last-viewed time together with current-session observations. Chrome uses the tab's native last-activated time—the clock starts when you select a tab, not when you leave it. A tab left active for more than seven days is kept; once you switch away, it can qualify under a seven-day threshold. Chrome's native timestamp carries age across clean restarts. ATV also saves a bounded, timestamp-only journal in local storage to correct known older restored timestamps; corrections can only make a tab younger. The journal holds no tab IDs, URLs, hashes, titles, or private-window activity and needs no extra permission. Three clean Chromium restarts preserved age in the integrated tests, so the earlier reset-on-restart limitation no longer applies. Crash immunity is not promised: if an abrupt crash loses recent activity in both the browser and the extension, a restored tab can appear older than it really is and qualify too early. Unknown or inconsistent ages are kept. Chrome private-window age records stay in session storage only. Tests use accelerated age fixtures, not a real seven-day soak.
 
 ## Development
 
@@ -136,8 +150,23 @@ The shadcn-inspired UI uses native CSS and JavaScript, with no framework or remo
 Firefox 115+ and Chrome 127+ are supported by the manifests. Firefox's embedded frame has a restricted API surface, so an authorized visible search refreshes once per second there; Chromium refreshes on tab events. Persistent filtering and deep content indexing remain deferred.
 
 
-Run `npm run test:browsers` on Linux with Python 3, Xvfb, X11/XTest libraries, ffmpeg, Firefox, geckodriver, and Chromium installed. The tests use real built extensions, in-page palettes, protected-page fallback windows, native toolbar menus, and local fixture tabs in fresh profiles, with no mocked browser APIs. Test pages bind only to loopback. Set `KIROCREW_SCRATCH` (or `TMPDIR`) to a disposable test directory. Optional paths are `FIREFOX_BINARY`, `GECKODRIVER`, `CHROMIUM_BINARY`, and `XVFB_BINARY`. Firefox/geckodriver/Xvfb default to the session's `browsers/` install; Chromium defaults to Playwright's browser. On hosts with locally extracted Xvfb libraries, the harness also searches `browsers/usr/lib64` under scratch.
+### Browser test gate
 
-Screenshots go under `tabvacuum-firefox/` and `tabvacuum-chromium/` in scratch. `RECORD_BROWSER=1 npm run test:chromium` additionally records the actual desktop flow to MP4. Firefox uses its native Marionette actor for popup content because ordinary WebDriver frame APIs exclude these remote extension views. Physical shortcut keys are sent through XTest on the isolated X display. This verifies Linux browser behavior; it does not claim OS-level macOS shortcut testing.
+`npm run test:browsers` is the full browser gate. It builds `dist/` once, then runs every real-browser suite in order: search (Firefox and Chromium), stale-tab cleanup (Firefox and Chromium), the Chromium last-activated age journal/restart check, and toolbar action feedback (Firefox and Chromium). The suites drive the actual built extensions — in-page palettes, protected-page fallback windows, native toolbar menus, and local fixture tabs — in fresh profiles. Success paths use real browser APIs; fault cases and accelerated age fixtures are labelled in the results. Test pages bind only to loopback.
 
-For focused toolbar feedback and period-shortcut checks, build first, then run `node scripts/test-action-feedback.mjs chromium` and `node scripts/test-action-feedback.mjs firefox` with the same browser paths. `RECORD_BROWSER=1` records a real frecency sort and asserts its returned result. Success/no-op checks use real browser APIs on disposable tabs. Busy-state screenshots deliberately delay the test transport; failure cases inject transport errors or a notification-only failure. These checks establish notification API acceptance, not OS-banner visibility. The Firefox harness selects the privileged-inspection opt-in supported by the installed geckodriver, only for its throwaway profile.
+**Prerequisites.** Linux with Python 3, Xvfb, X11/XTest libraries, ffmpeg, Firefox, geckodriver, and Chromium installed. Set `KIROCREW_SCRATCH` (or `TMPDIR`) to a disposable test directory. Optional binary paths are `FIREFOX_BINARY`, `GECKODRIVER`, `CHROMIUM_BINARY`, and `XVFB_BINARY`. Firefox/geckodriver/Xvfb default to the session's `browsers/` install; Chromium defaults to Playwright's browser. On hosts with locally extracted Xvfb libraries, the harness also searches `browsers/usr/lib64` under scratch.
+
+**Focused reruns.** The gate builds once, and the focused scripts below do not rebuild — run `npm run build` first (or let the gate build), then rerun only what you need:
+
+| Script | Covers |
+|---|---|
+| `npm run test:search:firefox` / `npm run test:search:chromium` | command palette: open, close-from-search, expanded History/Page-contents, and the privacy/lifecycle checks |
+| `npm run test:stale:firefox` / `npm run test:stale:chromium` | stale-tab review and automatic cleanup |
+| `npm run test:age:chromium` | Chromium last-activated age tracking and the restart-safety journal |
+| `npm run test:feedback:firefox` / `npm run test:feedback:chromium` | toolbar action feedback and the period search shortcut |
+
+`npm run test:firefox` and `npm run test:chromium` keep their previous meaning: build, then run that browser's search suite. Narrow a search suite further by passing a flag, e.g. `npm run test:search:firefox -- --acceptance-only` (also `--closing-only` and `--expanded-only`).
+
+**Screenshots and recordings.** Screenshots go under `tabvacuum-firefox/` and `tabvacuum-chromium/` in scratch. `RECORD_BROWSER=1 npm run test:chromium` additionally records the actual desktop flow to MP4; for action feedback, `RECORD_BROWSER=1` records a real frecency sort and asserts its returned result. Firefox uses its native Marionette actor for popup content because ordinary WebDriver frame APIs exclude these remote extension views. Physical shortcut keys are sent through XTest on the isolated X display. The action-feedback suite's success/no-op checks use real browser APIs on disposable tabs; busy-state screenshots deliberately delay the test transport, and failure cases inject transport errors or a notification-only failure. These checks establish notification API acceptance, not OS-banner visibility. This verifies Linux browser behavior; it does not claim OS-level macOS shortcut testing. The Firefox harness selects the privileged-inspection opt-in supported by the installed geckodriver, only for its throwaway profile.
+
+**Continuous integration.** CI (`.github/workflows/ci.yml`) runs the unit tests (`vitest run`), the build (`node scripts/build.js`), and the Firefox `web-ext lint` only. The browser gate above runs locally and is not part of CI.

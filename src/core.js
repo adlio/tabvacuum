@@ -276,21 +276,3 @@ export function planSort(tabs, criteria, direction) {
 
   return { moves, message };
 }
-
-export function findStaleTabs(tabs, settings) {
-  const now = Date.now();
-  const threshold = settings.staleThresholdMs || 7 * 24 * 60 * 60 * 1000;
-
-  const toClose = filterClosableTabs(tabs, settings, tab =>
-    now - (tab.lastAccessed || 0) >= threshold
-  );
-
-  const days = Math.round(threshold / (24 * 60 * 60 * 1000));
-  const count = toClose.length;
-
-  const message = count > 0
-    ? `Closed ${count} tab${count === 1 ? '' : 's'} not accessed in ${days} day${days === 1 ? '' : 's'}`
-    : 'No stale tabs found';
-
-  return { toClose, message };
-}

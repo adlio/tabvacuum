@@ -29,14 +29,42 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
+const DAY = 24 * 60 * 60 * 1000;
+
 function fakeBrowser() {
   listeners = {};
-  const on = name => ({ addListener: fn => { listeners[name] = fn; } });
+  // Calls every listener registered under a name (the stale service adds its
+  // own); replies with the first defined return value.
+  const registered = {};
+  const on = name => ({
+    addListener: fn => {
+      (registered[name] ??= []).push(fn);
+      listeners[name] = (...args) => {
+        let result;
+        for (const listener of registered[name]) {
+          const value = listener(...args);
+          if (result === undefined) result = value;
+        }
+        return result;
+      };
+    },
+  });
+  const old = Date.now() - 30 * DAY;
+  const tab = (id, url, extra) => ({
+    id, windowId: 1, index: id - 1, url, title: url, active: false, pinned: false, audible: false,
+    incognito: false, status: 'complete', lastAccessed: old, ...extra,
+  });
   const tabs = [
-    { id: 1, windowId: 1, index: 0, url: 'https://b.example/', title: 'B' },
-    { id: 2, windowId: 1, index: 1, url: 'https://a.example/', title: 'A' },
-    { id: 3, windowId: 1, index: 2, url: 'https://a.example/', title: 'A' },
+    tab(1, 'https://b.example/', { active: true, lastAccessed: Date.now() }),
+    tab(2, 'https://a.example/'),
+    tab(3, 'https://a.example/'),
   ];
+  let local = {};
+  let session = {};
+  const read = (store, keys) => (keys && typeof keys === 'object' && !Array.isArray(keys)
+    ? Object.fromEntries(Object.entries(keys).map(([k, d]) => [k, k in store ? store[k] : d]))
+    : Object.fromEntries([keys].flat().filter(k => k in store).map(k => [k, store[k]])));
+  const copy = value => JSON.parse(JSON.stringify(value));
   return {
     runtime: {
       id: EXT,
@@ -45,18 +73,42 @@ function fakeBrowser() {
       onInstalled: on('installed'),
     },
     tabs: {
-      query: vi.fn(async () => tabs.map(tab => ({ ...tab }))),
+      query: vi.fn(async () => tabs.map(t => ({ ...t }))),
+      get: vi.fn(async id => {
+        const found = tabs.find(t => t.id === id);
+        if (!found) throw new Error('No tab');
+        return { ...found };
+      }),
       remove: vi.fn(async () => {}),
       move: vi.fn(async () => {}),
       update: vi.fn(async () => {}),
     },
     windows: {
-      getAll: vi.fn(async () => [{ id: 1, tabs: tabs.map(tab => ({ ...tab })) }]),
+      get: vi.fn(async (id, options) => (id === 1
+        ? { id: 1, type: 'normal', incognito: false, ...(options?.populate ? { tabs: tabs.map(t => ({ ...t })) } : {}) }
+        : Promise.reject(new Error('No window')))),
+      getAll: vi.fn(async () => [{ id: 1, type: 'normal', incognito: false, tabs: tabs.map(t => ({ ...t })) }]),
       getCurrent: vi.fn(async () => ({ id: 1 })),
+      getLastFocused: vi.fn(async () => ({ id: 1, incognito: false })),
       remove: vi.fn(async () => {}),
     },
     history: { search: vi.fn(async () => []) },
-    storage: { local: { get: vi.fn(async defaults => defaults), set: vi.fn(async () => {}) } },
+    storage: {
+      local: {
+        get: vi.fn(async keys => read(local, keys)),
+        set: vi.fn(async items => { local = { ...local, ...copy(items) }; }),
+      },
+      session: {
+        get: vi.fn(async keys => copy(read(session, keys))),
+        set: vi.fn(async items => { session = { ...session, ...copy(items) }; }),
+        remove: vi.fn(async keys => { for (const k of [keys].flat()) delete session[k]; }),
+      },
+    },
+    alarms: {
+      create: vi.fn(async () => {}), get: vi.fn(async () => undefined), clear: vi.fn(async () => true),
+      onAlarm: on('alarm'),
+    },
+    action: { openPopup: vi.fn(async () => {}) },
     notifications: { create: vi.fn(async () => 'id') },
     contextMenus: { create: vi.fn(), onClicked: on('menu') },
     commands: { onCommand: on('command') },
@@ -82,6 +134,9 @@ beforeEach(async () => {
   api = fakeBrowser();
   globalThis.browser = api;
   await import('../src/background.js');
+  // Worker start observes tabs and reconciles the schedule; tests count calls after that.
+  await flush();
+  vi.clearAllMocks();
 });
 
 afterEach(() => {
@@ -91,7 +146,6 @@ afterEach(() => {
 describe('popup actions notify once and keep the reply shape', () => {
   it.each([
     ['closeDuplicates', {}],
-    ['closeStaleTabs', {}],
     ['closeBlankTabs', {}],
     ['mergeWindows', {}],
     ['sortTabs', { criteria: 'url', direction: 'asc' }],
@@ -200,7 +254,7 @@ describe('settings and search messages keep their behavior', () => {
     expect(settings.searchScope).toBe('all');
     const saved = await send({ command: 'saveSettings', settings: { skipPinned: false } }, OPTIONS).replied;
     expect(saved).toEqual({ message: 'Settings saved' });
-    expect(api.storage.local.set).toHaveBeenCalledWith({ skipPinned: false });
+    expect(api.storage.local.set).toHaveBeenCalledWith({ skipPinned: false, staleRuleRevision: expect.any(String) });
     expect(api.notifications.create).not.toHaveBeenCalled();
   });
 
@@ -264,7 +318,7 @@ describe('untrusted senders stay restricted', () => {
 });
 
 describe('keyboard commands', () => {
-  it.each(['close-duplicates', 'merge-windows', 'sort-tabs', 'close-stale', 'close-blank'])(
+  it.each(['close-duplicates', 'merge-windows', 'sort-tabs', 'close-blank'])(
     '%s notifies its result once', async command => {
       await listeners.command(command, { id: 1 });
       expect(api.notifications.create).toHaveBeenCalledTimes(1);
@@ -308,7 +362,7 @@ describe('keyboard commands', () => {
 });
 
 describe('context menu', () => {
-  it.each(['tv-dupes', 'tv-merge', 'tv-sort-url', 'tv-sort-frecency', 'tv-stale', 'tv-blank'])(
+  it.each(['tv-dupes', 'tv-merge', 'tv-sort-url', 'tv-sort-frecency', 'tv-blank'])(
     '%s notifies its result once', async menuItemId => {
       await listeners.menu({ menuItemId });
       expect(api.notifications.create).toHaveBeenCalledTimes(1);
@@ -330,5 +384,114 @@ describe('context menu', () => {
   it('the parent Sort Tabs item does nothing', async () => {
     await listeners.menu({ menuItemId: 'tv-sort' });
     expect(api.notifications.create).not.toHaveBeenCalled();
+  });
+});
+
+describe('stale tabs', () => {
+  const STALE_COMMANDS = ['getStaleState', 'setStaleRule', 'closeStalePreview', 'staleEditor', 'consumeStaleIntent'];
+
+  it('the immediate stale-close command is gone', async () => {
+    expect(listeners.message({ command: 'closeStaleTabs' }, POPUP, vi.fn())).toBeUndefined();
+    await flush();
+    expect(api.tabs.remove).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['a content script', { id: EXT, url: 'https://site.example/' }],
+    ['the embedded search page', { id: EXT, url: `${BASE}search.html` }],
+    ['another extension', { id: 'other@ext', url: `${BASE}popup.html` }],
+  ])('ignores stale commands and settings writes from %s', async (_, sender) => {
+    for (const command of [...STALE_COMMANDS, 'saveSettings']) {
+      const message = { command, windowId: 1, previewId: 'p', settings: { autoCloseStaleEnabled: true }, open: true };
+      expect(listeners.message(message, sender, vi.fn())).toBeUndefined();
+    }
+    await flush();
+    expect(api.tabs.remove).not.toHaveBeenCalled();
+    expect(api.storage.local.set).not.toHaveBeenCalled();
+    expect(api.action.openPopup).not.toHaveBeenCalled();
+  });
+
+  it('previews, then closes only after an explicit close, with one notification', async () => {
+    const state = await send({ command: 'getStaleState', windowId: 1 }).replied;
+    expect(state.preview).toMatchObject({ count: 2, windowCount: 1 });
+    expect(state.auto).toMatchObject({ enabled: false, available: true, count: 2 });
+    expect(api.tabs.remove).not.toHaveBeenCalled();
+    expect(api.notifications.create).not.toHaveBeenCalled();
+
+    const result = await send({ command: 'closeStalePreview', windowId: 1, previewId: state.preview.id }).replied;
+    expect(result).toEqual({ message: 'Closed 2 tabs.', closed: 2, skipped: 0, failed: 0 });
+    expect(api.tabs.remove.mock.calls).toEqual([[2], [3]]);
+    expect(messages()).toEqual([result.message]);
+
+    const replay = await send({ command: 'closeStalePreview', windowId: 1, previewId: state.preview.id }).replied;
+    expect(replay.error).toMatch(/out of date/);
+    expect(api.tabs.remove).toHaveBeenCalledTimes(2);
+  });
+
+  it('setStaleRule validates and saves only the stale rule', async () => {
+    expect(await send({ command: 'setStaleRule', windowId: 1, settings: { staleThresholdMs: 0 } }).replied)
+      .toMatchObject({ error: expect.stringMatching(/whole number/) });
+    expect(await send({ command: 'setStaleRule', windowId: 1, settings: { searchScope: 'current' } }).replied)
+      .toMatchObject({ error: expect.any(String) });
+    expect(await send({ command: 'setStaleRule', windowId: 1, settings: { staleThresholdMs: 2 * DAY } }).replied)
+      .toEqual({ message: 'Settings saved' });
+    expect(api.storage.local.set).toHaveBeenCalledTimes(1);
+    expect(api.notifications.create).not.toHaveBeenCalled();
+  });
+
+  it('setStaleRule will not enable automation on a legacy threshold the editor would reject', async () => {
+    await api.storage.local.set({ staleThresholdMs: 90 * 60 * 1000 });
+    vi.clearAllMocks();
+    const reply = await send({ command: 'setStaleRule', windowId: 1, settings: { autoCloseStaleEnabled: true } }).replied;
+    expect(reply.error).toMatch(/whole number of hours or days/);
+    expect(api.storage.local.set).not.toHaveBeenCalled();
+    expect(api.alarms.create).not.toHaveBeenCalled();
+    expect(api.tabs.remove).not.toHaveBeenCalled();
+  });
+
+  it('the generic saveSettings goes through the same gate', async () => {
+    const bad = await send({ command: 'saveSettings', settings: { staleThresholdMs: -1 } }, OPTIONS).replied;
+    expect(bad.error).toMatch(/whole number/);
+    const noWindow = await send({ command: 'saveSettings', settings: { autoCloseStaleEnabled: true } }, OPTIONS).replied;
+    expect(noWindow.error).toMatch(/normal/);
+    expect(api.storage.local.set).not.toHaveBeenCalled();
+    const ok = await send({ command: 'setStaleRule', windowId: 1, settings: { autoCloseStaleEnabled: true } }).replied;
+    expect(ok).toEqual({ message: 'Settings saved' });
+    expect(api.alarms.create).toHaveBeenCalledWith('atv-stale-sweep', { when: expect.any(Number) });
+    expect(api.tabs.remove).not.toHaveBeenCalled();
+  });
+
+  it('serves the editor lease and the one-shot intent', async () => {
+    const { editorId } = await send({ command: 'staleEditor', windowId: 1, open: true }).replied;
+    expect(editorId).toMatch(/\S/);
+    expect(await send({ command: 'staleEditor', windowId: 1, editorId, open: false }).replied).toEqual({ editorId: null });
+    expect(await send({ command: 'consumeStaleIntent', windowId: 1 }).replied).toEqual({ open: false });
+  });
+
+  it.each([
+    ['keyboard shortcut', () => listeners.command('close-stale', { id: 1, windowId: 1, incognito: false })],
+    ['context menu', () => listeners.menu({ menuItemId: 'tv-stale' }, { id: 1, windowId: 1, incognito: false })],
+  ])('the %s opens the toolbar menu at once with stale controls, closing nothing', async (_, invoke) => {
+    const done = invoke();
+    // Called before any await, so the user gesture still applies.
+    expect(api.action.openPopup).toHaveBeenCalledWith({ windowId: 1 });
+    await done;
+    expect(await send({ command: 'consumeStaleIntent', windowId: 1 }).replied).toEqual({ open: true });
+    expect(await send({ command: 'consumeStaleIntent', windowId: 1 }).replied).toEqual({ open: false });
+    expect(api.tabs.remove).not.toHaveBeenCalled();
+    expect(api.notifications.create).not.toHaveBeenCalled();
+  });
+
+  it('a refused popup explains the toolbar path, with no fallback window', async () => {
+    api.action.openPopup.mockRejectedValue(new Error('not allowed'));
+    await expect(listeners.command('close-stale', { id: 1, windowId: 1 })).resolves.toBeUndefined();
+    expect(messages()).toEqual([expect.stringMatching(/toolbar button, then choose Stale Tabs/)]);
+    expect(api.tabs.remove).not.toHaveBeenCalled();
+    expect(await send({ command: 'consumeStaleIntent', windowId: 1 }).replied).toEqual({ open: false });
+  });
+
+  it('labels the context-menu item as opening the controls', () => {
+    listeners.installed({ reason: 'update' });
+    expect(api.contextMenus.create).toHaveBeenCalledWith(expect.objectContaining({ id: 'tv-stale', title: 'Review Stale Tabs…' }));
   });
 });
