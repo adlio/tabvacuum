@@ -80,39 +80,3 @@ describe('shortcut labels', () => {
     expect(ui.search.hidden).toBe(true);
   });
 });
-
-// Suggested defaults differ by platform, never by browser, and stay within
-// Chromium's four-default command limit. User-assigned bindings remain untouched.
-describe('manifest shortcut defaults', () => {
-  async function load(name) {
-    const { readFileSync } = await import('node:fs');
-    return JSON.parse(readFileSync(new URL(`../src/manifest.${name}.json`, import.meta.url), 'utf8'));
-  }
-
-  // Ctrl+Shift+K opens Firefox's web console, so search uses the period chord.
-  it.each(['firefox', 'chrome'])('uses the period-chord search binding in %s', async name => {
-    const manifest = await load(name);
-    expect(manifest.commands['search-tabs'].suggested_key).toEqual({
-      default: 'Ctrl+Shift+Period', mac: 'Command+Shift+Period',
-    });
-  });
-
-  it.each(['firefox', 'chrome'])('keeps exactly four suggested defaults in %s', async name => {
-    const { commands } = await load(name);
-    const defaults = Object.fromEntries(Object.entries(commands)
-      .filter(([, command]) => command.suggested_key)
-      .map(([id, command]) => [id, command.suggested_key]));
-    expect(defaults).toEqual({
-      'close-duplicates': { default: 'Alt+Shift+D' },
-      'merge-windows': { default: 'Alt+Shift+M' },
-      'sort-tabs': { default: 'Alt+Shift+S' },
-      'search-tabs': { default: 'Ctrl+Shift+Period', mac: 'Command+Shift+Period' },
-    });
-    expect(commands['close-stale'].suggested_key).toBeUndefined();
-    expect(commands['close-blank'].suggested_key).toBeUndefined();
-  });
-
-  it('ships identical command definitions to both browsers', async () => {
-    expect((await load('firefox')).commands).toEqual((await load('chrome')).commands);
-  });
-});

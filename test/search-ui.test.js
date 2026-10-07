@@ -1,76 +1,15 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { startSearch } from '../src/search.js';
+import { El, mountFixture } from './mocks/dom.js';
 
 // No module mocks: every test runs the real composeSearchResults.
 
 const html = readFileSync(new URL('../src/search.html', import.meta.url), 'utf8');
 const js = readFileSync(new URL('../src/search.js', import.meta.url), 'utf8');
 
-// Minimal DOM: enough for search.js, and it fails loudly if HTML parsing is used.
-class El {
-  constructor(tag, owner = null) {
-    Object.assign(this, { tag, owner, id: '', className: '', hidden: false, value: '', children: [], parent: null, dataset: {} });
-    this.attrs = new Map();
-    this.listeners = {};
-    this.text = '';
-  }
-  get textContent() { return this.text + this.children.map(child => child.textContent).join(''); }
-  set textContent(value) { this.children = []; this.text = String(value); }
-  set innerHTML(_) { throw new Error('innerHTML is forbidden'); }
-  append(...nodes) {
-    for (const node of nodes) {
-      const moved = node.tag === '#fragment' ? node.children.splice(0) : [node];
-      for (const child of moved) { child.parent = this; this.children.push(child); }
-    }
-  }
-  replaceChildren(...nodes) {
-    for (const child of this.children) child.parent = null;
-    this.children = []; this.text = ''; this.append(...nodes);
-  }
-  setAttribute(name, value) { this.attrs.set(name, String(value)); }
-  getAttribute(name) { return this.attrs.get(name) ?? null; }
-  removeAttribute(name) { this.attrs.delete(name); }
-  addEventListener(type, fn) { (this.listeners[type] ??= []).push(fn); }
-  dispatch(type, event = {}) { for (const fn of this.listeners[type] ?? []) fn({ target: this, preventDefault() {}, stopPropagation() {}, ...event }); }
-  // Supports the '[data-foo-bar]' selectors search.js uses.
-  closest(selector) {
-    const key = selector.slice(6, -1).replace(/-(\w)/g, (_, c) => c.toUpperCase());
-    let node = this;
-    while (node && node.dataset[key] === undefined) node = node.parent;
-    return node ?? null;
-  }
-  scrollIntoView() {}
-  contains(node) {
-    for (let current = node; current; current = current.parent) if (current === this) return true;
-    return false;
-  }
-  // Real focus tracking: the UI routes keys by document.activeElement.
-  focus() {
-    if (this.owner && this.owner.activeElement !== this) {
-      this.owner.activeElement = this;
-      this.dispatch('focus');
-    }
-  }
-}
-
 function setup({ top = false, search = '', noTabsApi = false, platform = 'Linux x86_64', platformInfo, closeResponse, initial, sources, bundle = true, handoff } = {}) {
-  const elements = new Map([...html.matchAll(/\sid="([^"]+)"/g)].map(([, id]) => [id, Object.assign(new El('div'), { id })]));
-  // Record static nesting (parent links only) so containment checks see the real structure.
-  const stack = [];
-  for (const [, close, tag, attrs] of html.matchAll(/<(\/?)([a-z][\w-]*)([^>]*)>/g)) {
-    if (close) { stack.pop(); continue; }
-    const node = elements.get(attrs.match(/\sid="([^"]+)"/)?.[1]) ?? new El(tag);
-    node.parent = stack.at(-1) ?? null;
-    if (!/^(input|meta|link|br|img|path|circle)$/.test(tag) && !attrs.endsWith('/')) stack.push(node);
-  }
-  const document = Object.assign(new El('#document'), {
-    activeElement: null,
-    getElementById: id => elements.get(id) ?? null,
-    createElement: tag => new El(tag, document),
-    createDocumentFragment: () => new El('#fragment'),
-  });
-  for (const element of elements.values()) element.owner = document;
+  const { document, byId } = mountFixture(html);
   const parent = { postMessage: vi.fn() };
   const window = Object.assign(new El('#window'), { location: { search }, navigator: { platform }, close: vi.fn(), postMessage: vi.fn(), setTimeout: (...args) => setTimeout(...args) });
   window.parent = top ? window : parent;
@@ -99,7 +38,7 @@ function setup({ top = false, search = '', noTabsApi = false, platform = 'Linux 
   if (platformInfo) runtime.getPlatformInfo = platformInfo;
   const browser = { runtime, tabs: noTabsApi ? undefined : tabEvents };
   startSearch({ document, window, browser });
-  const $ = id => elements.get(id);
+  const $ = id => byId.get(id);
   const init = (token, source = parent) => window.dispatch('message', { source, data: { type: 'tabvacuum:init', token } });
   // Keys go to the focused element, as in a browser.
   const key = (k, extra = {}) => {
@@ -891,22 +830,30 @@ describe('closing refresh safety', () => {
   });
 });
 
-describe('search UI static contract', () => {
+describe('search UI markup and source policy', () => {
   it('declares dialog, combobox, grid, and help semantics', () => {
-    expect(html).toMatch(/role="dialog"[^>]*aria-labelledby="dialog-title"/);
-    expect(html).toMatch(/role="combobox"[^>]*aria-controls="results"/);
-    expect(html).toMatch(/id="query"[^>]*aria-describedby="query-help"/);
-    expect(html).toMatch(/id="results" role="grid"[^>]*aria-describedby="tabs-help"/);
-    expect(html).toContain('aria-haspopup="grid"');
-    expect(html).toMatch(/id="selection-status" role="status" aria-live="polite"/);
-    expect(html).toMatch(/<button id="select-toggle"[^>]*type="button"/);
-    expect(html).toMatch(/<button id="close-tabs"[^>]*type="button" hidden/);
-    expect(html).toMatch(/<footer id="help" aria-hidden="true">/);
-    expect(html).toMatch(/<button id="search-in"[^>]*type="button" aria-expanded="false" aria-controls="source-menu"/);
-    expect(html).toMatch(/id="source-menu"[^>]*hidden/);
-    expect(html).not.toMatch(/source-chip/);
+    const { document } = mountFixture(html);
+    const $ = id => document.getElementById(id);
+    const attributes = (id, expected) => {
+      for (const [name, value] of Object.entries(expected)) expect($(id).getAttribute(name)).toBe(value);
+    };
+    attributes('palette', { role: 'dialog', 'aria-labelledby': 'dialog-title' });
+    attributes('query', { role: 'combobox', 'aria-controls': 'results', 'aria-describedby': 'query-help', 'aria-haspopup': 'grid' });
+    attributes('results', { role: 'grid', 'aria-describedby': 'tabs-help' });
+    attributes('selection-status', { role: 'status', 'aria-live': 'polite' });
+    for (const id of ['select-toggle', 'close-tabs', 'search-in']) {
+      expect($(id).tagName).toBe('BUTTON');
+      attributes(id, { type: 'button' });
+    }
+    expect($('close-tabs').hidden).toBe(true);
+    expect($('help').tagName).toBe('FOOTER');
+    attributes('help', { 'aria-hidden': 'true' });
+    attributes('search-in', { 'aria-expanded': 'false', 'aria-controls': 'source-menu' });
+    expect($('source-menu').hidden).toBe(true);
   });
-  it('loads no network resources and uses no unsafe DOM or cross-window APIs', () => {
+  // Source lint complements runtime token/sender and data-free dismissal tests;
+  // it is not proof of browser isolation or safe rendering by itself.
+  it('keeps network and unsafe DOM APIs out of the search frame source', () => {
     expect(html).not.toMatch(/(src|href)="(https?:)?\/\//);
     expect(js).not.toMatch(/innerHTML|insertAdjacentHTML|outerHTML|console\.|fetch\(|localStorage|runtime\.onMessage/);
     expect(js.match(/\.postMessage\(/g)).toHaveLength(1);

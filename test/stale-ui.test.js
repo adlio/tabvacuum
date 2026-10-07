@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import {
-  convertDuration, createEditorLease, createLatest, createRuleWriter, describeAuto, describeMain, describeManual, domainOf,
-  durationFromMs, formatRunTime, formatViewedAgo, isStaleState, parseDuration, scopeState,
+  ageTerms, convertDuration, createEditorLease, createLatest, createRuleWriter, describeAuto, describeMain, describeManual, domainOf,
+  durationFromMs, formatRunTime, formatViewedAgo, isStaleState, parseDuration, ruleLabel, scopeState,
 } from '../src/stale-ui.js';
 
 const HOUR = 60 * 60 * 1000;
@@ -9,7 +9,8 @@ const DAY = 24 * HOUR;
 const NOW = new Date(2026, 9, 6, 21, 15).getTime();
 const at = (day, hours, minutes = 0) => new Date(2026, 9, day, hours, minutes).getTime();
 
-const state = ({ settings, auto, preview } = {}) => ({
+const state = ({ settings, auto, preview, ageBasis } = {}) => ({
+  ageBasis,
   settings: { staleThresholdMs: 7 * DAY, autoCloseStaleEnabled: true, skipPinned: true, skipAudible: true, ...settings },
   auto: { enabled: true, available: true, nextRunAt: at(6, 22), count: 6, error: null, ...auto },
   preview: { id: 'p', tabs: [], count: 0, windowCount: 1, unknownCount: 0, ...preview },
@@ -133,10 +134,20 @@ describe('describeAuto and describeManual', () => {
   });
 
   it('keeps manual scope and protections distinct from automatic ones', () => {
-    const manual = describeManual(state({ settings: { skipPinned: true, skipAudible: false }, preview: { count: 3, windowCount: 2, unknownCount: 2 } }), false);
+    const manual = describeManual(state({ ageBasis: 'viewed', settings: { skipPinned: true, skipAudible: false }, preview: { count: 3, windowCount: 2, unknownCount: 2 } }), false);
     expect(manual.count).toBe('Close now: 3 tabs not viewed for 7 days, across 2 windows.');
-    expect(manual.protections).toBe("Close now keeps pinned tabs. 2 tabs with an unknown last viewed time are kept. Both keep each window's active tab and last tab. Automatic cleanup always keeps pinned tabs and tabs playing audio.");
-    expect(describeManual(state({ settings: { staleThresholdMs: HOUR }, preview: { count: 1, windowCount: 1 } }), true).count).toBe('Close now: 1 tab not viewed for 1 hour, across 1 private window.');
+    expect(manual.protections).toBe("Close now keeps pinned tabs. 2 tabs with an unknown last viewed time are kept. Both keep each window's active tab and last tab, even when the active tab's age is past the limit. Automatic cleanup always keeps pinned tabs and tabs playing audio.");
+    expect(describeManual(state({ ageBasis: 'viewed', settings: { staleThresholdMs: HOUR }, preview: { count: 1, windowCount: 1 } }), true).count).toBe('Close now: 1 tab not viewed for 1 hour, across 1 private window.');
+  });
+
+  it('uses Chrome activated wording when the basis says so, and neutral wording when it is absent', () => {
+    const chrome = describeManual(state({ ageBasis: 'activated', preview: { count: 2, windowCount: 1, unknownCount: 1 } }), false);
+    expect(chrome.count).toBe('Close now: 2 tabs not activated for 7 days, across 1 window.');
+    expect(chrome.protections).toContain('with an unknown last activation time');
+    const neutral = describeManual(state({ preview: { count: 2, windowCount: 1, unknownCount: 1 } }), false);
+    expect(neutral.count).toBe('Close now: 2 tabs not used for 7 days, across 1 window.');
+    expect(neutral.protections).toContain('with an unknown last used time');
+    expect(describeManual(state({ ageBasis: 'activated', preview: { count: 0 } }), false).count).toBe('Close now: no tabs have gone without activation for 7 days.');
   });
 
   it('strips normal automation numbers from a private-window state', () => {
@@ -151,10 +162,29 @@ describe('review helpers', () => {
   it('formats domain and time since last viewed', () => {
     expect(domainOf('https://docs.example.com/a?b')).toBe('docs.example.com');
     expect(domainOf('not a url')).toBe('');
-    expect(formatViewedAgo(NOW - 3 * DAY, NOW, 'en-US')).toBe('Viewed 3 days ago');
-    expect(formatViewedAgo(NOW - 5 * HOUR, NOW, 'en-US')).toBe('Viewed 5 hours ago');
-    expect(formatViewedAgo(NOW - 20_000, NOW, 'en-US')).toBe('Viewed 1 minute ago');
-    for (const bad of [0, NaN, undefined, NOW + 1000]) expect(formatViewedAgo(bad, NOW, 'en-US')).toBe('Last viewed time unknown');
+    expect(formatViewedAgo(NOW - 3 * DAY, NOW, 'en-US', 'viewed')).toBe('Viewed 3 days ago');
+    expect(formatViewedAgo(NOW - 5 * HOUR, NOW, 'en-US', 'viewed')).toBe('Viewed 5 hours ago');
+    expect(formatViewedAgo(NOW - 20_000, NOW, 'en-US', 'viewed')).toBe('Viewed 1 minute ago');
+    for (const bad of [0, NaN, undefined, NOW + 1000]) expect(formatViewedAgo(bad, NOW, 'en-US', 'viewed')).toBe('Last viewed time unknown');
+  });
+
+  it('labels review rows by the age basis, falling back to neutral wording', () => {
+    expect(formatViewedAgo(NOW - 3 * DAY, NOW, 'en-US', 'activated')).toBe('Activated 3 days ago');
+    expect(formatViewedAgo(NOW + 1000, NOW, 'en-US', 'activated')).toBe('Last activation time unknown');
+    expect(formatViewedAgo(NOW - 3 * DAY, NOW, 'en-US')).toBe('Used 3 days ago');
+    expect(formatViewedAgo(NOW + 1000, NOW, 'en-US')).toBe('Last used time unknown');
+  });
+});
+
+describe('ageTerms and ruleLabel', () => {
+  it('maps the age basis to browser-appropriate wording with a neutral fallback', () => {
+    expect(ruleLabel('viewed')).toBe('Close tabs not viewed for');
+    expect(ruleLabel('activated')).toBe('Close tabs not activated for');
+    expect(ruleLabel(undefined)).toBe('Close tabs not used for');
+    expect(ruleLabel('bogus')).toBe('Close tabs not used for');
+    expect(ageTerms('activated').ago).toBe('Activated');
+    expect(ageTerms('viewed').ago).toBe('Viewed');
+    expect(ageTerms(undefined).ago).toBe('Used');
   });
 });
 
@@ -271,8 +301,8 @@ describe('stale cleanup clarity', () => {
     expect(describeAuto(state({ preview: { count: 6 } }), NOW, 'en-US').text).not.toContain('Includes tabs');
   });
 
-  it('states that manual cleanup also protects active and last tabs', () => {
+  it('states that manual cleanup protects every window\'s active and last tab regardless of age', () => {
     const text = describeManual(state(), false).protections;
-    expect(text).toContain("Both keep each window's active tab and last tab");
+    expect(text).toContain("Both keep each window's active tab and last tab, even when the active tab's age is past the limit");
   });
 });

@@ -1,7 +1,7 @@
 // TabVacuum settings page
 import {
   NO_REPLY, REFRESH_MS, canEnableAuto, convertDuration, createEditorLease, createLatest,
-  createRuleWriter, describeAuto, describeUnavailable, durationFromMs, isStaleState, parseDuration, scopeState, watchStaleSources,
+  createRuleWriter, describeAuto, describeUnavailable, durationFromMs, isStaleState, parseDuration, ruleLabel, scopeState, watchStaleSources,
 } from './stale-ui.js';
 
 const errorText = err => String(err?.message ?? err ?? 'Unknown error');
@@ -22,7 +22,7 @@ export function startOptions({ document, window, browser, locale }) {
   };
   // Saved only through setStaleRule, which validates and reconciles scheduling.
   const stale = {
-    fieldset: $('stale-fieldset'), value: $('stale-value'), unit: $('stale-unit'), error: $('stale-error'),
+    fieldset: $('stale-fieldset'), label: $('stale-rule-label'), value: $('stale-value'), unit: $('stale-unit'), error: $('stale-error'),
     auto: $('stale-auto'), detail: $('stale-auto-detail'), message: $('stale-message'),
   };
   const statusBox = $('status');
@@ -64,6 +64,9 @@ export function startOptions({ document, window, browser, locale }) {
   const canDisable = () => windowId != null;
 
   function renderStale() {
+    // Browser-appropriate wording for the duration prompt (viewed vs activated).
+    const labelText = ruleLabel(state?.ageBasis);
+    if (stale.label.textContent !== labelText) stale.label.textContent = labelText;
     // Never overwrite an edit, or fields that already show the saved duration.
     const ms = savedMs();
     if (!ruleDirty) {

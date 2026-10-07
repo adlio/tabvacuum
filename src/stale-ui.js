@@ -27,6 +27,26 @@ const isTime = t => Number.isFinite(t) && t > 0;
 const isThreshold = ms => Number.isSafeInteger(ms) && ms > 0;
 const errorText = err => String(err?.message ?? err ?? 'Unknown error');
 
+// Stale age is reported differently per browser, so the background states which
+// basis applies through getStaleState's `ageBasis`. Firefox exposes a tab's
+// last-viewed time; Chrome exposes when a tab was last activated (selected), so
+// its clock starts at selection rather than when the tab is left. When the
+// field is absent or unrecognised, neutral "used" wording claims neither.
+const AGE_TERMS = {
+  viewed: { idle: 'not viewed for', none: 'gone unviewed for', ago: 'Viewed', timeNoun: 'viewed time' },
+  activated: { idle: 'not activated for', none: 'gone without activation for', ago: 'Activated', timeNoun: 'activation time' },
+  used: { idle: 'not used for', none: 'gone unused for', ago: 'Used', timeNoun: 'used time' },
+};
+
+export function ageTerms(ageBasis) {
+  return AGE_TERMS[ageBasis] ?? AGE_TERMS.used;
+}
+
+// Browser-appropriate label for the duration field, e.g. "Close tabs not viewed for".
+export function ruleLabel(ageBasis) {
+  return `Close tabs ${ageTerms(ageBasis).idle}`;
+}
+
 // Validates a typed duration: a positive whole number whose milliseconds stay
 // a safe integer. There is no other upper limit.
 export function parseDuration(raw, unit) {
@@ -83,13 +103,14 @@ export function formatRunTime(at, now, locale) {
   return `${time} on ${new Intl.DateTimeFormat(locale, { weekday: 'short', month: 'short', day: 'numeric' }).format(date)}`;
 }
 
-export function formatViewedAgo(lastViewedAt, now, locale) {
-  if (!isTime(lastViewedAt) || lastViewedAt > now) return 'Last viewed time unknown';
+export function formatViewedAgo(lastViewedAt, now, locale, ageBasis) {
+  const terms = ageTerms(ageBasis);
+  if (!isTime(lastViewedAt) || lastViewedAt > now) return `Last ${terms.timeNoun} unknown`;
   const minutes = Math.floor((now - lastViewedAt) / 60000);
   const rtf = new Intl.RelativeTimeFormat(locale, { numeric: 'always' });
-  if (minutes < 60) return `Viewed ${rtf.format(-Math.max(minutes, 1), 'minute')}`;
-  if (minutes < 48 * 60) return `Viewed ${rtf.format(-Math.floor(minutes / 60), 'hour')}`;
-  return `Viewed ${rtf.format(-Math.floor(minutes / (24 * 60)), 'day')}`;
+  if (minutes < 60) return `${terms.ago} ${rtf.format(-Math.max(minutes, 1), 'minute')}`;
+  if (minutes < 48 * 60) return `${terms.ago} ${rtf.format(-Math.floor(minutes / 60), 'hour')}`;
+  return `${terms.ago} ${rtf.format(-Math.floor(minutes / (24 * 60)), 'day')}`;
 }
 
 export function domainOf(url) {
@@ -180,15 +201,16 @@ export function describeAuto(state, now, locale) {
 // Manual "Close now" scope and protections. Kept distinct from the automatic count.
 export function describeManual(state, incognito) {
   const { preview, settings } = state;
+  const terms = ageTerms(state.ageBasis);
   const rule = durationText(settings.staleThresholdMs);
   const where = preview.windowCount == null ? '' : `, across ${plural(preview.windowCount, incognito ? 'private window' : 'window')}`;
   const count = preview.count
-    ? `Close now: ${tabCount(preview.count)} not viewed for ${rule}${where}.`
-    : `Close now: no tabs have gone unviewed for ${rule}.`;
+    ? `Close now: ${tabCount(preview.count)} ${terms.idle} ${rule}${where}.`
+    : `Close now: no tabs have ${terms.none} ${rule}.`;
   const kept = [settings.skipPinned && 'pinned tabs', settings.skipAudible && 'tabs playing audio'].filter(Boolean);
   const notes = [kept.length ? `Close now keeps ${kept.join(' and ')}.` : 'Close now includes pinned tabs and tabs playing audio.'];
-  if (preview.unknownCount) notes.push(`${tabCount(preview.unknownCount)} with an unknown last viewed time ${preview.unknownCount === 1 ? 'is' : 'are'} kept.`);
-  notes.push("Both keep each window's active tab and last tab. Automatic cleanup always keeps pinned tabs and tabs playing audio.");
+  if (preview.unknownCount) notes.push(`${tabCount(preview.unknownCount)} with an unknown last ${terms.timeNoun} ${preview.unknownCount === 1 ? 'is' : 'are'} kept.`);
+  notes.push("Both keep each window's active tab and last tab, even when the active tab's age is past the limit. Automatic cleanup always keeps pinned tabs and tabs playing audio.");
   return { count, protections: notes.join(' ') };
 }
 

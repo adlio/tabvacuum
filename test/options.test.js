@@ -1,50 +1,16 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { startOptions } from '../src/options.js';
+import { El, mountFixture } from './mocks/dom.js';
 
 const html = readFileSync(new URL('../src/options.html', import.meta.url), 'utf8');
 const HOUR = 60 * 60 * 1000;
 const DAY = 24 * HOUR;
 const NOW = new Date(2026, 9, 6, 21, 15).getTime();
 
-// Minimal DOM built from the real settings markup.
-class El {
-  constructor(tag) {
-    Object.assign(this, { tag, tagName: tag.toUpperCase(), id: '', hidden: false, parent: null, dataset: {}, textContent: '', listeners: {}, value: '', checked: false });
-    this.attrs = new Map();
-    this.classes = new Set();
-    this.classList = { add: c => this.classes.add(c), remove: c => this.classes.delete(c), contains: c => this.classes.has(c) };
-  }
-  setAttribute(name, value) { this.attrs.set(name, String(value)); }
-  getAttribute(name) { return this.attrs.get(name) ?? null; }
-  removeAttribute(name) { this.attrs.delete(name); }
-  addEventListener(type, fn) { (this.listeners[type] ??= []).push(fn); }
-  dispatch(type, extra = {}) { for (const fn of this.listeners[type] ?? []) fn({ target: this, ...extra }); }
-  contains(node) {
-    for (let current = node; current; current = current.parent) if (current === this) return true;
-    return false;
-  }
-}
-
 function setup(handlers = {}, { win = { id: 4, incognito: false } } = {}) {
-  const byId = new Map();
-  const stack = [];
-  for (const [, close, tag, attrs] of html.matchAll(/<(\/?)([a-z][\w-]*)([^>]*)>/g)) {
-    if (close) { stack.pop(); continue; }
-    const node = new El(tag);
-    node.parent = stack.at(-1) ?? null;
-    for (const [, name, value] of attrs.matchAll(/\s([\w-]+)(?:="([^"]*)")?/g)) {
-      if (name === 'id') { node.id = value; byId.set(value, node); }
-      else if (name === 'hidden') node.hidden = true;
-      else node.setAttribute(name, value ?? '');
-    }
-    if (!/^(meta|link|input)$/.test(tag)) stack.push(node);
-  }
-  const document = new El('#document');
-  document.getElementById = id => byId.get(id) ?? null;
-  document.visibilityState = 'visible';
-  document.activeElement = null;
-  const window = new El('#window');
+  const { document, byId } = mountFixture(html);
+  const window = new El('#window', document);
   const storage = { listeners: new Set() };
   const all = {
     getSettings: async () => ({ searchScope: 'all', staleThresholdMs: 3 * DAY, autoCloseStaleEnabled: false, ignoreFragments: true, ignoreQueryParams: false, skipPinned: true, skipAudible: false, blankNewTab: true, blankWelcome: true, blankSearchEngines: false, blankCustomUrls: ['https://a.example/'] }),
@@ -64,8 +30,9 @@ function setup(handlers = {}, { win = { id: 4, incognito: false } } = {}) {
   return { $, window, document, sendMessage, sent, ready, storage };
 }
 
-function state({ settings, auto } = {}) {
+function state({ settings, auto, ageBasis } = {}) {
   return {
+    ageBasis,
     settings: { staleThresholdMs: 3 * DAY, autoCloseStaleEnabled: false, skipPinned: true, skipAudible: false, ...settings },
     auto: { enabled: false, available: true, nextRunAt: new Date(2026, 9, 6, 22).getTime(), count: 2, error: null, ...auto },
     preview: { id: 'p', tabs: [], count: 0, windowCount: 1, unknownCount: 0 },
@@ -87,9 +54,16 @@ describe('settings: stale tabs', () => {
     expect(ui.$('stale-auto').checked).toBe(false);
     expect(ui.$('stale-auto-detail').textContent).toBe('If turned on, 2 tabs would close automatically at 10p. Includes tabs that reach 3 days before then. Nothing closes before then.');
     expect(html).toContain('Tabs are closed, not archived. Unsaved changes may be lost.');
-    expect(html).toContain('Close tabs not viewed for');
+    expect(html).toContain('Close tabs not used for');
     expect(html).toContain('Automatically close stale tabs');
     expect(ui.sent('getStaleState')).toEqual([{ command: 'getStaleState', windowId: 4 }]);
+  });
+
+  it('labels the duration prompt by the reported age basis', async () => {
+    const ui = setup({ getStaleState: async () => state({ ageBasis: 'activated' }) });
+    await ui.ready;
+    await settle();
+    expect(ui.$('stale-rule-label').textContent).toBe('Close tabs not activated for');
   });
 
   it('generic auto-save never carries the stale rule or the automation preference', async () => {
@@ -138,7 +112,7 @@ describe('settings: stale tabs', () => {
     ui.$('stale-value').dispatch('input');
     ui.$('stale-value').dispatch('change');
     expect(ui.sent('setStaleRule')).toEqual([{ command: 'setStaleRule', windowId: 4, settings: { staleThresholdMs: 400 * DAY } }]);
-    expect(html).not.toMatch(/id="stale-value"[^>]*\smax=/);
+    expect(ui.$('stale-value').hasAttribute('max')).toBe(false);
   });
 
   it('saves a valid duration through setStaleRule and refreshes', async () => {

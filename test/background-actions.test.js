@@ -419,7 +419,7 @@ describe('stale tabs', () => {
     expect(api.notifications.create).not.toHaveBeenCalled();
 
     const result = await send({ command: 'closeStalePreview', windowId: 1, previewId: state.preview.id }).replied;
-    expect(result).toEqual({ message: 'Closed 2 tabs not viewed recently.', closed: 2, skipped: 0, failed: 0 });
+    expect(result).toEqual({ message: 'Closed 2 tabs.', closed: 2, skipped: 0, failed: 0 });
     expect(api.tabs.remove.mock.calls).toEqual([[2], [3]]);
     expect(messages()).toEqual([result.message]);
 

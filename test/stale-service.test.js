@@ -15,7 +15,10 @@ function deferred() {
   return { promise, resolve };
 }
 
-const settle = async () => { for (let i = 0; i < 20; i++) await new Promise(r => setTimeout(r, 0)); };
+// The service and fake APIs use promise queues, not timers. One event-loop
+// turn drains all reachable microtasks, while deliberately held gates stay
+// pending. Await gate/reply promises explicitly when the test releases them.
+const settle = () => new Promise(resolve => setImmediate(resolve));
 
 /**
  * firefox: native lastAccessed records deselection and is trusted; one
@@ -178,7 +181,7 @@ function createWorld({ browser = 'firefox' } = {}) {
    * receiving events; with keepOthers, only an earlier worker of the same
    * context is replaced (a Chromium split worker restarting on its own).
    */
-  world.startWorker = ({ incognitoContext = false, keepOthers = false } = {}) => {
+  world.startWorker = ({ incognitoContext = false, keepOthers = false, patch } = {}) => {
     const { api, listeners } = makeApi({ incognitoContext });
     const notify = vi.fn(async () => {});
     const service = createStaleService(api, {
@@ -186,6 +189,7 @@ function createWorld({ browser = 'firefox' } = {}) {
     });
     const worker = { api, listeners, service, notify, incognitoContext };
     world.workers = keepOthers ? [...world.workers.filter(w => w.incognitoContext !== incognitoContext), worker] : [worker];
+    patch?.(api); // configure mocks before install reads storage
     service.install();
     return worker;
   };
@@ -269,7 +273,7 @@ describe('manual close from a preview', () => {
     const late = world.addTab(1);
     world.now = NOW;
     const result = await svc.closePreview(1, preview.id);
-    expect(result).toEqual({ message: 'Closed 3 tabs not viewed recently.', closed: 3, skipped: 0, failed: 0 });
+    expect(result).toEqual({ message: 'Closed 3 tabs.', closed: 3, skipped: 0, failed: 0 });
     expect(world.tab(late)).toBeTruthy();
     for (const id of others) expect(world.tab(id)).toBeUndefined();
     await expect(svc.closePreview(1, preview.id)).rejects.toThrow(PREVIEW_EXPIRED);
@@ -298,7 +302,7 @@ describe('manual close from a preview', () => {
     await settle();
     const result = await svc.closePreview(1, preview.id);
     expect(result).toMatchObject({ closed: 2, skipped: 1, failed: 0 });
-    expect(result.message).toBe('Closed 2 tabs not viewed recently. Kept 1 tab that changed or is no longer stale.');
+    expect(result.message).toBe('Closed 2 tabs. Kept 1 tab that changed or is no longer stale.');
   });
 
   it('a recycled same-URL tab with a new ID is not substituted', async () => {
@@ -385,25 +389,54 @@ describe('manual close from a preview', () => {
 });
 
 describe('age tracking', () => {
-  it('Chromium never trusts restored native age: old tabs start a conservative baseline', async () => {
-    const { world, svc } = await setup({ browser: 'chromium' });
-    const state = await svc.getState(1);
-    expect(state.preview.count).toBe(0);
-    expect(state.preview.unknownCount).toBe(0);
-    world.now = NOW + WEEK;
-    expect((await svc.getState(1)).preview.count).toBe(3);
+  it('a week-old active tab in every window is never a candidate (manual or auto)', async () => {
+    const world = createWorld({ browser: 'chromium' });
+    world.addWindow(1);
+    world.addWindow(2);
+    world.now = NOW - 2 * WEEK;
+    const bg1 = world.addTab(1);
+    const a1 = world.addTab(1);
+    const bg2 = world.addTab(2);
+    const a2 = world.addTab(2);
+    world.now = NOW;
+    // The active tabs keep their 2-week-old native last-activation and are
+    // never reactivated, yet must stay protected in both windows.
+    world.tab(a1).active = true;
+    world.tab(a2).active = true;
+    const { service } = world.startWorker();
+    await settle();
+    await enable(service, 1);
+    const previewed = (await service.getState(1)).preview.tabs.map(t => t.id);
+    expect(previewed).toEqual([bg1, bg2]); // scope-wide manual preview, actives excluded
+    expect(previewed).not.toContain(a1);
+    expect(previewed).not.toContain(a2);
+    world.now = world.alarms.get(STALE_ALARM).scheduledTime;
+    await world.fireAlarm();
+    expect(world.tab(a1)).toBeTruthy();
+    expect(world.tab(a2)).toBeTruthy();
+    expect(world.tab(bg1)).toBeUndefined();
+    expect(world.tab(bg2)).toBeUndefined();
   });
 
-  it('Chromium records leaving a tab without previousTabId, so a long view is not mistaken for old age', async () => {
-    const { world, svc, front, others } = await setup({ browser: 'chromium', background: 2 });
+  it('Chromium trusts native last-activation as the age, even just-observed', async () => {
+    const { svc } = await setup({ browser: 'chromium' });
+    const state = await svc.getState(1);
+    expect(state.preview.count).toBe(3); // native: 2 weeks since last activation
+    expect(state.ageBasis).toBe('activated');
+  });
+
+  it('Chromium measures age from the last activation, not a later deselection', async () => {
+    const { world, svc, front, others } = await setup({ browser: 'chromium', background: 1 });
     world.now = NOW + WEEK;
-    world.activate(others[0]);   // selected at NOW + WEEK
+    world.activate(others[0]);   // last selected at NOW + WEEK
     world.now += 3 * DAY_MS;
-    world.activate(front);       // left 3 days later; native still says NOW + WEEK
+    world.activate(front);       // left 3 days later; Chrome native still says NOW + WEEK
     await settle();
-    world.now += 4 * DAY_MS + HOUR_MS / 2;
+    // A full week after that last activation — though it was left only 4 days
+    // ago — it qualifies: Chrome's clock starts at selection, not deselection.
+    world.now = NOW + 2 * WEEK;
     const ids = (await svc.getState(1)).preview.tabs.map(t => t.id);
-    expect(ids).toEqual([others[1]]);
+    expect(ids).toEqual([others[0]]);
   });
 
   it('a background reload does not reset age, but invalidates the preview binding', async () => {
@@ -436,13 +469,18 @@ describe('age tracking', () => {
     expect((await worker.service.getState(1)).preview.count).toBe(3);
   });
 
-  it('a full Chromium restart resets age: new tab IDs never reuse old records', async () => {
+  it('a clean Chromium restart preserves native last-activation age', async () => {
     const { world, svc } = await setup({ browser: 'chromium' });
     await svc.getState(1);
-    world.now = NOW + WEEK;
-    const worker = world.restartBrowser();
+    world.now = NOW + HOUR_MS;
+    const worker = world.restartBrowser(); // new tab IDs, native lastAccessed preserved
     await settle();
-    expect((await worker.service.getState(1)).preview.count).toBe(0);
+    expect((await worker.service.getState(1)).preview.count).toBe(3);
+    // A second clean restart stays stable.
+    const worker2 = world.restartBrowser();
+    await settle();
+    expect((await worker2.service.getState(1)).preview.count).toBe(3);
+    expect((await worker2.service.getState(1)).ageBasis).toBe('activated');
   });
 
   it('Firefox native age continues across a full restart', async () => {
@@ -450,13 +488,258 @@ describe('age tracking', () => {
     const worker = world.restartBrowser();
     await settle();
     expect((await worker.service.getState(1)).preview.count).toBe(3);
+    expect((await worker.service.getState(1)).ageBasis).toBe('viewed');
   });
 
-  it('a corrupt session store is treated as no history, never as old age', async () => {
+  it('a corrupt session store is discarded, but native age still governs on Chromium', async () => {
     const { world } = await setup({ browser: 'chromium' });
     world.session['stale.age.normal'] = { tabs: { 2: { s: -1, v: 0, g: 0 }, 3: 'old' }, active: 'x' };
     const worker = world.startWorker();
+    await settle();
+    // The malformed records are thrown away, but tab.lastAccessed is unchanged.
+    expect((await worker.service.getState(1)).preview.count).toBe(3);
+  });
+
+  it('a corrupt rollback journal fails closed: old native values are not proof of age', async () => {
+    const { world } = await setup({ browser: 'chromium' });
+    world.local['staleAgeJournal'] = { v: 99, bogus: true };
+    const worker = world.startWorker();
+    await settle();
+    // The corrupt journal establishes a younger floor, so the old tabs are kept.
     expect((await worker.service.getState(1)).preview.count).toBe(0);
+    expect(world.local.staleAgeJournal.v).toBe(1);
+    expect(world.local.staleAgeJournal.floor).toBeGreaterThan(0);
+  });
+
+  it('a read failure on the journal fails closed too', async () => {
+    const { world } = await setup({ browser: 'chromium' });
+    const worker = world.startWorker({ patch: api => {
+      const real = api.storage.local.get.getMockImplementation();
+      api.storage.local.get.mockImplementation(async keys => {
+        if (keys === 'staleAgeJournal') throw new Error('io'); // only the journal read fails
+        return real(keys);
+      });
+    } });
+    await settle();
+    expect((await worker.service.getState(1)).preview.count).toBe(0);
+    expect(world.local.staleAgeJournal.floor).toBeGreaterThan(0);
+  });
+});
+
+describe('Chromium native-rollback journal', () => {
+  it('corrects a rolled-back native value across a fresh session, keeping a reactivated tab', async () => {
+    const { world, svc, front, others } = await setup({ browser: 'chromium', background: 2 });
+    const [X, Y] = others;
+    world.now = NOW;
+    world.activate(X);     // reactivate X: native -> NOW; journal records [NOW-2WEEK, NOW]
+    world.activate(front); // leave X
+    await settle();
+    expect(world.local.staleAgeJournal.j.length).toBeGreaterThanOrEqual(1);
+    // A crash rolls X's native back to its pre-reactivation value. Y keeps a
+    // distinct old value so it is not covered by X's journal entry.
+    world.tab(X).lastAccessed = NOW - 2 * WEEK;
+    world.tab(Y).lastAccessed = NOW - 3 * WEEK;
+    world.now = NOW + HOUR_MS;
+    const worker = world.restartBrowser(); // session cleared; durable journal kept
+    await settle();
+    const preview = (await worker.service.getState(1)).preview;
+    expect(preview.count).toBe(1);                 // only the genuinely-old Y
+    expect(preview.tabs[0].lastViewedAt).toBe(NOW - 3 * WEEK);
+  });
+
+  it('a colliding anchor is clamped younger and kept — the safe direction', async () => {
+    const { world, svc, front, others } = await setup({ browser: 'chromium', background: 2 });
+    const [X] = others;    // X and Y both have native NOW-2WEEK from setup
+    world.now = NOW;
+    world.activate(X);
+    world.activate(front);
+    await settle();
+    // Crash: X rolls back to NOW-2WEEK, which Y also carries (a collision).
+    world.tab(X).lastAccessed = NOW - 2 * WEEK;
+    world.now = NOW + HOUR_MS;
+    const worker = world.restartBrowser();
+    await settle();
+    // Y shares X's journaled anchor, so the match keeps it too (false negative, safe).
+    expect((await worker.service.getState(1)).preview.count).toBe(0);
+  });
+
+  it('a near-equal restored value within drift is still corrected younger', async () => {
+    const { world, svc, front, others } = await setup({ browser: 'chromium', background: 1 });
+    const [X] = others;
+    world.now = NOW;
+    world.activate(X);
+    world.activate(front);
+    await settle();
+    // Restore drifts the native value a few ms from the journaled anchor.
+    world.tab(X).lastAccessed = NOW - 2 * WEEK + 5;
+    world.now = NOW + HOUR_MS;
+    const worker = world.restartBrowser();
+    await settle();
+    expect((await worker.service.getState(1)).preview.count).toBe(0);
+  });
+
+  it('private activity never writes a durable journal', async () => {
+    const { world, priv } = await withPrivate('chromium');
+    world.now = NOW + 3 * WEEK;
+    world.activate(priv[0]); // seen only by the incognito worker, which never persists
+    await settle();
+    expect(JSON.stringify(world.local)).not.toMatch(/staleAgeJournal/);
+  });
+
+  it('a failed journal write is tracked dirty, defers the sweep and fails closed on a restarted worker', async () => {
+    const { world, worker, svc, front, others } = await setup({ browser: 'chromium', background: 2 });
+    const [X, Y] = others;
+    // The durable journal write fails after the in-memory floor already moved.
+    const realSet = worker.api.storage.local.set.getMockImplementation();
+    worker.api.storage.local.set.mockImplementation(async items => {
+      if ('staleAgeJournal' in items) throw new Error('disk full');
+      return realSet(items);
+    });
+    world.now = NOW;
+    world.activate(X);     // supersession [NOW-2WEEK, NOW]; its journal write fails
+    world.activate(front);
+    await settle();
+    // Not swallowed: a timestamp-only session marker records the lost write.
+    expect(world.session['stale.journalDirty']?.at).toBeGreaterThan(0);
+    expect(JSON.stringify(world.session['stale.journalDirty'])).not.toMatch(/site\.example|"id"|url/);
+
+    // The next sweep fails closed (defers): nothing closes while the floor is
+    // not durable, even the genuinely-old tabs.
+    await enable(svc);
+    world.now = NOW + HOUR_MS;
+    expect(await svc.sweep()).toBe(false);
+    expect(world.tab(X)).toBeTruthy();
+    expect(world.tab(Y)).toBeTruthy();
+
+    // A restarted worker (session kept, storage healthy again) reads the marker,
+    // fails closed via the global floor, then flushes and clears the marker.
+    const restarted = world.startWorker();
+    await settle();
+    expect((await restarted.service.getState(1)).preview.count).toBe(0);
+    expect(world.session['stale.journalDirty']).toBeUndefined();
+    expect(world.local.staleAgeJournal.floor).toBeGreaterThanOrEqual(NOW);
+  });
+});
+
+describe('the durable journal lands before the session anchor it protects', () => {
+  const failJournalWrites = api => {
+    const realSet = api.storage.local.set.getMockImplementation();
+    api.storage.local.set.mockImplementation(async items => {
+      if ('staleAgeJournal' in items) throw new Error('disk full');
+      return realSet(items);
+    });
+  };
+
+  it('an onActivated supersession keeps the old session anchor until the journal is durable, re-emitting after a restart', async () => {
+    const { world, worker, front, others } = await setup({ browser: 'chromium', background: 2 });
+    const [X] = others;
+    failJournalWrites(worker.api);
+    world.now = NOW;
+    world.activate(X);     // reactivation: native X -> NOW; its journal write fails
+    world.activate(front);
+    await settle();
+    // The durable floor never landed, so the advanced anchor is NOT committed
+    // to session: a worker killed here re-observes the pre-reactivation value.
+    expect(world.session['stale.age.normal'].tabs[X].a).toBe(NOW - 2 * WEEK);
+    expect(world.session['stale.journalDirty']?.at).toBeGreaterThan(0);
+
+    // A restarted worker on healthy storage re-observes native > stored anchor
+    // and re-emits the same [old,new] correction, now landing it durably.
+    world.startWorker();
+    await settle();
+    expect(world.session['stale.journalDirty']).toBeUndefined();
+    expect(world.local.staleAgeJournal.j).toContainEqual([NOW - 2 * WEEK, NOW]);
+  });
+
+  it('does not advance the session anchor while the journal write is still in flight', async () => {
+    const { world, worker, front, others } = await setup({ browser: 'chromium', background: 2 });
+    const [X] = others;
+    const realSet = worker.api.storage.local.set.getMockImplementation();
+    const gate = deferred();
+    let held = false;
+    worker.api.storage.local.set.mockImplementation(async items => {
+      if ('staleAgeJournal' in items && !held) { held = true; await gate.promise; } // stall the durable write
+      return realSet(items);
+    });
+    world.now = NOW;
+    world.activate(X);
+    await settle();
+    // The journal write has not resolved, so the advanced anchor must not be in
+    // session yet: the ordering keeps the old anchor recoverable.
+    expect(world.session['stale.age.normal'].tabs[X].a).toBe(NOW - 2 * WEEK);
+
+    // Kill the stalled worker (its write never resolves) and reconstruct from
+    // the kept session and the last durable (empty) journal.
+    world.startWorker();
+    await settle();
+    expect(world.local.staleAgeJournal.j).toContainEqual([NOW - 2 * WEEK, NOW]);
+  });
+
+  it('loadScope journals a missed activation before its session anchor, staying re-emittable on failure', async () => {
+    const { world, others } = await setup({ browser: 'chromium', background: 2 });
+    const [X] = others;
+    world.now = NOW;
+    world.tab(X).lastAccessed = NOW; // native advanced with no onActivated delivered: a missed event
+
+    // A fresh worker whose durable journal write fails as loadScope detects the miss.
+    world.startWorker({ patch: failJournalWrites });
+    await settle();
+    // Detected via observeTabs, but the floor is not durable, so the session
+    // anchor is left un-advanced and the lost write is marked.
+    expect(world.session['stale.age.normal'].tabs[X].a).toBe(NOW - 2 * WEEK);
+    expect(world.session['stale.journalDirty']?.at).toBeGreaterThan(0);
+
+    // A healed worker re-observes the old anchor and makes the floor durable.
+    world.startWorker();
+    await settle();
+    expect(world.session['stale.journalDirty']).toBeUndefined();
+    expect(world.local.staleAgeJournal.floor).toBeGreaterThanOrEqual(NOW);
+  });
+
+  it('the durable journal records only timestamps — no URLs, titles or tab IDs', async () => {
+    const { world, front, others } = await setup({ browser: 'chromium', background: 2 });
+    const [X] = others;
+    world.now = NOW;
+    world.activate(X);
+    world.activate(front);
+    await settle();
+    const journal = world.local.staleAgeJournal;
+    expect(journal.j.length).toBeGreaterThanOrEqual(1);
+    expect(Object.keys(journal).sort()).toEqual(['floor', 'j', 'v']); // version, global floor, [anchor,floor] pairs
+    expect(journal.j.every(e => Array.isArray(e) && e.length === 2 && e.every(Number.isFinite))).toBe(true);
+    expect(JSON.stringify(world.local)).not.toMatch(/site\.example|Tab \d|lastAccessed/);
+  });
+});
+
+describe('a candidate activated during the final re-check is skipped, not closed', () => {
+  it.each(['firefox', 'chromium'])('manual (%s): switching to the candidate and back keeps it', async browser => {
+    const { world, worker, svc, front, others } = await setup({ browser, background: 1 });
+    const { preview } = await svc.getState(1);
+    expect(preview.count).toBe(1);
+    const hold = holdRecheck(world, worker, 'currentAges', front);
+    const closing = svc.closePreview(1, preview.id);
+    await hold.reached;        // paused after the candidate's active-check passed
+    world.activate(others[0]); // switch to the candidate during the final checks...
+    world.activate(front);     // ...and back again
+    await settle();
+    hold.release();
+    const result = await closing;
+    expect(world.tab(others[0])).toBeTruthy(); // the activated candidate survives
+    expect(result).toMatchObject({ closed: 0, skipped: 1 });
+  });
+
+  it.each(['firefox', 'chromium'])('automatic (%s): a candidate activated during the re-check is not closed', async browser => {
+    const { world, worker, svc, front, others } = await setup({ browser, background: 1 });
+    await enable(svc);
+    const hold = holdRecheck(world, worker, 'currentAges', front);
+    const running = svc.sweep();
+    await hold.reached;
+    world.activate(others[0]);
+    await settle();
+    hold.release();
+    await running;
+    expect(world.tab(others[0])).toBeTruthy();
+    expect(worker.api.tabs.remove).not.toHaveBeenCalled();
   });
 });
 
@@ -552,7 +835,7 @@ describe('opt-in and scheduling', () => {
     await world.fireAlarm();
     expect(world.tabs.map(t => t.id).sort()).toEqual([front, others[0], others[1], others[2]].sort());
     expect(worker.notify).toHaveBeenCalledTimes(1);
-    expect(worker.notify.mock.calls[0][0]).toBe('Automatically closed 2 tabs not viewed recently.');
+    expect(worker.notify.mock.calls[0][0]).toBe('Automatically closed 2 tabs.');
     expect(world.alarms.get(STALE_ALARM).scheduledTime).toBe(nextLocalHour(world.now));
   });
 
@@ -969,17 +1252,14 @@ describe('Chromium activation order', () => {
     worker.api.windows.get.mockImplementationOnce(async (...args) => { await gate.promise; return realWindow(...args); });
     world.activate(a);         // this switch's window lookup is slow
     world.now += 1000;
-    world.activate(front);     // and the user returns at once
+    world.activate(front);     // and the user returns at once, so front stays active
     await settle();
     gate.resolve();
     await settle();
-    world.now += 3 * HOUR_MS;  // front viewed for three hours
-    world.activate(b);
-    await settle();
-    world.now += 60_000;
+    world.now += 3 * HOUR_MS;  // three hours pass with front still selected
     expect(await svc.sweep()).toBe(true);
-    expect(world.tab(front)).toBeTruthy(); // left a minute ago
-    expect(world.tab(a)).toBeUndefined();  // left three hours ago
+    expect(world.tab(front)).toBeTruthy(); // still the active tab, protected
+    expect(world.tab(a)).toBeUndefined();  // last selected three hours ago
   });
 });
 
@@ -1131,7 +1411,7 @@ describe('time zones', () => {
 describe('failure notices', () => {
   const NOT_SCHEDULED = 'Automatic stale-tab cleanup is not scheduled: quota';
   const DID_NOT_RUN = msg => `Automatic stale-tab cleanup did not run: ${msg}`;
-  const CLOSED = 'Automatically closed 3 tabs not viewed recently.';
+  const CLOSED = 'Automatically closed 3 tabs.';
 
   it('a failed next-run plan is reported once, never swallowed, and again after a run succeeds', async () => {
     const { world, worker, svc } = await setup();

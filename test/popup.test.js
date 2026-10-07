@@ -1,81 +1,14 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { startPopup } from '../src/popup.js';
+import { El, mountFixture } from './mocks/dom.js';
 
 const html = readFileSync(new URL('../src/popup.html', import.meta.url), 'utf8');
 const css = readFileSync(new URL('../src/popup.css', import.meta.url), 'utf8');
 
-// Minimal DOM built from the real popup markup.
-class El {
-  constructor(tag, owner) {
-    Object.assign(this, { tag, owner, id: '', hidden: false, parent: null, dataset: {}, text: '', listeners: {}, children: [] });
-    this.attrs = new Map();
-    this.classes = new Set();
-    this.classList = {
-      add: name => this.classes.add(name),
-      remove: name => this.classes.delete(name),
-      contains: name => this.classes.has(name),
-    };
-  }
-  get textContent() { return this.text; }
-  set textContent(value) { this.text = String(value); }
-  setAttribute(name, value) { this.attrs.set(name, String(value)); }
-  getAttribute(name) { return this.attrs.get(name) ?? null; }
-  removeAttribute(name) { this.attrs.delete(name); }
-  addEventListener(type, fn) { (this.listeners[type] ??= []).push(fn); }
-  dispatch(type, target = this, extra = {}) {
-    const event = { target, currentTarget: this, defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }, ...extra };
-    for (const fn of this.listeners[type] ?? []) fn(event);
-    return event;
-  }
-  append(...nodes) {
-    for (const node of nodes) { node.parent = this; this.children.push(node); this.owner.all.push(node); }
-  }
-  replaceChildren(...nodes) {
-    for (const node of this.children) node.parent = null;
-    this.children = [];
-    this.append(...nodes);
-  }
-  closest(selector) {
-    if (selector !== 'button[data-criteria]') throw new Error(`unsupported selector ${selector}`);
-    for (let node = this; node; node = node.parent) if (node.tag === 'button' && node.dataset.criteria) return node;
-    return null;
-  }
-  querySelectorAll(selector) {
-    if (selector !== 'button') throw new Error(`unsupported selector ${selector}`);
-    return this.owner.all.filter(node => node.tag === 'button' && this.contains(node) && node !== this);
-  }
-  contains(node) {
-    for (let current = node; current; current = current.parent) if (current === this) return true;
-    return false;
-  }
-  focus() { this.owner.activeElement = this; }
-}
-
 function setup(reply, apis = {}) {
-  const document = { activeElement: null, all: [], listeners: {} };
-  const byId = new Map();
-  const stack = [];
-  for (const [, close, tag, attrs] of html.matchAll(/<(\/?)([a-z][\w-]*)([^>]*)>/g)) {
-    if (close) { stack.pop(); continue; }
-    const node = new El(tag, document);
-    node.parent = stack.at(-1) ?? null;
-    for (const [, name, value] of attrs.matchAll(/\s([\w-]+)(?:="([^"]*)")?/g)) {
-      if (name === 'id') { node.id = value; byId.set(value, node); }
-      else if (name === 'hidden') node.hidden = true;
-      else if (name.startsWith('data-')) node.dataset[name.slice(5).replace(/-(\w)/g, (_, c) => c.toUpperCase())] = value;
-      else node.setAttribute(name, value ?? '');
-    }
-    document.all.push(node);
-    if (!/^(meta|link|path|circle|rect|input)$/.test(tag) && !attrs.endsWith('/')) stack.push(node);
-  }
-  document.body = document.all.find(node => node.tag === 'body');
+  const { document, byId } = mountFixture(html);
   document.activeElement = document.body;
-  document.getElementById = id => byId.get(id) ?? null;
-  document.querySelector = selector => document.all.find(node => node.tag === selector) ?? null;
-  document.createElement = tag => new El(tag, document);
-  document.addEventListener = (type, fn) => (document.listeners[type] ??= []).push(fn);
-  document.dispatch = El.prototype.dispatch;
 
   const window = new El('#window', document);
   window.close = vi.fn();
@@ -344,8 +277,9 @@ const DAY = 24 * HOUR;
 const NOW = new Date(2026, 9, 6, 21, 15).getTime();
 const at = (hours, minutes = 0) => new Date(2026, 9, 6, hours, minutes).getTime();
 
-function staleState({ settings, auto, preview } = {}) {
+function staleState({ settings, auto, preview, ageBasis = 'viewed' } = {}) {
   return {
+    ageBasis,
     settings: { staleThresholdMs: 7 * DAY, autoCloseStaleEnabled: false, skipPinned: true, skipAudible: true, ...settings },
     auto: { enabled: false, available: true, nextRunAt: at(22), count: 0, error: null, ...auto },
     preview: { id: 'p1', tabs: [], count: 0, windowCount: 1, unknownCount: 0, ...preview },
@@ -553,6 +487,19 @@ describe('popup stale tabs: refresh and ordering', () => {
     expect(writes).toBe(0);
   });
 
+  it('labels the duration field and review rows by the reported age basis', async () => {
+    const tabs = [{ id: 1, title: 'Docs', url: 'https://docs.example.com/a', lastViewedAt: NOW - 8 * DAY }];
+    const ui = staleSetup({ getStaleState: async () => staleState({ ageBasis: 'activated', preview: { count: 1, tabs } }) });
+    await settle();
+    expect(ui.$('stale-rule-label').textContent).toBe('Close tabs not activated for');
+    expect(ui.stale().count).toContain('not activated for');
+    ui.press(ui.$('btn-stale'));
+    ui.press(ui.$('stale-review'));
+    await settle();
+    const row = ui.$('stale-review-list').children[0];
+    expect(row.children[1].textContent).toContain('Activated 8 days ago');
+  });
+
   it('removes listeners, timers and the editor lease on pagehide', async () => {
     const ui = staleSetup();
     await settle();
@@ -744,7 +691,7 @@ describe('popup stale tabs: automation checkbox', () => {
     await settle();
     ui.press(ui.$('btn-stale'));
     expect(ui.stale().detail).toBe('If turned on, 6 tabs would close automatically at 10p. Includes tabs that reach 7 days before then. Nothing closes before then.');
-    expect(html).toMatch(/id="stale-warning"[^>]*>Tabs are closed, not archived\. Unsaved changes may be lost\.</);
+    expect(ui.$('stale-warning').textContent).toBe('Tabs are closed, not archived. Unsaved changes may be lost.');
     expect(ui.$('stale-auto').getAttribute('aria-describedby')).toContain('stale-warning');
     ui.toggleAuto(true);
     await settle();
@@ -894,7 +841,7 @@ describe('popup stale tabs: manual close', () => {
     const ui = staleSetup({ getStaleState: async () => staleState({ settings: { skipPinned: false, skipAudible: false }, preview: { count: 2, unknownCount: 1 } }) });
     await settle();
     expect(ui.$('stale-protect').textContent).toBe(
-      "Close now includes pinned tabs and tabs playing audio. 1 tab with an unknown last viewed time is kept. Both keep each window's active tab and last tab. Automatic cleanup always keeps pinned tabs and tabs playing audio.",
+      "Close now includes pinned tabs and tabs playing audio. 1 tab with an unknown last viewed time is kept. Both keep each window's active tab and last tab, even when the active tab's age is past the limit. Automatic cleanup always keeps pinned tabs and tabs playing audio.",
     );
   });
 });
@@ -1070,21 +1017,23 @@ describe('popup stale tabs: review fixes', () => {
   it('shows a partial close result with its error and stays open', async () => {
     const ui = staleSetup({
       getStaleState: async () => staleState({ preview: { id: 'snap', count: 4 } }),
-      closeStalePreview: async () => ({ message: 'Closed 2 tabs not viewed recently.', closed: 2, skipped: 2, failed: 0, error: 'The stale-tab rule changed.' }),
+      closeStalePreview: async () => ({ message: 'Closed 2 tabs.', closed: 2, skipped: 2, failed: 0, error: 'The stale-tab rule changed.' }),
     });
     await settle();
     ui.press(ui.$('btn-stale'));
     ui.press(ui.$('stale-close'));
     await settle();
     expect(ui.window.close).not.toHaveBeenCalled();
-    expect(ui.status()).toMatchObject({ tone: 'error', title: 'Closed 2 tabs not viewed recently.', detail: 'The stale-tab rule changed.', closable: true, spinner: false });
+    expect(ui.status()).toMatchObject({ tone: 'error', title: 'Closed 2 tabs.', detail: 'The stale-tab rule changed.', closable: true, spinner: false });
     expect(ui.main.getAttribute('aria-busy')).toBeNull();
   });
 
-  it('keeps the status visible over a tall menu and lets the review list take keyboard focus', () => {
-    expect(css).toMatch(/#status\.visible\s*\{[^}]*position:\s*sticky[^}]*bottom:\s*0/);
-    expect(html).toMatch(/id="stale-review-list"[^>]*tabindex="0"/);
-    expect(html).not.toMatch(/id="stale-value"[^>]*\smax=/);
+  it('makes the review list keyboard-focusable and imposes no arbitrary duration maximum', () => {
+    const { byId } = mountFixture(html);
+    // Footer visibility and review-list occlusion are asserted on rendered
+    // geometry in scripts/test-stale-cleanup.mjs, not inferred from CSS text.
+    expect(byId.get('stale-review-list').getAttribute('tabindex')).toBe('0');
+    expect(byId.get('stale-value').hasAttribute('max')).toBe(false);
   });
 });
 

@@ -58,6 +58,12 @@ const fixture = (what, detail) => { fixtures.push({ what, detail, at: new Date()
 const limit = (what, why) => { limitations.push({ what, why }); console.log(`LIMIT ${what}: ${why}`); };
 
 // ---- Oracles: written from the spec, not imported from product code ---------
+// Age wording follows the browser's reporting basis (spec, not imported):
+// Firefox reports last-viewed (deselection); Chromium reports last-activation
+// (selection). The result/summary message stays basis-neutral in the product.
+const AGE = name === 'firefox'
+  ? { idle: 'not viewed for', none: 'gone unviewed for', ago: 'Viewed' }
+  : { idle: 'not activated for', none: 'gone without activation for', ago: 'Activated' };
 function nextLocalHour(now) {
   const d = new Date(now);
   d.setMinutes(0, 0, 0);
@@ -491,6 +497,11 @@ async function chromiumAdapter() {
       const wake = await context.newPage();
       await wake.goto(`${ext}/options.html`).catch(() => {});
       await until(() => (worker = context.serviceWorkers().find(w => w !== old && w.url().startsWith(ext))), 'reloaded worker', 15000);
+      // Deactivate the wake tab before closing it. Closing the active, last-in-
+      // strip tab would reactivate its neighbour and advance THAT tab's native
+      // lastAccessed, which silently perturbs the age fixtures (the age basis is
+      // last-activation on Chromium).
+      await page.bringToFront().catch(() => {});
       await wake.close();
       sessions.clear();
     },
@@ -653,25 +664,72 @@ try {
         crossing: new Date(lastViewed.crossing).toISOString(), nextRun: new Date(nextRun).toISOString() });
       if (nextRun - now < 8 * MIN) limit('projected count (crossing tab)', `only ${Math.round((nextRun - now) / MIN)} min to the next whole hour; crossing tab may turn stale during the run`);
     } else {
-      // Stale group ages from real creation; crossing is created at hh:50 on the
-      // shifted clock, then the clock moves to hh:05 one week minus 45 min later.
+      // Chromium age = extension clock (fixture offset) - the tab's REAL native
+      // last-activation (tab.lastAccessed), corrected only UPWARD by the durable
+      // rollback journal (stale-age.js: a journal entry raises a native anchor to
+      // a younger floor matched within ANCHOR_DRIFT_MS, never older). The browser
+      // sets lastAccessed on the real wall clock and exposes no privileged setter,
+      // so a single global clock offset alone makes every tab uniformly old and
+      // cannot express per-tab ages. We therefore keep the stale group on raw
+      // native (uniformly past 7 days under a future offset) and add timestamp-
+      // only journal corrections that make the crossing tab fresh now but stale by
+      // the next run, and the late tab fresh now and at the next run. The journal
+      // is written through the real storage.local and the worker is reloaded so
+      // the product re-reads it (its journal cache is per-worker). Only numbers are
+      // stored: version, a zero floor and [nativeAnchor, youngerFloor] pairs.
+      // [fixture]
       const realNow = Date.now();
-      let first = 8 * DAY;
-      const at50 = t => { const d = new Date(t); d.setMinutes(50, 0, 0); let x = d.getTime(); while (x < t) x += HOUR; return x; };
-      first = at50(realNow + first + 5000) - realNow;
-      await b.setOffset(first);
-      const crossingAt = b.nowB();
+      // Land the extension clock at hh:05 so the next whole local hour is a safe
+      // ~55 min away: the crossing tab must be fresh now and stale only at the run.
+      const at05 = t => { const d = new Date(t); d.setMinutes(5, 0, 0); let x = d.getTime(); while (x < t) x += HOUR; return x; };
+      const extNow = at05(realNow + 15 * DAY);
+      const OFFSET = extNow - realNow;
+      const nextRunAt = nextLocalHour(extNow);
+      // Create crossing and late with gaps, so their native anchors sit well clear
+      // (> ANCHOR_DRIFT_MS) of the stale cluster and of each other; a correction
+      // keyed to one anchor then never matches another tab.
+      await sleep(150);
       ids.crossing = await create('crossing');
       await loaded(['crossing']);
-      for (const slug of [...STALE, 'stale-pinned', 'audio-stale']) lastViewed[slug] = realNow; // created on the real clock
-      lastViewed.crossing = crossingAt;
-      const target = crossingAt + WEEK - 45 * MIN;
-      await b.setOffset(target - Date.now());
+      await sleep(150);
       ids.late = await create('late');
       await loaded(['late']);
-      lastViewed.late = b.nowB();
-      fixture('chromium isolated extension clock', { offsetDays: +((target - Date.now()) / DAY).toFixed(4), crossingCreatedAt: new Date(crossingAt).toISOString(),
-        extensionNow: new Date(b.nowB()).toISOString(), nextRun: new Date(nextLocalHour(b.nowB())).toISOString() });
+      // Stale group ages from real creation; the future offset puts them all well
+      // past 7 days with no correction.
+      for (const slug of [...STALE, 'stale-pinned', 'audio-stale']) lastViewed[slug] = realNow;
+      // Read each tab's REAL native last-activation to anchor its journal entry.
+      const snap = await snapshot();
+      const nativeOf = slug => snap.find(t => t.url === urlOf(slug))?.lastAccessed;
+      const crossingNative = nativeOf('crossing');
+      const lateNative = nativeOf('late');
+      const num = v => typeof v === 'number' && Number.isFinite(v) && v > 0;
+      if (!num(crossingNative) || !num(lateNative)) throw new Error(`missing native lastAccessed: crossing=${crossingNative} late=${lateNative}`);
+      // crossing: fresh now, stale one minute into the next scheduled run.
+      const crossingFloor = nextRunAt - WEEK - MIN;
+      // late: viewed on the fixture clock -> fresh now and at the next run.
+      const lateFloor = extNow;
+      lastViewed.crossing = crossingFloor;
+      lastViewed.late = lateFloor;
+      // Younger-only invariant: every floor must exceed the real native anchor it
+      // corrects, which the 15-day future offset guarantees.
+      if (!(crossingFloor > crossingNative && lateFloor > lateNative)) {
+        throw new Error(`journal floors must exceed native anchors: crossingFloor=${crossingFloor} crossingNative=${crossingNative} lateFloor=${lateFloor} lateNative=${lateNative}`);
+      }
+      const journal = { v: 1, floor: 0, j: [[crossingNative, crossingFloor], [lateNative, lateFloor]] };
+      // Make the fixture clock current, then write the journal through the real
+      // storage.local and reload the worker so the product loads it fresh.
+      await b.setOffset(OFFSET);
+      await api(`await api.storage.local.set({ staleAgeJournal: ${JSON.stringify(journal)} }); return true;`);
+      await b.reloadExtension();
+      await b.setOffset(OFFSET);
+      const applied = await api('return await api.storage.local.get("staleAgeJournal");');
+      fixture('chromium differential ages via timestamp-only rollback journal', {
+        offsetDays: +(OFFSET / DAY).toFixed(4), extensionNow: new Date(extNow).toISOString(), nextRun: new Date(nextRunAt).toISOString(),
+        crossing: { nativeAnchor: crossingNative, floor: crossingFloor, floorIso: new Date(crossingFloor).toISOString() },
+        late: { nativeAnchor: lateNative, floor: lateFloor, floorIso: new Date(lateFloor).toISOString() },
+        journal: applied.staleAgeJournal, storage: 'storage.local staleAgeJournal (numbers only)',
+      });
+      if (nextRunAt - extNow < 8 * MIN) limit('projected count (crossing tab)', `only ${Math.round((nextRunAt - extNow) / MIN)} min to the next whole hour; crossing tab may already be stale`);
     }
     const all = await snapshot();
     audible = all.find(t => t.id === ids['audio-stale'])?.audible === true;
@@ -722,7 +780,7 @@ try {
     record.expectedA = { manual, auto };
     check(s.value === '7' && s.unit === 'days' && s.auto === false && !s.autoMixed, 'controls show 7 days and an unchecked automation box', s);
     check(s.warning === WARNING, 'controls show the closed-not-archived warning');
-    check(s.count === `Close now: ${tabs(manual.length)} not viewed for 7 days, across 1 window.`, 'manual count uses eligibility now, with scope', { got: s.count, manual });
+    check(s.count === `Close now: ${tabs(manual.length)} ${AGE.idle} 7 days, across 1 window.`, 'manual count uses eligibility now, with scope', { got: s.count, manual });
     check(s.close === `Close ${tabs(manual.length)} now`, 'Close N tabs now names the manual count', s.close);
     const nextRun = nextLocalHour(b.nowB());
     // A projected count above the manual count says why: tabs that reach the rule before the run.
@@ -731,7 +789,7 @@ try {
       'pre-enable line: projected count at the next whole local hour, explained when above the manual count', { got: s.autoDetail, auto, manual });
     check(auto.length > manual.length, 'projection includes a tab that crosses the threshold before the run', { manual: manual.length, auto: auto.length });
     check(s.protect.includes('Close now keeps pinned tabs and tabs playing audio.')
-      && s.protect.includes("Both keep each window's active tab and last tab. Automatic cleanup always keeps pinned tabs and tabs playing audio."),
+      && s.protect.includes("Both keep each window's active tab and last tab, even when the active tab's age is past the limit. Automatic cleanup always keeps pinned tabs and tabs playing audio."),
       'protections: manual keeps pinned/audio by setting; both keep active and last tab; automatic always keeps pinned/audio', s.protect);
 
     // Unit conversion: 7 days shows as 168 hours and saves nothing.
@@ -765,7 +823,7 @@ try {
     s = await waitState(x => !x.listHidden && x.rows.length > 0, 'review list');
     const titles = manual.map(slug => titleOf(slug));
     check(s.review === 'true' && s.rows.length === manual.length && s.rows.every(r => titles.includes(r.title)), 'Review lists exactly the manual candidates', { rows: s.rows, titles });
-    check(s.rows.every(r => r.meta.includes('127.0.0.1') && /Viewed \d+ days ago/.test(r.meta)), 'review rows show domain and time since viewed', s.rows);
+    check(s.rows.every(r => r.meta.includes('127.0.0.1') && new RegExp(AGE.ago + ' \\d+ days ago').test(r.meta)), 'review rows show domain and time since the age basis', s.rows);
     const layout = await popup(LAYOUT);
     check(layout.h <= 600 && layout.w <= 800 && layout.scrollW <= layout.w, 'popup within browser limits (<=600px tall) with no horizontal overflow', layout);
     check(layout.reach.every(r => r.visible && r.named), 'every stale control is labelled and scrolls into view', layout.reach);
@@ -815,7 +873,7 @@ try {
     check(open.includes(urlOf(outsider)), 'a tab that became eligible after the preview stays open', outsider);
     check(['stale-pinned', 'origin', 'lonely'].every(slug => open.includes(urlOf(slug))), 'pinned, active and single-tab-window tabs survive manual close');
     if (audible) check(open.includes(urlOf('audio-stale')), 'audible tab survives manual close');
-    check(new RegExp(`^Closed ${tabs(preview.length)} not viewed recently\\.`).test(result.message), 'result reports the actual count', result.message);
+    check(new RegExp(`^Closed ${tabs(preview.length)}\\.`).test(result.message), 'result reports the actual count', result.message);
     if (result.notificationError) { console.log(`NOTICE notification rejected: ${result.notificationError}`); await popup('document.getElementById("status-close").click(); return true;').catch(() => {}); }
     await until(async () => !await isOpen(), 'menu closes after success', 8000).catch(async () => closePopup());
   });
@@ -1136,7 +1194,7 @@ try {
     const s = await waitState(x => /normal windows only/.test(x.autoDetail) && x.count !== 'Checking…' && x.count !== 'Updating count…', 'private state', 12000);
     check(s.autoDetail === 'Automatic cleanup runs in normal windows only. Private windows are not included.', 'private menu: automatic count unavailable', s.autoDetail);
     check(s.caption === null || !/Closing \d/.test(s.caption), 'private menu shows no normal-window projection', s.caption);
-    check(/^Close now: no tabs have gone unviewed/.test(s.count), 'private manual preview is scoped to private tabs', s.count);
+    check(new RegExp('^Close now: no tabs have ' + AGE.none).test(s.count), 'private manual preview is scoped to private tabs', s.count);
     await shot('private-window', 'Private window: automation count unavailable');
     // Nothing from normal windows may appear in private-scope state.
     const normalTabs = (await snapshot()).filter(t => !t.incognito && t.url.startsWith(base));
@@ -1188,8 +1246,20 @@ try {
         'incognito-worker activity adds private ages and leaves normal ages untouched', { mid, end });
     }
     await closePopup();
-    const keys = Object.keys(await api('return await api.storage.local.get(null);'));
-    check(!keys.some(k => /private|age|preview|lease|intent/i.test(k)), 'no private or per-tab metadata in persistent storage', keys);
+    const localStore = await api('return await api.storage.local.get(null);');
+    const keys = Object.keys(localStore);
+    // The durable Chromium age journal is normal-context and timestamp-only, so
+    // it is the one allowed "age" key; verify its shape rather than trusting the
+    // name. Everything else per-tab/private must stay out of persistent storage.
+    let journal = localStore.staleAgeJournal;
+    if (typeof journal === 'string') { try { journal = JSON.parse(journal); } catch { journal = null; } }
+    const journalShapeOk = journal === undefined || (
+      journal && typeof journal === 'object' && Number.isInteger(journal.v) &&
+      (journal.floor === 0 || (typeof journal.floor === 'number' && journal.floor > 0)) &&
+      Array.isArray(journal.j) &&
+      journal.j.every(e => Array.isArray(e) && e.length === 2 && e.every(n => typeof n === 'number')));
+    check(journalShapeOk, 'durable age journal, if present, is timestamp-only (version + floor + numeric entries)', localStore.staleAgeJournal);
+    check(!keys.some(k => k !== 'staleAgeJournal' && /private|age|preview|lease|intent/i.test(k)), 'no private or per-tab metadata in persistent storage', keys);
     await win.close();
     // The browser may have restarted (phase F), so look the normal window up again.
     await api('const w = (await api.windows.getAll()).find(x => !x.incognito); if (w) await api.windows.update(w.id, { focused: true }); return true;');

@@ -13,7 +13,7 @@ tools to tame tab sprawl without leaving the browser.
 
 ## Terminology
 
-- **Stale tab**: A tab whose trusted last-viewed time or conservative age baseline meets the configured inactivity threshold; unknown age does not qualify.
+- **Stale tab**: A tab whose trusted last-activity time—last viewed on Firefox, last activated (selected) on Chrome—meets the configured inactivity threshold; unknown age does not qualify.
 - **Duplicate tab**: Two or more tabs sharing the same URL (after normalization).
 - **Active tab**: The currently focused tab in a window. Never auto-closed or moved destructively.
 - **Protected tab**: A pinned tab or a tab playing audio. Excluded from bulk-close operations by default.
@@ -52,15 +52,16 @@ tools to tame tab sprawl without leaving the browser.
 
 ### R4 - Stale-Tab Review and Optional Automatic Cleanup
 
-- **R4.1**: Treat a tab as stale only when trusted last-viewed data or a conservative observed baseline establishes at least the configured elapsed duration. Unknown or inconsistent age keeps the tab. Background reloads and visits to another tab with the same URL do not count as viewing this tab.
+- **R4.1**: Treat a tab as stale only when trusted last-activity data establishes at least the configured elapsed duration: Firefox uses the native last-viewed time with current-session observations; Chrome uses the native last-activated time (the clock starts at selection) plus a timestamp-only correction journal. Unknown or inconsistent age keeps the tab. Background reloads and visits to another tab with the same URL do not reset this tab's age.
 - **R4.2**: Default to seven days; support positive whole hours/days and preserve existing saved thresholds. Menu and Settings share one threshold. Changing units preserves duration, and Escape abandons an unfinished edit.
-- **R4.3**: Both modes protect active and last-in-window tabs. Manual review honors saved pinned/audio protections within its invoking privacy context. Automatic cleanup always protects pinned/audio tabs, excludes private and non-normal windows, and skips loading, hidden, internal/protected and known media-sharing tabs. Never wake a sleeping tab.
+- **R4.3**: Both modes always protect the active tab of every window—regardless of how long since it was active—and the last tab in a window. Manual review honors saved pinned/audio protections within its invoking privacy context. Automatic cleanup always protects pinned/audio tabs, excludes private and non-normal windows, and skips loading, hidden, internal/protected and known media-sharing tabs. Never wake a sleeping tab.
 - **R4.4**: Opening Stale Tabs only expands inline controls. Show the eligible count and a review list before an explicit Close N tabs now action. Removal is bounded to the background-issued preview and rechecks document, scope, age, protection and rule state. Never silently add new candidates.
 - **R4.5**: Automatic cleanup is off by default, including upgrades. Enabling grants explicit permission to close eligible tabs on the next whole local hour, not immediately. Check hourly using browser alarms; disabling prevents further removals not already issued. Open stale editors defer cleanup.
 - **R4.6**: Show exactly Stale Tabs (Auto-Close Enabled) while enabled and, when projected candidates exist, Closing N tabs automatically at TIME. Format the scheduler's actual next run in local time. Zero candidates hide only the caption. Use current eligibility for manual Close now and projected eligibility for the caption, explaining any higher projected count inside the controls.
 - **R4.7**: Serialize manual and automatic batches, consume preview authorization once, and preserve actual partial results. Never retry an uncertain removal. Review remaining tabs is a read-only refresh with visible focus. Report automatic changes but not empty checks; bound repeated failure notifications.
 - **R4.8**: Restore opt-in and scheduling through worker restarts without duplicating sweeps. Full browser restart schedules a future check; device wake may run one delayed sweep, never replaying a backlog. Handle local-hour boundaries, time-zone changes and DST.
-- **R4.9**: Disclose age continuity limits. The current Chrome candidate resets its conservative baseline after full browser/extension restart or tab replacement; repeated restarts can prevent weekly cleanup. A local timestamp persistence design is not approved or implemented. Firefox may use its verified native last-viewed time. Do not claim stronger tracking than the implementation verifies.
+- **R4.9**: Disclose age continuity limits. Chrome preserves ages across a clean restart using native last-activated timestamps plus a timestamp-only correction/rollback journal in local storage that holds no tab IDs, URLs, hashes, titles, or private-window activity and needs no extra permission; the earlier reset-on-restart limitation no longer applies to clean restarts. Crash immunity is not promised: if an abrupt crash loses recent activity in both the browser and the extension, the restored native age can be older than the real one. Chrome private-window age records stay session-only. Firefox uses its native last-viewed time with no new durable store. Keep this claim honest and do not assert stronger tracking than new test evidence verifies.
+- **R4.10**: Report tab age with browser-appropriate wording driven by the background's age basis (`ageBasis`: `viewed` on Firefox, `activated` on Chrome), defaulting to neutral wording when the basis is unknown or absent. The threshold prompt, review-row ages and manual-close scope follow this basis without altering the agreed enabled title or automatic caption.
 
 ### R5 - User Settings
 

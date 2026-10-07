@@ -3,7 +3,7 @@ import { renderShortcuts } from './shortcuts.js';
 import {
   NO_REPLY, REFRESH_MS, canEnableAuto, convertDuration, createEditorLease, createLatest,
   createRuleWriter, describeAuto, describeMain, describeManual, describeUnavailable, domainOf, durationFromMs, formatViewedAgo,
-  isStaleState, parseDuration, scopeState, tabCount, watchStaleSources,
+  isStaleState, parseDuration, ruleLabel, scopeState, tabCount, watchStaleSources,
 } from './stale-ui.js';
 
 const ACTIONS = {
@@ -182,6 +182,7 @@ export function startPopup({ document, window, browser, locale }) {
   // does, and only for the background-issued preview currently shown.
   const ui = {
     button: $('btn-stale'), panel: $('stale-panel'), title: $('stale-title'), caption: $('stale-caption'),
+    ruleLabel: $('stale-rule-label'),
     value: $('stale-value'), unit: $('stale-unit'), ruleError: $('stale-rule-error'),
     auto: $('stale-auto'), autoDetail: $('stale-auto-detail'), count: $('stale-count'),
     protect: $('stale-protect'), review: $('stale-review'), close: $('stale-close'),
@@ -240,7 +241,7 @@ export function startPopup({ document, window, browser, locale }) {
     const { tabs, count } = state.preview;
     const rows = tabs.map(tab => ({
       title: String(tab.title || tab.url || 'Untitled tab'),
-      meta: [domainOf(tab.url), formatViewedAgo(tab.lastViewedAt, now, locale)].filter(Boolean).join(' · '),
+      meta: [domainOf(tab.url), formatViewedAgo(tab.lastViewedAt, now, locale, state.ageBasis)].filter(Boolean).join(' · '),
     }));
     const key = JSON.stringify([rows, count]);
     if (key === listed) return;
@@ -276,6 +277,7 @@ export function startPopup({ document, window, browser, locale }) {
     const now = Date.now();
     const on = enabled();
     const shown = current ? state : null;
+    setText(ui.ruleLabel, ruleLabel(state?.ageBasis));
     const head = describeMain({ state: shown, enabled: on, error: loadError, now, locale });
     setText(ui.title, head.title);
     setText(ui.caption, head.caption);

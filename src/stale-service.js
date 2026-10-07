@@ -16,6 +16,10 @@ import {
   isValidThreshold, manualCloseMessage, nextLocalHour, normalizeRule, observeTabs, planStale, pruneLeases, prunePreviews,
   readAgeStore, recordActivation, urlHash, validateRulePatch,
 } from './stale-core.js';
+import {
+  ANCHOR_DRIFT_MS, MAX_JOURNAL_ENTRIES, buildCorrector, emptyJournal,
+  readJournal, recordSupersededAnchor,
+} from './stale-age.js';
 
 export const STALE_ALARM = 'atv-stale-sweep';
 export const PREVIEW_EXPIRED = 'This list of stale tabs is out of date. Review the tabs again before closing them.';
@@ -38,10 +42,18 @@ const ALARM_MATCH_MS = 60 * 1000;
 const NAMESPACES = ['normal', 'private'];
 const SESSION_KEY = 'stale.session';
 const NOTICE_KEY = 'stale.notice'; // last failure notified, so it is not repeated every hour
+// Chromium rollback-safety journal (storage.local, normal context only).
+// Timestamp-only; see stale-age.js. Never written for Firefox or private tabs.
+const JOURNAL_KEY = 'staleAgeJournal';
+// Session marker (normal context only, timestamp-only) recording that a durable
+// journal write failed, so a restarted worker fails closed instead of reading a
+// stale journal as proof of age. Never holds tab data or private activity.
+const JOURNAL_DIRTY_KEY = 'stale.journalDirty';
 
 const ns = incognito => (incognito === true ? 'private' : 'normal');
 const keyOf = (kind, space) => `stale.${kind}.${space}`;
 const isId = id => Number.isSafeInteger(id) && id >= 0;
+const isTime = t => Number.isFinite(t) && t > 0;
 const errorText = err => String(err?.message ?? err ?? 'Unknown error');
 const pick = (object, keys) => Object.fromEntries(keys.filter(key => Object.hasOwn(object, key)).map(key => [key, object[key]]));
 
@@ -72,17 +84,38 @@ export function createStaleService(api, {
   const split = api.runtime.getManifest?.()?.incognito === 'split';
   const owned = incognitoContext ? ['private'] : split ? ['normal'] : NAMESPACES;
   const owns = space => owned.includes(space);
+  // The Chromium rollback-safety journal is durable, so it is written only by a
+  // worker that owns the normal (non-private) scope and only when native age is
+  // not already trustworthy (i.e. not Firefox).
+  const persistJournal = !nativeTrusted && owned.includes('normal');
 
   const sessionWrite = serial(); // every read-modify-write of storage.session
   const scheduling = serial();   // alarm reconciliation
   const settingsWrite = serial();
   const closing = serial();      // tab removal: one batch at a time, manual or automatic
+  const journalWrite = serial(); // durable journal updates
   // Bumped synchronously by any rule change (ruleEpoch) or editor open/renewal
   // (editorEpoch) this worker sees, so a running batch stops before its next
   // removal without waiting for storage.
   let ruleEpoch = 0;
   let editorEpoch = 0;
+  // Bumped synchronously by any tab activation/replacement/removal this worker
+  // sees, so a removal batch can detect that a candidate was just activated (or
+  // its window changed) during the awaited re-checks and skip it.
+  let activityEpoch = 0;
   let sweeping = false;
+  // The in-memory Chromium rollback journal and a memoized load of it.
+  let journalCache;
+  let journalLoaded;
+  // Bumped whenever the journal changes, so the O(1) corrector is rebuilt only
+  // when needed and reused across every tab of a plan or close batch.
+  let journalVersion = 0;
+  let corrector = null;
+  let correctorVersion = -1;
+  // True when the in-memory journal holds younger floors a durable write has not
+  // yet persisted. Blocks automatic closure until the write lands, and a
+  // restart fails closed from the session marker.
+  let journalDirty = false;
   // A run whose one-shot alarm the browser had already removed when reconcile
   // replaced the plan. Its alarm callback, still on the way, may claim it once.
   let unclaimedDue = null;
@@ -121,7 +154,135 @@ export function createStaleService(api, {
   const currentAges = space => sessionWrite(() => loadAges(space));
 
   const fresh = t => ({ s: t, v: 0, g: 0 });
+  // A replaced/discarded document: start a fresh baseline and distrust its
+  // native age until the tab is genuinely activated again.
+  const freshReplaced = t => ({ s: t, v: 0, g: 0, u: 1 });
   const roomFor = store => Object.keys(store.tabs).length < MAX_TRACKED_TABS;
+
+  // ---- Rollback-safety journal (Chromium, normal context, durable) ----
+
+  // Loaded once per worker from storage.local and written through on change.
+  function bumpJournal() { journalVersion++; }
+
+  // The younger-only corrector over the current journal, rebuilt only when the
+  // journal changes so a plan or close batch pays O(journal) once, not per tab.
+  function getCorrector() {
+    if (!corrector || correctorVersion !== journalVersion) {
+      corrector = buildCorrector(journalCache ?? emptyJournal());
+      correctorVersion = journalVersion;
+    }
+    return corrector;
+  }
+
+  // Persists the in-memory journal. On success the dirty flag and its session
+  // marker clear; on failure they are set, so a later close is blocked and a
+  // restarted worker fails closed. Written only for the durable (normal,
+  // non-Firefox) scope; timestamp-only, never private activity. Returns true
+  // when the journal is durable.
+  async function writeJournal() {
+    if (!persistJournal) return true;
+    try {
+      await local.set({ [JOURNAL_KEY]: journalCache });
+      if (journalDirty) {
+        journalDirty = false;
+        await session.remove(JOURNAL_DIRTY_KEY).catch(() => {});
+      }
+      return true;
+    } catch {
+      journalDirty = true;
+      await session.set({ [JOURNAL_DIRTY_KEY]: { at: now() } }).catch(() => {});
+      return false;
+    }
+  }
+
+  function loadJournal() {
+    journalLoaded ??= (async () => {
+      if (!persistJournal) { journalCache = emptyJournal(); bumpJournal(); return journalCache; }
+      let raw;
+      let failed = false;
+      try { raw = (await local.get(JOURNAL_KEY))[JOURNAL_KEY]; } catch { failed = true; }
+      const { journal, rejected } = readJournal(raw);
+      journalCache = journal;
+      let marker;
+      try { marker = await readSession(JOURNAL_DIRTY_KEY); } catch { marker = undefined; }
+      const markerAt = isTime(marker?.at) ? marker.at : undefined;
+      if (failed || rejected || markerAt !== undefined) {
+        // Fail closed: a lost or corrupt journal, or a previous worker's
+        // unflushed write, must not let an old native value read as proof of
+        // age. Raise a younger global floor so every older anchor is clamped up
+        // until genuine new activity ages past it. The marker time is the
+        // highwater we last trusted; a clean restart (no marker, valid journal)
+        // leaves old native ages untouched, so normal restarts never reset them.
+        journalCache.floor = Math.max(journalCache.floor, markerAt ?? now());
+        journalDirty = true;
+        await journalWrite(() => writeJournal()); // clears the marker once the write finally lands
+      }
+      bumpJournal();
+      return journalCache;
+    })();
+    return journalLoaded;
+  }
+
+  // Applies supersession events (anchor advanced -> younger floor) and persists.
+  // Serialized through journalWrite; the work per event is O(journal) with no
+  // full age-table rewrite. Returns true only when the journal — including
+  // these events and any earlier unflushed floor — is durable, so a caller can
+  // tell whether it is safe to commit the matching advanced anchor to
+  // storage.session. A write is attempted when something changed or an earlier
+  // write is still outstanding (journalDirty); an already-durable journal with
+  // nothing to add returns true without writing.
+  async function applyJournalEvents(events) {
+    if (!persistJournal) return true;
+    await loadJournal();
+    return journalWrite(async () => {
+      let changed = false;
+      for (const [oldAnchor, floorTime] of events ?? []) {
+        if (recordSupersededAnchor(journalCache, oldAnchor, floorTime, { driftMs: ANCHOR_DRIFT_MS, max: MAX_JOURNAL_ENTRIES })) {
+          changed = true;
+        }
+      }
+      if (changed) bumpJournal();
+      if (changed || journalDirty) return writeJournal();
+      return true;
+    });
+  }
+
+  // Snapshots each tab's native anchor so a failed durable journal write can
+  // roll the in-memory store back to its pre-change anchors — the un-advanced
+  // values a restarted worker must re-observe to re-emit the lost correction.
+  const snapshotAnchors = store => new Map(Object.entries(store.tabs).map(([id, record]) => [id, record.a]));
+  function restoreAnchors(store, anchors) {
+    for (const [id, record] of Object.entries(store.tabs)) {
+      const a = anchors.get(id);
+      if (a === undefined) delete record.a; else record.a = a;
+    }
+  }
+
+  // Applies an age-store change for `space`, keeping the durable rollback
+  // journal AHEAD of the session anchor it protects (Chromium normal scope
+  // only). `change(store, events)` mutates the store and pushes [old,new]
+  // anchor supersessions to `events`; those are journaled before the advanced
+  // anchor is written to storage.session. If the journal cannot be made durable
+  // the anchor advance is rolled back and nothing is written to session, so a
+  // worker killed mid-write — or restarted after a failed write — re-observes
+  // the old anchor and re-emits the same event (idempotent), while the dirty
+  // marker still fails closed. Firefox and private keep the plain write-through.
+  // A scope this worker does not own is never mutated or persisted. MUST run
+  // inside sessionWrite.
+  async function persistAges(space, change) {
+    const store = await loadAges(space);
+    if (!owns(space)) return store;
+    const journaled = space === 'normal' && persistJournal;
+    const events = [];
+    const anchors = journaled ? snapshotAnchors(store) : null;
+    const changed = change(store, events);
+    if (journaled && events.length && !(await applyJournalEvents(events))) {
+      restoreAnchors(store, anchors);
+      return store;
+    }
+    if (changed) await session.set({ [keyOf('age', space)]: store });
+    return store;
+  }
 
   /** When this browser session started, from storage.session (set once). */
   function sessionStart() {
@@ -380,16 +541,26 @@ export function createStaleService(api, {
 
   // ---- Planning ----
 
-  const context = (rule, policy, at, t) => ({
+  const context = (rule, policy, at, t, space) => ({
     policy, at, now: t, thresholdMs: rule.staleThresholdMs,
     skipPinned: rule.skipPinned, skipAudible: rule.skipAudible, nativeTrusted,
+    // Firefox native age is the real last-viewed time, so no correction. On
+    // Chromium the normal scope corrects native last-activation with the
+    // durable journal (younger-only, O(1) per tab); private has no durable
+    // journal.
+    correctAnchor: nativeTrusted
+      ? undefined
+      : space === 'normal'
+        ? getCorrector()
+        : (native => native),
   });
 
   /** All tabs of one privacy scope, with their records brought up to date. */
   async function loadScope(space) {
+    await loadJournal();
     const tabs = (await api.tabs.query({})).filter(tab => ns(tab.incognito) === space);
     const t = now();
-    const store = await updateAges(space, s => observeTabs(s, tabs, t));
+    const store = await sessionWrite(() => persistAges(space, (s, events) => observeTabs(s, tabs, t, events)));
     return { tabs, records: store.tabs, now: t };
   }
 
@@ -410,7 +581,7 @@ export function createStaleService(api, {
     }
     const scoped = await normalWindowTabs(tabs);
     // Counts tabs that will have crossed the threshold by the run.
-    const { candidates } = planStale(scoped, records, context(rule, 'auto', Math.max(nextRunAt, t), t));
+    const { candidates } = planStale(scoped, records, context(rule, 'auto', Math.max(nextRunAt, t), t, 'normal'));
     return { enabled, available: true, nextRunAt, count: candidates.length, error: null };
   }
 
@@ -443,13 +614,16 @@ export function createStaleService(api, {
     const space = ns(window.incognito);
     const rule = await readRule();
     const { tabs, records, now: t } = await loadScope(space);
-    const manual = planStale(tabs, records, context(rule, 'manual', t, t));
+    const manual = planStale(tabs, records, context(rule, 'manual', t, t, space));
     const authorized = manual.candidates.slice(0, MAX_PREVIEW_TABS);
     const id = await savePreview(space, windowId, rule.revision, authorized, t);
     const auto = space === 'normal' && !incognitoContext
       ? await autoState(rule, tabs, records, t)
       : { enabled: rule.autoCloseStaleEnabled, available: false, nextRunAt: null, count: null, error: null };
     return {
+      // How age is measured, so the UI can label it: 'viewed' on Firefox (last
+      // deselection), 'activated' on Chromium (last selection).
+      ageBasis: nativeTrusted ? 'viewed' : 'activated',
       settings: {
         staleThresholdMs: rule.staleThresholdMs, autoCloseStaleEnabled: rule.autoCloseStaleEnabled,
         skipPinned: rule.skipPinned, skipAudible: rule.skipAudible,
@@ -457,6 +631,8 @@ export function createStaleService(api, {
       auto,
       preview: {
         id,
+        // lastViewedAt is the effective age time; its label follows ageBasis
+        // (deselection on Firefox, activation on Chromium), not literally "viewed".
         tabs: authorized.slice(0, PREVIEW_LIST_LIMIT).map(({ id: tabId, title, url, lastViewedAt }) => ({ id: tabId, title, url, lastViewedAt })),
         count: authorized.length,
         windowCount: new Set(authorized.map(c => c.windowId)).size,
@@ -481,7 +657,7 @@ export function createStaleService(api, {
       const record = (await currentAges(space)).tabs[tab.id];
       if ((record?.g ?? 0) !== candidate.gen) return false; // navigated or reloaded
       const t = now();
-      return classifyTab(tab, record, context(rule, policy, t, t)).status === 'stale';
+      return classifyTab(tab, record, context(rule, policy, t, t, space)).status === 'stale';
     } catch {
       return false; // Unknown state keeps the tab.
     }
@@ -489,9 +665,13 @@ export function createStaleService(api, {
 
   /**
    * One tab at a time, each freshly checked. current() is a synchronous check
-   * of this worker's rule/editor counters; guard() also re-reads storage.
-   * Both run after the fresh checks, and nothing is awaited between the last
-   * check and the removal call.
+   * of this worker's rule/editor counters; guard() also re-reads storage. Both
+   * run after the fresh checks. The activity epoch, bumped synchronously by tab
+   * activation/replacement/removal, is snapshotted before the awaited checks and
+   * re-read with no await immediately before removal, so a tab that became
+   * active (even if the user switched away and back) during readRule/hasEditor
+   * is skipped rather than closed. There is no conditional remove API, so this
+   * narrows — not eliminates — the window between the check and the dispatch.
    */
   async function removeCandidates(candidates, space, rule, policy, { guard, current }) {
     const result = { closed: 0, skipped: 0, failed: 0 };
@@ -501,12 +681,16 @@ export function createStaleService(api, {
     };
     for (const [index, candidate] of candidates.entries()) {
       if (!current()) { stop(index); break; }
+      const activityAt = activityEpoch;
       if (!await stillEligible(candidate, space, rule, policy)) {
         result.skipped++;
         continue;
       }
       // stillEligible awaited the browser: check the rule again, then remove.
       if (!await guard() || !current()) { stop(index); break; }
+      // Final synchronous check: an activation/replacement during the awaits
+      // above cancels this candidate without stopping the rest of the batch.
+      if (activityEpoch !== activityAt) { result.skipped++; continue; }
       try {
         await api.tabs.remove(candidate.id);
         result.closed++;
@@ -569,8 +753,13 @@ export function createStaleService(api, {
         // Someone is looking at the rule: defer to the next run.
         if (!rule.autoCloseStaleEnabled || !await guard()) return false;
         const { tabs, records, now: t } = await loadScope('normal');
+        // Fail closed: if younger journal floors are not yet durable, a close
+        // now could act on corrections a restarted worker would lose. Retry the
+        // write through the same serialization; defer this run if it still
+        // cannot be persisted.
+        if (journalDirty && !(await journalWrite(() => writeJournal()))) return false;
         const scoped = await normalWindowTabs(tabs);
-        const { candidates } = planStale(scoped, records, context(rule, 'auto', t, t));
+        const { candidates } = planStale(scoped, records, context(rule, 'auto', t, t, 'normal'));
         const result = await removeCandidates(
           candidates.map(c => ({ id: c.id, windowId: c.windowId, gen: c.gen, hash: urlHash(c.url) })),
           'normal', rule, 'auto', { guard, current });
@@ -606,12 +795,22 @@ export function createStaleService(api, {
     // closes, and its leave is recorded when it stops being active, which is
     // never earlier than its last focus.
     on(api.tabs.onActivated, info => {
+      activityEpoch++; // synchronous activity guard, bumped before any await
       const t = now();
       // Queued at once, so switches apply in event order (Chromium has no
       // previousTabId and relies on the order); the window is looked up inside.
       quiet(sessionWrite(async () => {
         const window = await api.windows.get(info?.windowId);
-        if (window) await applyAges(ns(window.incognito), store => recordActivation(store, info ?? {}, t));
+        if (!window) return;
+        const space = ns(window.incognito);
+        // Read the tab's native last-activation time fresh, so a journal anchor
+        // is the browser clock, never the event clock (the two can drift).
+        let nativeAnchor;
+        try {
+          const tab = isId(info?.tabId) ? await api.tabs.get(info.tabId) : undefined;
+          if (isTime(tab?.lastAccessed)) nativeAnchor = tab.lastAccessed;
+        } catch { /* tab already gone: record the switch without an anchor */ }
+        await persistAges(space, (store, events) => recordActivation(store, info ?? {}, t, events, nativeAnchor));
       }));
     });
 
@@ -631,6 +830,7 @@ export function createStaleService(api, {
     });
 
     on(api.tabs.onRemoved, tabId => {
+      activityEpoch++;
       for (const space of owned) {
         quiet(updateAges(space, store => {
           if (!Object.hasOwn(store.tabs, tabId)) return false;
@@ -640,15 +840,17 @@ export function createStaleService(api, {
       }
     });
 
-    // A replacing tab (discard, prerender) starts its own baseline; it never
-    // inherits the replaced tab's age or document.
+    // A replacing tab (discard, prerender) starts its own baseline and distrusts
+    // its carried-over native age until genuinely activated; it never inherits
+    // the replaced tab's observed age or document.
     on(api.tabs.onReplaced, (addedTabId, removedTabId) => {
+      activityEpoch++;
       const t = now();
       for (const space of owned) {
         quiet(updateAges(space, store => {
           if (!Object.hasOwn(store.tabs, removedTabId)) return false;
           delete store.tabs[removedTabId];
-          if (isId(addedTabId)) store.tabs[addedTabId] = fresh(t);
+          if (isId(addedTabId)) store.tabs[addedTabId] = freshReplaced(t);
           // Keep the window's active-tab map on the live ID.
           for (const [windowId, tabId] of Object.entries(store.active)) {
             if (tabId === removedTabId) store.active[windowId] = addedTabId;

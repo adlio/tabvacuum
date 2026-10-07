@@ -26,12 +26,39 @@ describe('lastViewedAt', () => {
       { nativeTrusted: true, now: NOW })).toBe(NOW - DAY_MS);
   });
 
-  it('never trusts Chromium native age alone: it uses the first-observed baseline', () => {
+  it('trusts Chromium native last-activation, corrected only younger', () => {
     const chrome = { nativeTrusted: false, now: NOW };
-    expect(lastViewedAt({ lastAccessed: NOW - 30 * DAY_MS }, undefined, chrome)).toBeNull();
-    expect(lastViewedAt({ lastAccessed: NOW - 30 * DAY_MS }, { s: NOW - HOUR_MS, v: 0, g: 0 }, chrome)).toBe(NOW - HOUR_MS);
-    // Native selection time later than the baseline only makes it younger.
-    expect(lastViewedAt({ lastAccessed: NOW - 60_000 }, { s: NOW - HOUR_MS, v: 0, g: 0 }, chrome)).toBe(NOW - 60_000);
+    // Native last-activation is the age, even with no session record.
+    expect(lastViewedAt({ lastAccessed: NOW - WEEK }, undefined, chrome)).toBe(NOW - WEEK);
+    // The journal corrector can only raise it (younger), never lower it.
+    expect(lastViewedAt({ lastAccessed: NOW - WEEK }, undefined, { ...chrome, correctAnchor: () => NOW - DAY_MS })).toBe(NOW - DAY_MS);
+    expect(lastViewedAt({ lastAccessed: NOW - WEEK }, undefined, { ...chrome, correctAnchor: () => NOW - 2 * WEEK })).toBe(NOW - WEEK);
+    // Age is measured from the activation; a later deselection does NOT fold in.
+    expect(lastViewedAt({ lastAccessed: NOW - WEEK }, { s: NOW - 2 * WEEK, v: NOW - DAY_MS, g: 0 }, chrome)).toBe(NOW - WEEK);
+    // A replaced/discarded document (u) distrusts native and falls back to the baseline.
+    expect(lastViewedAt({ lastAccessed: NOW - WEEK }, { s: NOW - HOUR_MS, v: 0, g: 0, u: 1 }, chrome)).toBe(NOW - HOUR_MS);
+    // No native: the first-observed baseline is the conservative fallback.
+    expect(lastViewedAt({}, { s: NOW - HOUR_MS, v: 0, g: 0 }, chrome)).toBe(NOW - HOUR_MS);
+    expect(lastViewedAt({}, undefined, chrome)).toBeNull();
+  });
+
+  it('Chromium measures from the last activation while Firefox resets on the leave', () => {
+    // Selected over a week ago, deselected a day ago.
+    const tab = { lastAccessed: NOW - WEEK - DAY_MS };
+    const record = { s: NOW - 2 * WEEK, v: NOW - DAY_MS, g: 0 };
+    // Chrome: the deselection does not reset the age; it stays at the activation.
+    expect(lastViewedAt(tab, record, { nativeTrusted: false, now: NOW })).toBe(NOW - WEEK - DAY_MS);
+    // Firefox: native lastAccessed is the deselection itself, so observe-leave applies.
+    expect(lastViewedAt(tab, record, { nativeTrusted: true, now: NOW })).toBe(NOW - DAY_MS);
+  });
+
+  it('a future native anchor keeps the tab, never dropping to an older baseline', () => {
+    // Clock skew/restore can report a native in the future. With an older
+    // same-session baseline present it must still read as unknown (keep), not
+    // fall back to the baseline and become closable.
+    const record = { s: NOW - 3 * WEEK, v: 0, g: 0 };
+    expect(lastViewedAt({ lastAccessed: NOW + HOUR_MS }, record, { nativeTrusted: false, now: NOW })).toBeNull();
+    expect(lastViewedAt({ lastAccessed: NOW + HOUR_MS }, record, { nativeTrusted: true, now: NOW })).toBeNull();
   });
 
   it.each([
@@ -100,6 +127,13 @@ describe('classifyTab', () => {
   it('automatic cleanup closes ordinary old web pages', () => {
     expect(classifyTab(tab(1, old), undefined, ctx({ policy: 'auto' })).status).toBe('stale');
   });
+
+  it('Chrome counts a long-ago selection as stale even if left recently; Firefox keeps it', () => {
+    const t = tab(1, { lastAccessed: NOW - WEEK - DAY_MS }); // last selected over a week ago
+    const record = { s: NOW - 2 * WEEK, v: NOW - DAY_MS, g: 0 }; // but deselected only a day ago
+    expect(classifyTab(t, record, ctx({ nativeTrusted: false })).status).toBe('stale');
+    expect(classifyTab(t, record, ctx({ nativeTrusted: true })).status).toBe('fresh');
+  });
 });
 
 describe('planStale', () => {
@@ -133,8 +167,17 @@ describe('planStale', () => {
     expect(plan.candidates[0]).toMatchObject({ id: 1, gen: 4, lastViewedAt: NOW - 2 * WEEK });
   });
 
-  it('uses Chromium baselines: a just-observed tab is not stale until the threshold passes', () => {
-    const records = { 1: { s: NOW - HOUR_MS, v: 0, g: 0 } };
+  it('trusts Chromium native last-activation, with the journal correcting only younger', () => {
+    const records = { 1: { s: NOW - HOUR_MS, v: 0, g: 0, a: NOW - 30 * DAY_MS } };
+    const tabs = [active(), tab(1, { lastAccessed: NOW - 30 * DAY_MS })];
+    // Native says 30 days since last activation: stale now, even just-observed.
+    expect(planStale(tabs, records, ctx({ nativeTrusted: false })).candidates.map(c => c.id)).toEqual([1]);
+    // A journal correction to a recent floor keeps it.
+    expect(planStale(tabs, records, ctx({ nativeTrusted: false, correctAnchor: () => NOW - HOUR_MS })).candidates).toEqual([]);
+  });
+
+  it('uses the first-observed baseline when native age is untrusted (a replaced tab)', () => {
+    const records = { 1: { s: NOW - HOUR_MS, v: 0, g: 0, u: 1 } };
     const tabs = [active(), tab(1, { lastAccessed: NOW - 30 * DAY_MS })];
     expect(planStale(tabs, records, ctx({ nativeTrusted: false })).candidates).toEqual([]);
     expect(planStale(tabs, records, ctx({ nativeTrusted: false, at: NOW - HOUR_MS + WEEK })).candidates).toHaveLength(1);
@@ -173,6 +216,58 @@ describe('observed records', () => {
     const store = readAgeStore(undefined);
     recordActivation(store, { tabId: 3, windowId: 1, previousTabId: 7 }, NOW);
     expect(store.tabs[7].v).toBe(NOW);
+  });
+
+  it('tracks the native anchor and emits a supersession only when it advances', () => {
+    const store = readAgeStore(undefined);
+    const events = [];
+    observeTabs(store, [active(9, { lastAccessed: NOW })], NOW, events);
+    expect(store.tabs[9].a).toBe(NOW);
+    expect(events).toEqual([]); // first sighting records the anchor, no supersession
+    observeTabs(store, [active(9, { lastAccessed: NOW + HOUR_MS })], NOW + HOUR_MS, events);
+    expect(store.tabs[9].a).toBe(NOW + HOUR_MS);
+    expect(events).toEqual([[NOW, NOW + HOUR_MS]]);
+    // A backward native move is ignored; the newest activation stands.
+    observeTabs(store, [active(9, { lastAccessed: NOW })], NOW + 2 * HOUR_MS, events);
+    expect(store.tabs[9].a).toBe(NOW + HOUR_MS);
+    expect(events).toHaveLength(1);
+  });
+
+  it('recordActivation anchors on the browser native value, emits a native-valued supersession and clears untrusted', () => {
+    const store = { active: {}, tabs: { 1: { s: NOW - DAY_MS, v: 0, g: 0, a: NOW - DAY_MS, u: 1 } } };
+    const events = [];
+    const nativeAnchor = NOW - 25; // browser clock, >drift from the event clock NOW
+    recordActivation(store, { tabId: 1, windowId: 1 }, NOW, events, nativeAnchor);
+    expect(store.tabs[1].a).toBe(nativeAnchor);          // native, never the event clock
+    expect(store.tabs[1].u).toBeUndefined();             // genuine activation clears untrusted
+    expect(store.tabs[1].v).toBe(NOW);                   // the event timestamp is the leave/observed signal
+    expect(events).toEqual([[NOW - DAY_MS, nativeAnchor]]); // supersession is native-valued
+  });
+
+  it('recordActivation does not invent an anchor from the event clock when native is unavailable', () => {
+    const store = { active: {}, tabs: { 1: { s: NOW - DAY_MS, v: 0, g: 0, a: NOW - DAY_MS } } };
+    const events = [];
+    recordActivation(store, { tabId: 1, windowId: 1 }, NOW, events); // no native anchor
+    expect(store.tabs[1].a).toBe(NOW - DAY_MS);          // unchanged: no event-clock stamp
+    expect(store.tabs[1].v).toBe(NOW);
+    expect(events).toEqual([]);                          // no churned supersession
+    // A future native anchor is also ignored (the newest activation stands).
+    recordActivation(store, { tabId: 1, windowId: 1 }, NOW, events, NOW + 1000);
+    expect(store.tabs[1].a).toBe(NOW - DAY_MS);
+    expect(events).toEqual([]);
+  });
+
+  it('preserves native-anchor and untrusted fields through readAgeStore', () => {
+    const store = readAgeStore({ active: {}, tabs: {
+      1: { s: NOW, v: 0, g: 0, a: NOW - DAY_MS },
+      2: { s: NOW, v: 0, g: 0, u: 1 },
+      3: { s: NOW, v: 0, g: 0, a: -1 },  // bad anchor: whole record dropped
+      4: { s: NOW, v: 0, g: 0, u: 2 },   // bad flag: whole record dropped
+    } });
+    expect(store.tabs[1]).toEqual({ s: NOW, v: 0, g: 0, a: NOW - DAY_MS });
+    expect(store.tabs[2]).toEqual({ s: NOW, v: 0, g: 0, u: 1 });
+    expect(store.tabs[3]).toBeUndefined();
+    expect(store.tabs[4]).toBeUndefined();
   });
 
   it('drops malformed records and resets an oversized store', () => {
@@ -324,14 +419,14 @@ describe('bounded session records', () => {
 
 describe('messages', () => {
   it('report actual counts', () => {
-    expect(manualCloseMessage({ closed: 1, skipped: 0, failed: 0 })).toBe('Closed 1 tab not viewed recently.');
+    expect(manualCloseMessage({ closed: 1, skipped: 0, failed: 0 })).toBe('Closed 1 tab.');
     expect(manualCloseMessage({ closed: 2, skipped: 1, failed: 3 }))
-      .toBe('Closed 2 tabs not viewed recently. Kept 1 tab that changed or is no longer stale. Could not close 3 tabs.');
+      .toBe('Closed 2 tabs. Kept 1 tab that changed or is no longer stale. Could not close 3 tabs.');
     expect(manualCloseMessage({ closed: 0, skipped: 0, failed: 0 })).toBe('No stale tabs were closed.');
   });
 
   it('automatic sweeps are silent when nothing changed', () => {
     expect(autoCloseMessage({ closed: 0, failed: 0 })).toBe('');
-    expect(autoCloseMessage({ closed: 6, failed: 1 })).toBe('Automatically closed 6 tabs not viewed recently. Could not close 1 tab automatically.');
+    expect(autoCloseMessage({ closed: 6, failed: 1 })).toBe('Automatically closed 6 tabs. Could not close 1 tab automatically.');
   });
 });

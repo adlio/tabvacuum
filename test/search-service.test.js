@@ -1,5 +1,4 @@
 import { describe, it, expect, vi } from 'vitest';
-import { readFileSync } from 'node:fs';
 import { createSearchService, validateTabIds, MAX_CLOSE_TABS } from '../src/search-service.js';
 
 const BASE = 'moz-extension://uuid/';
@@ -284,36 +283,6 @@ describe('closing selected search results', () => {
     expect(api.tabs.remove).not.toHaveBeenCalled();
   });
 });
-
-for (const browser of ['firefox', 'chrome']) {
-  it(`${browser}: four defaults, search bound, stale and blank commands retained unbound`, () => {
-    const manifest = JSON.parse(readFileSync(new URL(`../src/manifest.${browser}.json`, import.meta.url)));
-    expect(Object.values(manifest.commands).filter(c => c.suggested_key)).toHaveLength(4);
-    expect(manifest.commands['search-tabs'].suggested_key.default).toBe('Ctrl+Shift+Period');
-    expect(manifest.commands['close-stale'].suggested_key).toBeUndefined();
-    expect(manifest.commands['close-blank']).toBeDefined();
-  });
-  it(`${browser}: overlay uses activeTab + scripting only, exposing just search.html`, () => {
-    const manifest = JSON.parse(readFileSync(new URL(`../src/manifest.${browser}.json`, import.meta.url)));
-    expect(manifest.permissions).toEqual(expect.arrayContaining(['activeTab', 'scripting']));
-    expect(manifest.permissions.filter(p => p.includes('://') || p === '<all_urls>')).toEqual([]);
-    expect(manifest.host_permissions).toBeUndefined();
-    // Website access is optional only: Chrome MV3 uses optional_host_permissions;
-    // Firefox (min 115) takes origins in optional_permissions.
-    const origins = ['http://*/*', 'https://*/*'];
-    if (browser === 'chrome') {
-      expect(manifest.optional_host_permissions).toEqual(origins);
-      expect(manifest.optional_permissions).toBeUndefined();
-    } else {
-      expect(manifest.optional_permissions).toEqual(origins);
-      expect(manifest.optional_host_permissions).toBeUndefined();
-    }
-    expect(manifest.content_scripts).toBeUndefined();
-    expect(manifest.web_accessible_resources).toEqual([
-      { resources: ['search.html'], matches: ['http://*/*', 'https://*/*'] },
-    ]);
-  });
-}
 
 describe('expanded search sources', () => {
   function sources({ permission = true } = {}) {

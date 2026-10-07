@@ -126,31 +126,55 @@ export function urlHash(text) {
 }
 
 /**
- * Last time this tab was viewed, or null when unknown.
+ * Effective last-view time for this tab, or null when unknown. The label for
+ * this value follows ageBasis: 'viewed' on Firefox, 'activated' on Chromium.
  *
  * record: this session's observation of the tab, { s: first observed,
- * v: last observed leaving/being active (0 if never), g: document generation }.
+ * v: last observed leaving/being active (0 if never), g: document generation,
+ * a?: last known native anchor, u?: 1 when native age is untrusted for this
+ * tab (a replaced/discarded document) }.
  *
- * nativeTrusted (Firefox): tab.lastAccessed records deselection and survives
- * restart, so it is used, together with any later observed leave.
- * Otherwise (Chromium) lastAccessed records selection only, so it can
- * overstate age; the first-observed baseline is used as a conservative
- * minimum, and native data can only make the tab younger.
- *
- * Any signal in the future means the clock or data is inconsistent: unknown.
+ * Native age (tab.lastAccessed) is the cross-restart source in both browsers,
+ * so a tab untouched across a clean restart keeps its age:
+ *   - Firefox (nativeTrusted): lastAccessed records deselection — the real last
+ *     view — and is used directly. A later observed leave (record.v) is a valid
+ *     younger same-session signal and folds in.
+ *   - Chromium: lastAccessed records the last ACTIVATION (selection). It is used
+ *     as the age, corrected by the rollback journal (ctx.correctAnchor), which
+ *     can only make it younger, never older. The age is measured from that
+ *     activation: a later deselection (record.v) does NOT fold in, so a tab
+ *     selected over the threshold ago is eligible even if it was left recently.
+ * When native age is absent or untrusted for this tab (u), the same-session
+ * first-observed baseline is the conservative fallback and the observed leave
+ * folds in as the only within-session signal; without a baseline, age is
+ * unknown. A present-but-future native is kept (unknown), never dropped to an
+ * older baseline. Any signal in the future means the clock or data is
+ * inconsistent, so the tab is kept.
  */
-export function lastViewedAt(tab, record, { nativeTrusted, now }) {
+export function lastViewedAt(tab, record, { nativeTrusted, now, correctAnchor }) {
+  // A future native value is not filtered to undefined here: that would let an
+  // older session baseline make a tab closable where an inconsistent-but-future
+  // native should keep it. It flows through to the final future-signal check.
   const native = isTime(tab?.lastAccessed) ? tab.lastAccessed : undefined;
-  const signals = [];
-  if (record && isTime(record.v)) signals.push(record.v);
-  if (nativeTrusted && native !== undefined) {
-    signals.push(native);
+  const observed = record && isTime(record.v) ? record.v : undefined;
+  const nativeUsable = native !== undefined && !(record && record.u === 1);
+  let base;
+  if (nativeUsable) {
+    // A journal correction can only make the tab younger, never older, so take
+    // the max with the raw native value even if the corrector misbehaves.
+    base = nativeTrusted || typeof correctAnchor !== 'function' ? native : Math.max(native, correctAnchor(native));
+  } else if (record && isTime(record.s)) {
+    base = record.s; // no trusted native: this session's conservative first-observed baseline
   } else {
-    if (record && isTime(record.s)) signals.push(record.s);
-    else return null; // no baseline: never proof of age
-    if (native !== undefined) signals.push(native);
+    return null; // no proof of age
   }
-  if (!signals.length || signals.some(t => t > now)) return null;
+  // Firefox native is the real last view, so a session leave folds in. Chromium
+  // measures from the last activation, so the leave must not fold in while the
+  // native activation anchor is usable; it still folds into the no-native
+  // fallback, where it is the only within-session evidence.
+  const foldObserved = nativeTrusted || !nativeUsable;
+  const signals = foldObserved && observed !== undefined ? [base, observed] : [base];
+  if (signals.some(t => !isTime(t) || t > now)) return null;
   return Math.max(...signals);
 }
 
@@ -217,7 +241,8 @@ export function planStale(tabs, records, ctx) {
 // ---- Session records ----
 
 const isRecord = r => r && typeof r === 'object' && isTime(r.s) &&
-  (r.v === 0 || isTime(r.v)) && Number.isSafeInteger(r.g) && r.g >= 0;
+  (r.v === 0 || isTime(r.v)) && Number.isSafeInteger(r.g) && r.g >= 0 &&
+  (r.a === undefined || isTime(r.a)) && (r.u === undefined || r.u === 1);
 
 /** Validated age store; anything malformed or oversized starts over (younger, so safe). */
 export function readAgeStore(raw) {
@@ -226,7 +251,11 @@ export function readAgeStore(raw) {
   const entries = Object.entries(raw.tabs);
   if (entries.length > MAX_TRACKED_TABS) return store;
   for (const [id, record] of entries) {
-    if (isId(Number(id)) && isRecord(record)) store.tabs[id] = { s: record.s, v: record.v, g: record.g };
+    if (isId(Number(id)) && isRecord(record)) {
+      store.tabs[id] = { s: record.s, v: record.v, g: record.g };
+      if (isTime(record.a)) store.tabs[id].a = record.a;
+      if (record.u === 1) store.tabs[id].u = 1;
+    }
   }
   for (const [windowId, tabId] of Object.entries(raw.active ?? {})) {
     if (isId(Number(windowId)) && isId(tabId)) store.active[windowId] = tabId;
@@ -238,9 +267,12 @@ export function readAgeStore(raw) {
  * Brings records up to date with the live tabs of one privacy scope at `now`:
  * new tabs get a first-observed baseline (an existing baseline is never
  * reset), every active tab counts as viewed now, a missed deactivation is
- * recorded now, and closed tabs/windows are dropped. Returns true if changed.
+ * recorded now, and closed tabs/windows are dropped. The last known native
+ * anchor is tracked per tab; when it advances (a reactivation), [old, new] is
+ * pushed to `events` so the caller can journal a younger floor. Returns true if
+ * changed.
  */
-export function observeTabs(store, tabs, now) {
+export function observeTabs(store, tabs, now, events) {
   let changed = false;
   const live = new Set();
   const activeByWindow = {};
@@ -252,6 +284,7 @@ export function observeTabs(store, tabs, now) {
       store.tabs[tab.id] = { s: now, v: 0, g: 0 };
       changed = true;
     }
+    if (trackAnchor(store.tabs[tab.id], tab, now, events)) changed = true;
     if (tab.active === true && isId(tab.windowId)) activeByWindow[tab.windowId] = tab.id;
   }
   for (const [windowId, tabId] of Object.entries(activeByWindow)) {
@@ -271,16 +304,52 @@ export function observeTabs(store, tabs, now) {
   return changed;
 }
 
-/** Records a tab switch in one window at `now`. previousTabId may be absent (Chromium). */
-export function recordActivation(store, { tabId, windowId, previousTabId }, now) {
+/**
+ * Updates a record's last-known native anchor from a live tab. A first sighting
+ * just records the anchor; an advanced anchor (the tab was reactivated) records
+ * the supersession, so a later rollback to the old value can be clamped younger.
+ * A backward move is ignored (the newest activation stands). Returns true if the
+ * record changed.
+ */
+function trackAnchor(record, tab, now, events) {
+  const native = isTime(tab?.lastAccessed) && tab.lastAccessed <= now ? tab.lastAccessed : undefined;
+  if (!record || native === undefined) return false;
+  if (record.a === undefined) { record.a = native; return true; }
+  if (native > record.a) {
+    if (events) events.push([record.a, native]);
+    record.a = native;
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Records a tab switch in one window at `now`. previousTabId may be absent
+ * (Chromium). `nativeAnchor` is the activated tab's browser last-activation
+ * time (tab.lastAccessed), read fresh at the event; it, not the event clock
+ * `now`, becomes the tab's native anchor, so journal anchors match the values a
+ * crash rollback restores. Event timestamp (record.v) and native anchor
+ * (record.a) are kept distinct. A later rollback below the new anchor is
+ * superseded (pushed to `events`); a backward or future native value is ignored
+ * (the newest activation stands). When no usable native anchor is available the
+ * anchor is left unchanged rather than invented from the event clock. An
+ * untrusted-native mark is always cleared — the tab was genuinely selected.
+ */
+export function recordActivation(store, { tabId, windowId, previousTabId }, now, events, nativeAnchor) {
   if (!isId(tabId) || !isId(windowId)) return false;
   const leaving = isId(previousTabId) ? previousTabId : store.active[windowId];
   if (leaving !== undefined && leaving !== tabId) {
     store.tabs[leaving] ??= { s: now, v: 0, g: 0 };
     store.tabs[leaving].v = now;
   }
-  store.tabs[tabId] ??= { s: now, v: 0, g: 0 };
-  store.tabs[tabId].v = now;
+  const record = (store.tabs[tabId] ??= { s: now, v: 0, g: 0 });
+  const anchor = isTime(nativeAnchor) && nativeAnchor <= now ? nativeAnchor : undefined;
+  if (anchor !== undefined && (record.a === undefined || anchor > record.a)) {
+    if (record.a !== undefined && events) events.push([record.a, anchor]);
+    record.a = anchor;
+  }
+  delete record.u;
+  record.v = now;
   store.active[windowId] = tabId;
   return true;
 }
@@ -315,7 +384,7 @@ const tabs = n => `${n} tab${n === 1 ? '' : 's'}`;
 
 /** Result text for a manual close. Counts are what actually happened. */
 export function manualCloseMessage({ closed, skipped, failed }) {
-  const parts = [closed ? `Closed ${tabs(closed)} not viewed recently.` : 'No stale tabs were closed.'];
+  const parts = [closed ? `Closed ${tabs(closed)}.` : 'No stale tabs were closed.'];
   if (skipped) parts.push(`Kept ${tabs(skipped)} that changed or ${skipped === 1 ? 'is' : 'are'} no longer stale.`);
   if (failed) parts.push(`Could not close ${tabs(failed)}.`);
   return parts.join(' ');
@@ -325,7 +394,7 @@ export function manualCloseMessage({ closed, skipped, failed }) {
 export function autoCloseMessage({ closed, failed }) {
   if (!closed && !failed) return '';
   const parts = [];
-  if (closed) parts.push(`Automatically closed ${tabs(closed)} not viewed recently.`);
+  if (closed) parts.push(`Automatically closed ${tabs(closed)}.`);
   if (failed) parts.push(`Could not close ${tabs(failed)} automatically.`);
   return parts.join(' ');
 }
