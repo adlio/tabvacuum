@@ -12,6 +12,7 @@ Aaron's Tab Vacuum (ATV) is a browser extension for power-user tab management. F
 - **Sort Tabs** — by URL, title, last accessed, or visit count (ascending/descending)
 - **Stale Tabs** — preview tabs untouched for a configurable period, close the reviewed set, or opt into hourly automatic cleanup
 - **Close Blank Tabs** — remove new-tab pages, welcome pages, and search engine homepages
+- **Toggle Vertical Tabs** (Firefox only) — switch the tab bar between the horizontal strip and Firefox's native vertical sidebar with one keyboard shortcut
 
 Accessible via toolbar popup, tab right-click menu, and keyboard shortcuts.
 
@@ -46,6 +47,7 @@ Accessible via toolbar popup, tab right-click menu, and keyboard shortcuts.
 | Merge Windows | `Alt+Shift+M` |
 | Sort Tabs | `Alt+Shift+S` |
 | Search Tabs | `Ctrl+Shift+.` (`Cmd+Shift+.` on macOS) |
+| Toggle Vertical Tabs (Firefox only) | `Alt+Shift+V` |
 | Close Stale Tabs | *(unassigned — set manually)* |
 | Close Blank Tabs | *(unassigned — set manually)* |
 
@@ -170,3 +172,15 @@ Firefox 115+ and Chrome 127+ are supported by the manifests. Firefox's embedded 
 **Screenshots and recordings.** Screenshots go under `tabvacuum-firefox/` and `tabvacuum-chromium/` in scratch. `RECORD_BROWSER=1 npm run test:chromium` additionally records the actual desktop flow to MP4; for action feedback, `RECORD_BROWSER=1` records a real frecency sort and asserts its returned result. Firefox uses its native Marionette actor for popup content because ordinary WebDriver frame APIs exclude these remote extension views. Physical shortcut keys are sent through XTest on the isolated X display. The action-feedback suite's success/no-op checks use real browser APIs on disposable tabs; busy-state screenshots deliberately delay the test transport, and failure cases inject transport errors or a notification-only failure. These checks establish notification API acceptance, not OS-banner visibility. This verifies Linux browser behavior; it does not claim OS-level macOS shortcut testing. The Firefox harness selects the privileged-inspection opt-in supported by the installed geckodriver, only for its throwaway profile.
 
 **Continuous integration.** CI (`.github/workflows/ci.yml`) runs the unit tests (`vitest run`), the build (`node scripts/build.js`), and the Firefox `web-ext lint` only. The browser gate above runs locally and is not part of CI.
+
+
+## Credits
+
+The **Toggle Vertical Tabs** feature adapts the flip-the-setting mechanism from the
+[Vertical Tab Keyboard Toggle](https://github.com/AndreiMiculita/vertical-tab-keyboard-toggle)
+add-on by Andrei-Lucian Miculita, used under the MIT License. See `LICENSE` for the
+upstream copyright notice.
+
+## License
+
+Aaron's Tab Vacuum is released under the MIT License. See `LICENSE`.

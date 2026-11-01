@@ -359,6 +359,36 @@ describe('keyboard commands', () => {
     await listeners.command('unknown', { id: 1 });
     expect(api.notifications.create).not.toHaveBeenCalled();
   });
+
+  describe('toggle-vertical-tabs', () => {
+    // The mock omits browserSettings, matching Chrome and Firefox < 142.
+    it('reports the version requirement when the API is absent, changing nothing', async () => {
+      await listeners.command('toggle-vertical-tabs', { id: 1 });
+      expect(messages()).toEqual(['Vertical tabs are available in Firefox 142 or newer.']);
+    });
+
+    it('turns vertical tabs on when they are off', async () => {
+      const set = vi.fn(async () => {});
+      api.browserSettings = { verticalTabs: { get: vi.fn(async () => ({ value: false })), set } };
+      await listeners.command('toggle-vertical-tabs', { id: 1 });
+      expect(set).toHaveBeenCalledWith({ value: true });
+      expect(messages()).toEqual(['Vertical tabs on']);
+    });
+
+    it('turns vertical tabs off when they are on', async () => {
+      const set = vi.fn(async () => {});
+      api.browserSettings = { verticalTabs: { get: vi.fn(async () => ({ value: true })), set } };
+      await listeners.command('toggle-vertical-tabs', { id: 1 });
+      expect(set).toHaveBeenCalledWith({ value: false });
+      expect(messages()).toEqual(['Vertical tabs off']);
+    });
+
+    it('notifies the error and does not reject when the API fails', async () => {
+      api.browserSettings = { verticalTabs: { get: vi.fn(async () => { throw new Error('API error'); }), set: vi.fn() } };
+      await expect(listeners.command('toggle-vertical-tabs', { id: 1 })).resolves.toBeUndefined();
+      expect(messages()).toEqual(['Error: API error']);
+    });
+  });
 });
 
 describe('context menu', () => {
