@@ -172,6 +172,25 @@ async function sortTabs(criteria, direction) {
 
 const closeBlankTabs = () => closeMatchingTabs(findBlankTabs);
 
+// Toggle Firefox's native vertical tabs between the horizontal tab strip and
+// the vertical sidebar. Firefox-only: the `browser.browserSettings.verticalTabs`
+// setting exists on Firefox 142+ and is absent on Chrome and older Firefox, so
+// the command is declared only in the Firefox manifest and the handler still
+// guards the API before use.
+//
+// The flip-the-boolean mechanism is adapted from the "Vertical Tab Keyboard
+// Toggle" add-on by Andrei-Lucian Miculita, MIT License (Copyright (c) 2025):
+// https://github.com/AndreiMiculita/vertical-tab-keyboard-toggle
+async function toggleVerticalTabs() {
+  const setting = browser.browserSettings?.verticalTabs;
+  if (!setting) {
+    return { message: 'Vertical tabs are available in Firefox 142 or newer.' };
+  }
+  const { value } = await setting.get({});
+  await setting.set({ value: !value });
+  return { message: value ? 'Vertical tabs off' : 'Vertical tabs on' };
+}
+
 // Message handler for popup and options pages
 // Uses sendResponse callback pattern for Chrome compatibility.
 // Returning a Promise from onMessage only works in Chrome 144+ natively;
@@ -275,7 +294,8 @@ browser.commands.onCommand.addListener(async (command, tab) => {
     'close-duplicates': closeDuplicates,
     'merge-windows': mergeWindows,
     'sort-tabs': sortTabs,
-    'close-blank': closeBlankTabs
+    'close-blank': closeBlankTabs,
+    'toggle-vertical-tabs': toggleVerticalTabs
   };
 
   const action = commandActions[command];

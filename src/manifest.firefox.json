@@ -11,7 +11,7 @@
     "96": "icons/icon-96.png",
     "128": "icons/icon-128.png"
   },
-  "permissions": ["tabs", "history", "notifications", "storage", "contextMenus", "activeTab", "scripting", "alarms"],
+  "permissions": ["tabs", "history", "notifications", "storage", "contextMenus", "activeTab", "scripting", "alarms", "browserSettings"],
   "optional_permissions": ["http://*/*", "https://*/*"],
   "web_accessible_resources": [
     { "resources": ["search.html"], "matches": ["http://*/*", "https://*/*"] }
@@ -81,6 +81,12 @@
     },
     "close-blank": {
       "description": "Close blank tabs"
+    },
+    "toggle-vertical-tabs": {
+      "suggested_key": {
+        "default": "Alt+Shift+V"
+      },
+      "description": "Toggle vertical tabs"
     }
   }
 }
