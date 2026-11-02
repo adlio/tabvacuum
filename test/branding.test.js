@@ -121,14 +121,14 @@ describe('Little Vacuum artwork', () => {
   });
 });
 
-describe('0.6.0 brand surfaces', () => {
+describe('0.7.0 brand surfaces', () => {
   it('keeps the package identity and aligns package and lockfile root versions', () => {
     const pkg = json('package.json');
     const lock = json('package-lock.json');
     expect(pkg.name).toBe('tabvacuum');
-    expect(pkg.version).toBe('0.6.0');
-    expect([lock.name, lock.version]).toEqual(['tabvacuum', '0.6.0']);
-    expect([lock.packages[''].name, lock.packages[''].version]).toEqual(['tabvacuum', '0.6.0']);
+    expect(pkg.version).toBe('0.7.0');
+    expect([lock.name, lock.version]).toEqual(['tabvacuum', '0.7.0']);
+    expect([lock.packages[''].name, lock.packages[''].version]).toEqual(['tabvacuum', '0.7.0']);
     expect(lock.packages[''].devDependencies).toEqual(pkg.devDependencies);
   });
 
