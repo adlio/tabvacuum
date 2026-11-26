@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Already open — Aaron's Tab Vacuum</title>
+  <link rel="stylesheet" href="ask.css">
+</head>
+<body>
+  <main id="ask" aria-live="polite">
+    <p class="brand">Aaron's Tab Vacuum</p>
+    <form id="ask-form" hidden>
+      <h1>Already open: <span id="ask-title"></span></h1>
+      <p id="ask-detail" class="detail"></p>
+      <div class="actions">
+        <button type="submit" id="ask-switch" class="primary" autofocus>Switch</button>
+        <button type="button" id="ask-keep">Keep both</button>
+      </div>
+      <p class="hint">Press Enter to switch. Change this in Settings &gt; Duplicate Detection.</p>
+    </form>
+    <p id="ask-status" class="detail">Loading…</p>
+  </main>
+  <script src="browser-polyfill.js"></script>
+  <script type="module" src="ask.js"></script>
+</body>
+</html>

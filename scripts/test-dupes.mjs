@@ -1056,6 +1056,150 @@ scenario('X4', 'First switch shows one notice; the flag persists in storage.loca
   return verdict(v === true, `preventDuplicatesNoticeShown=${v}`, null);
 });
 
+// ---- Ask first (R14.11) -------------------------------------------------------
+const ASK = { preventDuplicatesMode: 'ask' };
+const PROMPT_TITLE = 'Already open';
+const isPrompt = t => /\/ask\.html(?:[?#]|$)/.test(t?.url ?? '');
+const prompts = s => s.tabs.filter(isPrompt);
+const asking = (s, space = 'dupe.normal') => Object.keys(s.store?.[space]?.asking || {}).map(Number);
+// Native keys on the prompt page, focusing its window by its title.
+const promptKeys = list => {
+  for (let attempt = 0; ; attempt++) {
+    try { return nativeKeys(env, list, PROMPT_TITLE); } catch (e) { if (attempt > 25) throw e; }
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 200);
+  }
+};
+// Opens a duplicate of `doc` from outside and waits for its prompt.
+async function promptFor(doc, docId) {
+  await b.external(abs(doc));
+  let s;
+  await until(async () => { s = await snap(); return prompts(s).length === 1 && asking(s).length === 1; }, 'prompt shown', 8000).catch(() => {});
+  return s;
+}
+scenario('A1', 'Ask first: an app opens a link to a doc already open', 'The new tab shows the prompt; the open doc is not touched', async ({ id }) => {
+  const { doc, other } = slugs(id);
+  const { ids } = await setup([doc, other], ASK, { activeIndex: 1 });
+  await promptFor(doc, ids[0]);
+  const s = await observe(null, 2500);
+  const p = prompts(s)[0];
+  const docTab = s.tabs.find(t => t.id === ids[0]);
+  const pass = !!p && count(s, doc) === 1 && !docTab.active && asking(s).includes(p.id) && !s.log.some(e => e.type === 'removed');
+  return verdict(pass, `prompt tab: ${p ? 'shown' : 'NONE'}; doc copies ${count(s, doc)}; open doc active: ${docTab?.active}; nothing closed: ${!s.log.some(e => e.type === 'removed')}`, s, { via: 'external' });
+});
+scenario('A2', 'Ask first: Enter on the prompt switches', 'Prompt tab closed; the open doc active and its window focused', async ({ id }) => {
+  const { doc, other } = slugs(id);
+  const { ids } = await setup([doc, other], ASK, { activeIndex: 1 });
+  const s0 = await promptFor(doc, ids[0]);
+  await sleep(600);
+  promptKeys(['Return']);
+  const s = await observe(x => switched(x, doc, ids[0]) && !prompts(x).length, 6000);
+  return verdict(switched(s, doc, ids[0]) && !prompts(s).length, `${switchObs(s, doc, ids[0])}; prompt tabs left ${prompts(s).length}`, s, { first: brief(s0), via: 'external + native Enter' });
+});
+scenario('A3', 'Ask first: Keep both (Tab, then Enter)', 'The prompt tab loads the page and stays; no prompt again', async ({ id }) => {
+  const { doc, other } = slugs(id);
+  const { ids } = await setup([doc, other], ASK, { activeIndex: 1 });
+  const s0 = await promptFor(doc, ids[0]);
+  const promptId = prompts(s0)[0]?.id;
+  await sleep(600);
+  promptKeys(['Tab']); promptKeys(['Return']);
+  await observe(x => count(x, doc) === 2, 5000);
+  await sleep(800);
+  // Back from the kept page must never show the prompt again.
+  keys(['Alt_L', 'Left'], `doc-${id.toLowerCase()}`);
+  const s = await observe(null, 3500);
+  const kept = s.tabs.find(t => t.id === promptId);
+  const pass = kept?.url === doc && count(s, doc) === 2 && !prompts(s).length && !asking(s).length;
+  return verdict(pass, `prompt tab now ${kept?.url ?? 'CLOSED'}; doc copies ${count(s, doc)}; prompts after Back ${prompts(s).length}`, s, { via: 'external + native Tab, Enter, then Alt+Left' });
+});
+scenario('A4', 'Ask first: Back (Alt+Left) on the prompt', 'Back has no usable entry (both browsers skip a page left without user interaction: Firefox canGoBack=false, Chromium "Cannot find a next page"), so the prompt stays usable and Keep both restores the page; if Back does go back, the page is kept and not asked about again', async ({ id }) => {
+  const { doc, other } = slugs(id);
+  const { ids } = await setup([doc, other], ASK, { activeIndex: 1 });
+  const s0 = await promptFor(doc, ids[0]);
+  const promptId = prompts(s0)[0]?.id;
+  await sleep(600);
+  promptKeys(['Alt_L', 'Left']);
+  const sBack = await observe(x => count(x, doc) === 2, 4000);
+  const wentBack = sBack.tabs.find(t => t.id === promptId)?.url === doc;
+  let note = `Back ${wentBack ? 'restored the page' : 'did nothing'}`;
+  if (!wentBack && isPrompt(sBack.tabs.find(t => t.id === promptId))) {
+    promptKeys(['Tab']); promptKeys(['Return']);
+    await observe(x => count(x, doc) === 2, 5000);
+    note += '; prompt still showing, then Keep both';
+  }
+  const s = await observe(null, 3500);
+  const kept = s.tabs.find(t => t.id === promptId);
+  const pass = kept?.url === doc && count(s, doc) === 2 && !prompts(s).length;
+  return verdict(pass, `${note}; prompt tab now ${kept?.url ?? 'CLOSED'}; doc copies ${count(s, doc)}; prompts ${prompts(s).length}`, s, { via: 'external + native Alt+Left' });
+});
+scenario('A5', 'Ask first: the open copy is closed while the prompt shows', 'The prompt tab gets its page back', async ({ id }) => {
+  const { doc, other } = slugs(id);
+  const { ids } = await setup([doc, other], ASK, { activeIndex: 1 });
+  const s0 = await promptFor(doc, ids[0]);
+  const promptId = prompts(s0)[0]?.id;
+  await b.api(`await api.tabs.remove(${ids[0]}); return true;`);
+  const s = await observe(x => x.tabs.find(t => t.id === promptId)?.url === doc, 6000);
+  const kept = s.tabs.find(t => t.id === promptId);
+  return verdict(kept?.url === doc && count(s, doc) === 1 && !prompts(s).length, `prompt tab now ${kept?.url ?? 'CLOSED'}; doc copies ${count(s, doc)}`, s, { via: 'external + api tabs.remove of the open copy' });
+});
+scenario('A6', 'Ask first: close the prompt tab, then Reopen Closed Tab', 'The reopened tab shows the page and is not asked about again', async ({ id }) => {
+  const { doc, other } = slugs(id);
+  const { ids } = await setup([doc, other], ASK, { activeIndex: 1 });
+  await promptFor(doc, ids[0]);
+  await sleep(600);
+  promptKeys(['Control_L', 'w']);
+  await observe(x => !prompts(x).length, 4000);
+  await sleep(500);
+  keys(['Control_L', 'Shift_L', 't'], `other-${id.toLowerCase()}`);
+  await observe(x => count(x, doc) === 2, 8000);
+  const s = await observe(null, 3500);
+  return verdict(count(s, doc) === 2 && !prompts(s).length, `doc copies ${count(s, doc)}; prompts ${prompts(s).length}`, s, { via: 'external + native Ctrl+W, Ctrl+Shift+T' });
+});
+scenario('A7', 'Ask first: Ctrl-click a link on the doc to the same page', 'Kept with no prompt (opened from its match)', async ({ id }) => {
+  const self = `/link/doc-${id.toLowerCase()}?to=self`;
+  await setup([self, slugs(id).other], ASK);
+  focus(`doc-${id.toLowerCase()}`); click(640, 450, 1, ['Control_L']);
+  const s = await observe(null, 5000);
+  return verdict(count(s, self) === 2 && !prompts(s).length, `${count(s, self)} copies; prompts ${prompts(s).length}`, s, { via: 'native' });
+});
+scenario('A8', 'Ask first: Open All in Tabs with an already-open page first', 'All kept with no prompt', async ({ id }) => {
+  const { doc, other } = slugs(id);
+  await setup([doc, other], ASK);
+  await b.api(`for (const u of ${JSON.stringify([doc, `/tab/abulk-a-${id.toLowerCase()}`, `/tab/abulk-b-${id.toLowerCase()}`].map(abs))}) api.tabs.create({ url: u, active: false }); return true;`);
+  const s = await observe(null, 5000);
+  return verdict(count(s, doc) === 2 && !prompts(s).length, `${count(s, doc)} doc copies; prompts ${prompts(s).length}`, s, { via: 'api: 3 tabs.create in one burst' });
+});
+scenario('A9', 'Ask first: a duplicate inside a private window', 'The prompt shows in the private tab; the normal copy is never matched', async ({ id }) => {
+  const { doc, other } = slugs(id);
+  await setup([doc, other], ASK);
+  const pw = await b.openPrivate(`/tab/priv-${id.toLowerCase()}`);
+  await sleep(2500);
+  await b.privateApi(INSTRUMENT);
+  await b.privateApi(`await api.tabs.create({ windowId: ${pw}, url: ${JSON.stringify(abs(doc))}, active: true }); return true;`);
+  const s1 = await observe(null, 3500, true);
+  const first = s1.tabs.filter(t => t.url === doc && t.incognito).length;
+  const firstPrompts = s1.tabs.filter(t => t.incognito && isPrompt(t)).length;
+  await b.privateApi(`await api.tabs.create({ windowId: ${pw}, url: ${JSON.stringify(abs(doc))}, active: true }); return true;`);
+  const s = await observe(x => x.tabs.some(t => t.incognito && isPrompt(t)), 6000, true);
+  const promptsPriv = s.tabs.filter(t => t.incognito && isPrompt(t)).length;
+  const normalPrompts = (await snap()).tabs.filter(t => !t.incognito && isPrompt(t)).length;
+  await b.api(`await api.windows.remove(${pw}).catch(() => {}); return true;`).catch(() => {});
+  if (name === 'chromium') await b.privateApi(`for (const w of await api.windows.getAll()) await api.windows.remove(w.id).catch(() => {}); return true;`).catch(() => {});
+  const pass = first === 1 && firstPrompts === 0 && promptsPriv === 1 && normalPrompts === 0;
+  return verdict(pass, `first private copy kept without a prompt: ${first === 1 && firstPrompts === 0}; second private copy prompted: ${promptsPriv === 1}; normal-window prompts ${normalPrompts}`, s, { first: brief(s1), via: 'api tabs.create in the private window' });
+});
+scenario('A10', 'Ask first: Firefox containers', 'A container copy next to a default copy gets no prompt; a second container copy does', async ({ id }) => {
+  if (!b.containerTab) return { untestable: 'Chromium has no containers.' };
+  const { doc, other } = slugs(id);
+  await setup([doc, other], ASK, { activeIndex: 1 });
+  await b.containerTab(doc);
+  const s1 = await observe(null, 4000);
+  const p1 = prompts(s1).length;
+  await b.containerTab(doc);
+  const s = await observe(x => prompts(x).length === 1, 6000);
+  const promptTab = prompts(s)[0];
+  return verdict(p1 === 0 && promptTab?.cs === 'firefox-container-1', `first container copy prompted: ${p1 !== 0}; second container copy prompted in ${promptTab?.cs ?? 'NONE'}`, s, { first: brief(s1), via: 'browser (gBrowser.addTab with userContextId)' });
+});
+
 // ---- run ----------------------------------------------------------------------
 const started = new Date().toISOString();
 const old = await buildOld();

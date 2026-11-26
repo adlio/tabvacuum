@@ -9,7 +9,7 @@
 // tab.incognito. Nothing here is written while the feature is off.
 import {
   DUPE_ALLOW_MS, DUPE_BURST_MS, DUPE_SETTLE_MS, DUPE_COMPLETE_GRACE_MS, DUPE_KEEP_MS, DUPE_NEW_TAB_CAP_MS, DUPE_STARTUP_QUIET_MS,
-  dupeKey, isStillNew, judgeNewTab, newTabRecord, noteTabUrl, settleDeadline,
+  addAskEntry, askOutcome, authorizeAskMessage, dupeAction, dupeContextKey, dupeKey, isAskPageUrl, isStillNew, judgeNewTab, newTabRecord, noteTabUrl, settleDeadline,
 } from './core.js';
 
 export const DUPE_NOTICE_KEY = 'preventDuplicatesNoticeShown'; // storage.local: the first-switch notice was shown
@@ -24,7 +24,8 @@ const SETTING_DEFAULTS = {
 };
 const spaceOf = incognito => (incognito === true ? 'private' : 'normal');
 const keyOf = space => `dupe.${space}`;
-const emptyStore = () => ({ tabs: {}, windows: {}, closed: [], allowed: [], quietUntil: 0 });
+// asking: tab id -> the Ask first prompt showing in that tab (not pruned by age; bounded by DUPE_ASK_MAX).
+const emptyStore = () => ({ tabs: {}, windows: {}, closed: [], allowed: [], quietUntil: 0, asking: {} });
 
 // Runs async functions one at a time, in call order. A failure does not block later calls.
 function serial() {
@@ -43,6 +44,7 @@ function readStore(raw) {
   if (raw.windows && typeof raw.windows === 'object') store.windows = raw.windows;
   if (Array.isArray(raw.closed)) store.closed = raw.closed;
   if (Array.isArray(raw.allowed)) store.allowed = raw.allowed;
+  if (raw.asking && typeof raw.asking === 'object') store.asking = raw.asking;
   if (Number.isFinite(raw.quietUntil)) store.quietUntil = raw.quietUntil;
   return store;
 }
@@ -110,6 +112,11 @@ export function createDuplicateService(api, { now = () => Date.now(), notify = a
     }
     if (verdict.action !== 'switch') { record.done = verdict.reason; return; }
     const match = tabs.find(t => t.id === verdict.matchId);
+    if (dupeAction(s) === 'ask') {
+      record.done = 'asking';
+      await askAbout(tab, match, record, store, s, space);
+      return;
+    }
     record.done = 'switched';
     await switchTo(tab, match, record, store, s, space);
   }
@@ -173,6 +180,96 @@ export function createDuplicateService(api, { now = () => Date.now(), notify = a
     await firstSwitchNotice();
   }
 
+  // ---- Ask first (R14.11) ----
+  const askUrl = api.runtime.getURL('ask.html');
+
+  // Shows the prompt in the new tab instead of switching. Never closes the tab:
+  // if the prompt cannot be shown, the tab is kept.
+  async function askAbout(tab, match, record, store, s, space) {
+    let current;
+    try { current = await api.tabs.get(tab.id); } catch { return; }
+    if (current.url !== tab.url) { record.done = 'changed'; return; }
+    if (queuedCreates.get(tab.windowId)) { delete record.done; settleLater(tab.id, space === 'private', record, store.tabs); return; }
+    addAskEntry(store.asking, tab.id, {
+      matchId: match.id, url: tab.url, key: dupeKey(tab.url, tab, s), ctx: dupeContextKey(tab),
+      title: match.title || '', created: record.created, at: now(),
+    });
+    try {
+      await api.tabs.update(tab.id, { url: askUrl });
+    } catch {
+      delete store.asking[tab.id];
+      record.done = 'kept';
+    }
+  }
+
+  // Gives a prompt tab its page back: Back to the original entry, or loading
+  // the URL again when there is no entry to go back to.
+  // Chromium skips the original entry (a page left without a user gesture), so
+  // Back can fail there; Forward covers a prompt reached by pressing Back on a
+  // kept page.
+  async function restorePage(tabId, url) {
+    try { await api.tabs.goBack(tabId); return true; } catch { /* no usable back entry */ }
+    try { await api.tabs.goForward(tabId); return true; } catch { /* no forward entry */ }
+    if (!url) return false;
+    return api.tabs.update(tabId, { url }).then(() => true, () => false);
+  }
+
+  function keepFor(store, tabId) {
+    const record = store.tabs[tabId];
+    if (record) record.done = 'kept';
+    const entry = store.asking[tabId];
+    delete store.asking[tabId];
+    return entry;
+  }
+
+  /**
+   * Messages from the prompt page: dupeAskInfo (what to show) and dupeAskChoice
+   * ({ choice: 'switch' | 'keep' }). Returns undefined for any other message.
+   * Works even if the feature was turned off while a prompt was showing.
+   */
+  function handleAskMessage(message, sender) {
+    if (message?.command !== 'dupeAskInfo' && message?.command !== 'dupeAskChoice') return undefined;
+    return queue(async () => {
+      const space = spaceOf(sender?.tab?.incognito);
+      const store = await load(space);
+      const auth = authorizeAskMessage({ sender, extensionId: api.runtime.id, askUrl, entries: store.asking });
+      if (!auth.ok) throw new Error(auth.error);
+      const { tabId, entry } = auth;
+      let match = null;
+      if (entry) { try { match = await api.tabs.get(entry.matchId); } catch { match = null; } }
+      const s = await settings();
+      if (!entry || (message.command === 'dupeAskInfo' && askOutcome({ choice: 'switch', entry, match, settings: s }) === 'back')) {
+        // No prompt for this tab (it was restored with Reopen Closed Tab, or
+        // the prompt expired), or the open copy is gone: keep the tab's page.
+        keepFor(store, tabId);
+        await save(space);
+        return { state: (await restorePage(tabId, entry?.url)) ? 'restored' : 'lost' };
+      }
+      if (message.command === 'dupeAskInfo') {
+        let host = '';
+        try { host = new URL(entry.url).host; } catch { /* keep empty */ }
+        return { state: 'ask', title: match.title || entry.title || host, host, otherWindow: match.windowId !== sender.tab.windowId };
+      }
+      if (askOutcome({ choice: message.choice, entry, match, settings: s }) === 'switch') {
+        delete store.asking[tabId];
+        await save(space);
+        try {
+          await api.tabs.update(match.id, { active: true });
+          await api.windows.update(match.windowId, { focused: true });
+          await api.tabs.remove(tabId);
+          store.closed.push({ key: entry.key, at: now(), created: entry.created });
+          await save(space);
+        } catch { /* the tab or its match went away meanwhile */ }
+        return { state: 'switched' };
+      }
+      // Keep both: the page itself loads the original URL with
+      // location.replace, so the prompt does not stay in the tab's history.
+      keepFor(store, tabId);
+      await save(space);
+      return { state: 'kept', url: entry.url };
+    });
+  }
+
   async function firstSwitchNotice() {
     try {
       if ((await local.get(DUPE_NOTICE_KEY))[DUPE_NOTICE_KEY]) return;
@@ -205,6 +302,9 @@ export function createDuplicateService(api, { now = () => Date.now(), notify = a
   function onUpdated(tabId, change, tab) {
     if (!('url' in change) && change.status !== 'complete') return undefined;
     return withStore(tab.incognito, async (store, s, space) => {
+      // A prompt tab that leaves the prompt (the user pressed Back or typed an
+      // address) keeps whatever it now shows, for good.
+      if (store.asking[tabId] && change.url !== undefined && !isAskPageUrl(change.url, askUrl)) { keepFor(store, tabId); return; }
       const record = store.tabs[tabId];
       if (!record || record.done || record.ignored) return false; // unknown tabs are existing tabs
       if (change.url !== undefined) noteTabUrl(record, change.url);
@@ -216,7 +316,15 @@ export function createDuplicateService(api, { now = () => Date.now(), notify = a
   function onRemoved(tabId) {
     return queue(async () => {
       for (const [space, store] of stores) {
-        if (store.tabs[tabId]) { delete store.tabs[tabId]; await save(space); }
+        let changed = false;
+        if (store.tabs[tabId]) { delete store.tabs[tabId]; changed = true; }
+        if (store.asking[tabId]) { delete store.asking[tabId]; changed = true; }
+        // The open copy closed while its prompt was showing: nothing to switch
+        // to, so the prompt tab gets its page back.
+        const orphaned = Object.entries(store.asking).filter(([, e]) => e.matchId === tabId);
+        for (const [id] of orphaned) keepFor(store, Number(id));
+        if (changed || orphaned.length) await save(space);
+        for (const [id, e] of orphaned) await restorePage(Number(id), e.url);
       }
     });
   }
@@ -275,5 +383,5 @@ export function createDuplicateService(api, { now = () => Date.now(), notify = a
     });
   }
 
-  return { install, allow, onCreated, onUpdated, onRemoved, onActivated, onWindowCreated, onStartup, idle: () => queue(() => {}) };
+  return { install, allow, handleAskMessage, askUrl, onCreated, onUpdated, onRemoved, onActivated, onWindowCreated, onStartup, idle: () => queue(() => {}) };
 }

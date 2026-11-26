@@ -20,7 +20,7 @@ function world({ enabled = true, split = false, incognitoContext = false, local 
     return out;
   };
   w.api = {
-    runtime: { getManifest: () => ({ incognito: split ? 'split' : undefined }), onStartup: on('onStartup') },
+    runtime: { id: 'atv@test', getURL: path => `ext://atv/${path}`, getManifest: () => ({ incognito: split ? 'split' : undefined }), onStartup: on('onStartup') },
     extension: { inIncognitoContext: incognitoContext },
     storage: {
       local: { get: async k => get(k), set: async v => { Object.assign(w.local, clone(v)); await emit('storage', Object.fromEntries(Object.keys(v).map(k => [k, {}])), 'local'); } },
@@ -31,7 +31,24 @@ function world({ enabled = true, split = false, incognitoContext = false, local 
       onCreated: on('created'), onUpdated: on('updated'), onRemoved: on('removed'), onActivated: on('activated'),
       get: vi.fn(async id => { const t = w.tabs.find(x => x.id === id); if (!t) throw new Error('No tab'); return clone(t); }),
       query: vi.fn(async () => clone(w.tabs)),
-      update: vi.fn(async (id, props) => { w.calls.push(['tabs.update', id, props]); }),
+      update: vi.fn(async (id, props) => {
+        w.calls.push(['tabs.update', id, props]);
+        const t = w.tabs.find(x => x.id === id);
+        if (t && props.url) {
+          if (w.updateFails) throw new Error('Cannot navigate');
+          (t.history ??= []).push(t.url);
+          t.url = props.url;
+          emit('updated', id, { url: props.url, status: 'loading' }, clone(t));
+        }
+      }),
+      goForward: vi.fn(async id => { w.calls.push(['tabs.goForward', id]); throw new Error('Cannot go forward'); }),
+      goBack: vi.fn(async id => {
+        w.calls.push(['tabs.goBack', id]);
+        const t = w.tabs.find(x => x.id === id);
+        if (!t?.history?.length) throw new Error('Cannot go back');
+        t.url = t.history.pop();
+        emit('updated', id, { url: t.url, status: 'loading' }, clone(t));
+      }),
       remove: vi.fn(async id => {
         w.calls.push(['tabs.remove', id]);
         if (w.removeFails) throw new Error('No tab with id');
@@ -444,5 +461,175 @@ describe('duplicate service: worker lifetime and contexts (D10, D11)', () => {
     const normal = await w.open(DOC);
     expect(w.alive(normal.id)).toBe(true);
     expect(Object.keys(w.session).sort()).toEqual(['dupe.normal']);
+  });
+});
+
+describe('duplicate service: Ask first (R14.11)', () => {
+  const ASK = 'ext://atv/ask.html';
+  const ask = () => world({ local: { preventDuplicatesMode: 'ask' } });
+  const from = (w, id) => ({ id: 'atv@test', url: ASK, tab: { id, windowId: w.tabs.find(t => t.id === id)?.windowId ?? 1, incognito: false } });
+  const send = (w, id, message) => w.service.handleAskMessage(message, from(w, id));
+
+  it('shows the prompt in the new tab instead of switching, and touches nothing else', async () => {
+    const w = ask();
+    w.existing(DOC, { title: 'Roadmap' });
+    w.existing('https://other.example/');
+    const dup = await w.open(DOC);
+    expect(w.calls).toEqual([['tabs.update', dup.id, { url: ASK }]]);
+    expect(w.alive(dup.id)).toBe(true);
+    expect(w.session['dupe.normal'].asking[dup.id]).toMatchObject({ matchId: 1, url: DOC });
+    expect(w.notify).not.toHaveBeenCalled();
+    expect(await send(w, dup.id, { command: 'dupeAskInfo' })).toEqual({ state: 'ask', title: 'Roadmap', host: 'docs.example.com', otherWindow: false });
+  });
+
+  it('Switch focuses the open copy and its window, then closes the prompt tab', async () => {
+    const w = ask();
+    const doc = w.existing(DOC, { windowId: 2 });
+    w.existing('https://other.example/');
+    const dup = await w.open(DOC);
+    w.calls.length = 0;
+    expect(await send(w, dup.id, { command: 'dupeAskChoice', choice: 'switch' })).toEqual({ state: 'switched' });
+    expect(w.calls).toEqual([['tabs.update', doc.id, { active: true }], ['windows.update', 2, { focused: true }], ['tabs.remove', dup.id]]);
+  });
+
+  it('Keep both hands the page its URL to load, and the tab is left alone for good', async () => {
+    const w = ask();
+    w.existing(DOC);
+    w.existing('https://other.example/');
+    const dup = await w.open(DOC);
+    w.calls.length = 0;
+    expect(await send(w, dup.id, { command: 'dupeAskChoice', choice: 'keep' })).toEqual({ state: 'kept', url: DOC });
+    expect(w.session['dupe.normal'].asking[dup.id]).toBeUndefined();
+    // The page runs location.replace(url): the tab reports the page again.
+    const t = w.tabs.find(x => x.id === dup.id);
+    t.url = DOC;
+    await w.emit('updated', dup.id, { url: DOC, status: 'loading' }, clone(t));
+    await w.tick(5000);
+    expect(w.calls).toEqual([]);
+    expect(w.alive(dup.id)).toBe(true);
+  });
+
+  it('restoring a page with no history entry to go back to loads the URL again', async () => {
+    const w = ask();
+    const doc = w.existing(DOC);
+    w.existing('https://other.example/');
+    const dup = await w.open(DOC);
+    w.tabs.find(t => t.id === dup.id).history = [];
+    w.calls.length = 0;
+    w.tabs = w.tabs.filter(t => t.id !== doc.id);
+    await w.emit('removed', doc.id, {});
+    await w.service.idle();
+    expect(w.calls).toEqual([['tabs.goBack', dup.id], ['tabs.goForward', dup.id], ['tabs.update', dup.id, { url: DOC }]]);
+  });
+
+  it('the user pressing Back on the prompt keeps the original page without asking again', async () => {
+    const w = ask();
+    w.existing(DOC);
+    w.existing('https://other.example/');
+    const dup = await w.open(DOC);
+    const t = w.tabs.find(x => x.id === dup.id);
+    t.url = DOC;
+    await w.emit('updated', dup.id, { url: DOC, status: 'loading' }, clone(t));
+    await w.settle();
+    expect(w.session['dupe.normal'].asking[dup.id]).toBeUndefined();
+    expect(w.calls.filter(c => c[1] === dup.id)).toEqual([['tabs.update', dup.id, { url: ASK }]]);
+  });
+
+  it('the open copy closing while the prompt shows gives the prompt tab its page back', async () => {
+    const w = ask();
+    const doc = w.existing(DOC);
+    w.existing('https://other.example/');
+    const dup = await w.open(DOC);
+    w.tabs = w.tabs.filter(t => t.id !== doc.id);
+    await w.emit('removed', doc.id, {});
+    await w.service.idle();
+    expect(w.calls).toContainEqual(['tabs.goBack', dup.id]);
+    expect(w.tabs.find(t => t.id === dup.id).url).toBe(DOC);
+  });
+
+  it('Switch after the open copy navigated elsewhere keeps the tab instead', async () => {
+    const w = ask();
+    const doc = w.existing(DOC);
+    w.existing('https://other.example/');
+    const dup = await w.open(DOC);
+    doc.url = 'https://elsewhere.example/';
+    w.calls.length = 0;
+    expect(await send(w, dup.id, { command: 'dupeAskChoice', choice: 'switch' })).toEqual({ state: 'kept', url: DOC });
+    expect(w.calls).toEqual([]);
+  });
+
+  it('a restored prompt (Reopen Closed Tab) has no entry: the tab is kept and goes back to its page', async () => {
+    const w = ask();
+    w.existing(DOC);
+    w.existing('https://other.example/');
+    const restored = { id: 77, windowId: 1, index: 2, url: ASK, status: 'loading', incognito: false, history: [DOC] };
+    w.tabs.push(restored);
+    await w.emit('created', clone(restored));
+    expect(await send(w, 77, { command: 'dupeAskInfo' })).toEqual({ state: 'restored' });
+    await w.settle();
+    expect(restored.url).toBe(DOC);
+    expect(w.session['dupe.normal'].tabs['77'].done).toBe('kept');
+    expect(w.calls.filter(c => c[0] === 'tabs.remove')).toEqual([]);
+  });
+
+  it('a restored prompt with no history to return to says so instead of hanging', async () => {
+    const w = ask();
+    w.existing(DOC);
+    w.existing('https://other.example/');
+    const restored = { id: 78, windowId: 1, index: 2, url: ASK, status: 'loading', incognito: false, history: [] };
+    w.tabs.push(restored);
+    await w.emit('created', clone(restored));
+    expect(await send(w, 78, { command: 'dupeAskInfo' })).toEqual({ state: 'lost' });
+    expect(w.alive(78)).toBe(true);
+  });
+
+  it('rejects messages that do not come from the prompt page in its own tab', async () => {
+    const w = ask();
+    w.existing(DOC);
+    w.existing('https://other.example/');
+    const dup = await w.open(DOC);
+    await expect(w.service.handleAskMessage({ command: 'dupeAskChoice', choice: 'switch' }, { ...from(w, dup.id), url: 'https://evil.example/' })).rejects.toThrow();
+    await expect(w.service.handleAskMessage({ command: 'dupeAskChoice', choice: 'switch' }, { ...from(w, dup.id), id: 'other-extension' })).rejects.toThrow();
+    expect(w.service.handleAskMessage({ command: 'getSettings' }, from(w, dup.id))).toBeUndefined();
+    expect(w.alive(dup.id)).toBe(true);
+  });
+
+  it('keeps the tab when the prompt cannot be shown (never closes without asking)', async () => {
+    const w = ask();
+    w.existing(DOC);
+    w.existing('https://other.example/');
+    w.updateFails = true;
+    const dup = await w.open(DOC);
+    expect(w.alive(dup.id)).toBe(true);
+    expect(w.calls.some(c => c[0] === 'tabs.remove')).toBe(false);
+    expect(w.session['dupe.normal'].asking[dup.id]).toBeUndefined();
+  });
+
+  it('already-allowed cases show no prompt: opened from its match, and a reopen within 60 s', async () => {
+    const w = ask();
+    const doc = w.existing(DOC);
+    w.existing('https://other.example/');
+    const dup = await w.open(DOC, { opener: doc.id });
+    expect(w.calls).toEqual([]);
+    expect(w.alive(dup.id)).toBe(true);
+  });
+
+  it('a background duplicate gets its prompt without anything being activated', async () => {
+    const w = ask();
+    w.existing(DOC);
+    w.existing('https://chat.example/', { active: true });
+    const dup = await w.open(DOC, { extra: { active: false } });
+    expect(w.calls).toEqual([['tabs.update', dup.id, { url: ASK }]]);
+  });
+
+  it('closing the prompt tab forgets it', async () => {
+    const w = ask();
+    w.existing(DOC);
+    w.existing('https://other.example/');
+    const dup = await w.open(DOC);
+    w.tabs = w.tabs.filter(t => t.id !== dup.id);
+    await w.emit('removed', dup.id, {});
+    await w.service.idle();
+    expect(w.session['dupe.normal'].asking).toEqual({});
   });
 });

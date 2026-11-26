@@ -458,3 +458,13 @@ TabVacuum's own Search (D13): `createSearchService` takes a `beforeOpen(url)` ho
 No permission is added: `tabs`, `storage` and `notifications` are already in both manifests.
 
 Not covered by the probe and left to real-browser acceptance tests: native Duplicate Tab from the tab context menu (the probe used `tabs.duplicate`), Open All in Tabs, Chromium external-app links, and Firefox startup restore.
+
+### Ask first (R14.11)
+
+`core.js` adds `dupeAction` (mode to action), `isAskPageUrl`, `authorizeAskMessage`, `askOutcome` and `addAskEntry`. The service turns a `switch` verdict into a prompt in Ask first mode: it records `{matchId, url, key, ctx, title}` under the tab ID in the store's `asking` map (at most 50, oldest dropped and simply kept), marks the record `asking`, and navigates the tab to `ask.html` with `tabs.update`. A failed navigation keeps the tab.
+
+`ask.html`/`ask.js` ask the background `dupeAskInfo` and send `dupeAskChoice` with only `switch` or `keep`. `background.js` routes those two commands to the service before the popup/options trust check; the service accepts them only from this extension's `ask.html` in a tab that has a prompt entry, and takes the URL and the open copy from the entry. Switch re-reads the open copy (`askOutcome`): same page, container and context, or the tab keeps its page instead. Keep both returns the URL to the page, which calls `location.replace(url)`, so the tab's history holds the page and not the prompt.
+
+Real-browser findings: in both Firefox 161 and Chromium 145 the original page entry before the prompt is not reachable with Back (Firefox reports `canGoBack: false`; Chromium's `tabs.goBack` fails with "Cannot find a next page in history"), because both skip an entry the user never interacted with. Pressing Back on the prompt therefore does nothing; the prompt stays usable. `tabs.goBack` from the extension still worked in Firefox. The service therefore restores a page (open copy closed, or a prompt with no entry) with `tabs.goBack`, then `tabs.goForward`, then `tabs.update(url)` when the URL is known; a restored prompt with nothing to restore says so on the page.
+
+Harness rows A1-A10 (`scripts/test-dupes.mjs`) cover the prompt, Enter to switch, Keep both and Back afterwards, Back on the prompt, the open copy closing, Ctrl+W then Ctrl+Shift+T on a prompt, opened-from-match, a bulk open, a private window, and Firefox containers.

@@ -76,7 +76,7 @@ describe('settings: stale tabs', () => {
     expect(settings).toEqual({
       searchScope: 'all', ignoreFragments: true, ignoreQueryParams: true, skipPinned: true, skipAudible: false,
       blankNewTab: true, blankWelcome: true, blankSearchEngines: false, blankCustomUrls: ['https://a.example/'],
-      preventDuplicates: false, preventDuplicatesNever: [],
+      preventDuplicates: false, preventDuplicatesMode: 'switch', preventDuplicatesNever: [],
     });
     expect(settings).not.toHaveProperty('staleThresholdMs');
     expect(settings).not.toHaveProperty('autoCloseStaleEnabled');

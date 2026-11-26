@@ -147,4 +147,4 @@
 ## Duplicate-tab prevention (R14, issue #20)
 
 - [x] **T78 (kirocrew-worker)** — Probed tab creation events in real Firefox 161 and Chromium 145 (`scripts/probe-duplicate-tabs.mjs`; results table in docs/design.md), then built Switch mode: `judgeNewTab` and helpers in core.js, `duplicate-service.js`, background wiring, Search's keep hook, Settings under Duplicate Detection (off by default), first-switch notice, PRD R14. No new permissions. Real-browser acceptance against the scenario list is a separate task.
-- [ ] **T79** — Ask first mode for duplicate-tab prevention (follow-up to T78).
+- [x] **T79 (kirocrew-worker)** — Ask first mode for duplicate-tab prevention: When it happens setting (Switch default), `ask.html` prompt with Switch / Keep both, PRD R14.11, design notes, unit tests and harness rows A1-A10. No new permissions.

@@ -192,7 +192,8 @@ export const DUPE_BULK_COUNT = 3;                  // this many tabs in one wind
 // its own creation. A lone tab is judged after DUPE_SETTLE_MS.
 export const DUPE_SETTLE_MS = 200;
 export const DUPE_ALLOW_MS = 5 * 1000;             // TabVacuum Search's own opens are kept this long
-export const DUPE_MODES = ['switch'];
+export const DUPE_MODES = ['switch', 'ask'];
+export const DUPE_ASK_MAX = 50; // prompts remembered at once; the oldest is dropped (and its tab simply kept)
 const DUPE_NEVER_MAX = 200;
 
 const isWebUrl = url => typeof url === 'string' && /^https?:\/\//i.test(url);
@@ -346,6 +347,53 @@ export function judgeNewTab({ tab, record, tabs, records = {}, closed = [], allo
     return { action: 'keep', reason: 'repeated' };
   }
   return { action: 'switch', reason: 'duplicate', matchId: match.id };
+}
+
+// ---- Ask first (R14.11) -------------------------------------------------------
+
+/** What to do with a 'switch' verdict in the user's mode: 'switch' or 'ask'. */
+export const dupeAction = settings => (settings.preventDuplicatesMode === 'ask' ? 'ask' : 'switch');
+
+/** Is this URL TabVacuum's own Ask first prompt page? */
+export function isAskPageUrl(url, askUrl) {
+  if (typeof url !== 'string' || !url.startsWith(askUrl)) return false;
+  const next = url[askUrl.length];
+  return next === undefined || next === '?' || next === '#';
+}
+
+/**
+ * Accepts a prompt-page message only from the prompt itself: sent by this
+ * extension, from a tab showing the prompt page, about a prompt that exists
+ * for that tab. The page names no URL or tab; both come from the stored entry.
+ */
+export function authorizeAskMessage({ sender, extensionId, askUrl, entries }) {
+  const tabId = sender?.tab?.id;
+  if (sender?.id !== extensionId || !Number.isSafeInteger(tabId)) return { ok: false, error: 'Not a prompt page.' };
+  if (!isAskPageUrl(sender.url, askUrl)) return { ok: false, error: 'Not a prompt page.' };
+  const entry = entries?.[tabId];
+  return entry ? { ok: true, tabId, entry } : { ok: true, tabId, entry: null };
+}
+
+/**
+ * Outcome of the user's choice on the prompt. Switch goes ahead only while the
+ * open copy still shows the same page in the same context; otherwise the
+ * prompt tab gets its page back (there is nothing to switch to).
+ *   'switch' - focus entry.matchId and its window, close the prompt tab
+ *   'back'   - load the original page in the prompt tab and keep it for good
+ */
+export function askOutcome({ choice, entry, match, settings }) {
+  if (choice !== 'switch' || !entry || !match) return 'back';
+  if (dupeContextKey(match) !== entry.ctx || !isWebUrl(match.url)) return 'back';
+  return dupeKey(match.url, match, settings) === entry.key ? 'switch' : 'back';
+}
+
+/** Adds a prompt entry, dropping the oldest past DUPE_ASK_MAX. Returns the dropped tab IDs. */
+export function addAskEntry(entries, tabId, entry) {
+  entries[tabId] = entry;
+  const ids = Object.keys(entries).sort((a, b) => entries[a].at - entries[b].at);
+  const dropped = ids.slice(0, Math.max(0, ids.length - DUPE_ASK_MAX));
+  for (const id of dropped) delete entries[id];
+  return dropped.map(Number);
 }
 
 export function planMerge(windows, targetWindowId) {
