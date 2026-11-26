@@ -230,7 +230,25 @@ async function firefoxAdapter() {
     // History > Reopen closed window, the browser's own command.
     reopenWindow: () => chrome('SessionStore.undoCloseWindow(0); return true;'),
     restart: null,
-    async searchHistory(url) { return null; },
+    // TabVacuum Search's own "open this history result" request, sent from a real
+    // Search page that holds a launch token. Search is launched from a foreground
+    // Settings tab (its origin), which cannot host the overlay, so Search opens as a popup window.
+    async searchHistory(url) {
+      const tabBy = prefix => `(()=>{ for (const w of Services.wm.getEnumerator('navigator:browser')) for (const t of w.gBrowser.tabs) if (t.linkedBrowser.currentURI.spec.startsWith('${prefix}')) return t; })()`;
+      await chrome(`gBrowser.selectedTab = gBrowser.addTab(arguments[0], { triggeringPrincipal: Services.scriptSecurityManager.getSystemPrincipal() }); return true;`, `${ext}/options.html`);
+      await until(() => inContext(`${tabBy(`${ext}/options.html`)}?.linkedBrowser.browsingContext`, 'return !!document.getElementById("prevent-duplicates");'), 'options page', 15000);
+      await inContext(`${tabBy(`${ext}/options.html`)}?.linkedBrowser.browsingContext`, 'api.runtime.sendMessage({ command: "launchSearch" }).catch(() => {}); return true;');
+      const ok = await until(() => chrome(`return !!${tabBy(`${ext}/search.html?token=`)};`), 'search page', 10000).catch(() => false);
+      let reply = { error: 'no popup Search page opened' };
+      if (ok) {
+        reply = await inContext(`${tabBy(`${ext}/search.html?token=`)}?.linkedBrowser.browsingContext`,
+          `return await api.runtime.sendMessage({ command: 'activateHistoryResult', token: new URLSearchParams(location.search).get('token'), url: ${JSON.stringify(url)} });`)
+          .catch(e => ({ replyLost: String(e.message).split('\n')[0] }));
+      }
+      await sleep(4000); // past the 3 s re-judge grace, then drop the Settings tab
+      await chrome(`for (const w of Services.wm.getEnumerator('navigator:browser')) for (const t of [...w.gBrowser.tabs]) if (t.linkedBrowser.currentURI.spec.startsWith('${ext}/options.html')) w.gBrowser.removeTab(t); return true;`);
+      return reply;
+    },
     async shutdown() { await driver.quit(); },
   };
 }
@@ -806,6 +824,30 @@ scenario('P5b', 'Open All in Tabs, the already-open page last of the 3', 'Ignore
   await b.api(`for (const u of ${JSON.stringify(['/tab/bulk-c', '/tab/bulk-d', doc].map(abs))}) api.tabs.create({ url: u, active: false }); return true;`);
   const s = await observe(null, 5000);
   return verdict(count(s, doc) === 2, `${count(s, doc)} doc copies after a 3-tab bulk open`, s, { via: 'api: 3 tabs.create in one burst (what Open All in Tabs does)' });
+});
+scenario('P5c', 'Open All in Tabs from the Bookmark Manager, open page first (Chromium)', 'Ignored: all kept', async ({ id }) => {
+  if (name !== 'chromium') return { untestable: 'Chromium-only: drives chrome://bookmarks. Firefox rows P5/P5b use the API burst.' };
+  const { doc, other } = slugs(id);
+  await setup([doc, other]);
+  const urls = [doc, '/tab/bm-a', '/tab/bm-b'].map(abs);
+  // The Bookmark Manager page's own APIs: make a folder, then open each bookmark in a
+  // new tab the way its "Open all" command does.
+  const m = await b.context.newPage();
+  await m.goto('chrome://bookmarks/'); await sleep(800);
+  const r = await m.evaluate(async list => {
+    const folder = await chrome.bookmarks.create({ parentId: '1', title: 'dupes-p5c' });
+    const ids = [];
+    for (const url of list) ids.push((await chrome.bookmarks.create({ parentId: folder.id, url })).id);
+    if (!chrome.bookmarkManagerPrivate?.openInNewTab) return { error: 'bookmarkManagerPrivate.openInNewTab unavailable' };
+    for (const i of ids) chrome.bookmarkManagerPrivate.openInNewTab(i);
+    return { ids, form: 'openInNewTab per bookmark, in one task' };
+  }, urls).catch(e => ({ error: String(e.message).split('\n')[0] }));
+  await sleep(300);
+  const s = await observe(null, 5000);
+  await m.close().catch(() => {});
+  if (r.error) return { untestable: `Bookmark Manager open-all not reachable: ${r.error}` };
+  const opened = s.tabs.filter(t => /\/tab\/bm-/.test(t.url)).length;
+  return verdict(count(s, doc) === 2 && opened === 2, `${count(s, doc)} doc copies; ${opened} of 2 other bookmarks opened (${r.form})`, s, { via: 'browser (chrome://bookmarks bookmarkManagerPrivate.openInNewTab)' });
 });
 scenario('P6a', 'Doc is the rightmost tab; Ctrl+T and type its URL', 'Switch', async ({ id }) => {
   const { doc, other } = slugs(id);
