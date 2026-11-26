@@ -877,6 +877,14 @@ scenario('P5d', 'Bulk open spread over 300 ms (3 tabs 150 ms apart, open page fi
   const created = s.log.filter(e => e.type === 'created').map(e => e.t);
   return verdict(count(s, doc) === 2, `${count(s, doc)} doc copies; burst spread ${created.length > 1 ? created.at(-1) - created[0] : '?'} ms over ${created.length} tabs`, s, { via: 'api: 3 tabs.create, 150 ms apart' });
 });
+scenario('P5h', 'Edge: 3 tabs 400 ms apart (inside the 1 s bulk window, gaps longer than the 200 ms debounce), open page first', 'Ignored per issue #20 (3 tabs within 1 s)', async ({ id }) => {
+  const { doc, other } = slugs(id);
+  await setup([doc, other]);
+  await b.api(`for (const u of ${JSON.stringify([doc, '/tab/gap-a', '/tab/gap-b'].map(abs))}) { api.tabs.create({ url: u, active: false }); await new Promise(r => setTimeout(r, 400)); } return true;`);
+  const s = await observe(null, 3000);
+  const created = s.log.filter(e => e.type === 'created').map(e => e.t);
+  return verdict(count(s, doc) === 2, `${count(s, doc)} doc copies; ${created.length} tabs over ${created.length > 1 ? created.at(-1) - created[0] : '?'} ms`, s, { via: 'api: 3 tabs.create, 400 ms apart' });
+});
 scenario('P5e', 'Open All in Tabs of a 12-bookmark folder from the Bookmark Manager, open page first', 'Ignored: all kept', async ({ id }) => {
   if (name !== 'chromium') return { untestable: 'Chromium-only: drives chrome://bookmarks.' };
   const { doc, other } = slugs(id);
@@ -898,6 +906,71 @@ scenario('P5e', 'Open All in Tabs of a 12-bookmark folder from the Bookmark Mana
   const created = s.log.filter(e => e.type === 'created' && /\/tab\/(doc|bm12)/.test(e.pending ?? e.url ?? '')).map(e => e.t);
   const opened = s.tabs.filter(t => /\/tab\/bm12-/.test(t.url)).length;
   return verdict(count(s, doc) === 2 && opened === 11, `${count(s, doc)} doc copies; ${opened} of 11 other bookmarks open; ${created.length} tabs created over ${created.length > 1 ? created.at(-1) - created[0] : '?'} ms`, s, { via: 'browser (chrome://bookmarks bookmarkManagerPrivate.openInNewTab x12)' });
+});
+// Open All of n bookmarks from chrome://bookmarks with the open doc at position `at`.
+async function bookmarkOpenAll(id, n, at) {
+  const { doc, other } = slugs(id);
+  await setup([doc, other]);
+  const rest = Array.from({ length: n - 1 }, (_, i) => `/tab/bm${n}-${id.toLowerCase()}-${i}`);
+  rest.splice(at, 0, doc);
+  const m = await b.context.newPage();
+  await m.goto('chrome://bookmarks/'); await sleep(1200);
+  await snap();
+  const r = await m.evaluate(async ([list, title]) => {
+    const folder = await chrome.bookmarks.create({ parentId: '1', title });
+    const ids = [];
+    for (const url of list) ids.push((await chrome.bookmarks.create({ parentId: folder.id, url })).id);
+    for (const i of ids) chrome.bookmarkManagerPrivate.openInNewTab(i);
+    return { n: ids.length };
+  }, [rest.map(abs), `dupes-${id}`]).catch(e => ({ error: String(e.message).split('\n')[0] }));
+  const s = await observe(null, 6000);
+  await m.close().catch(() => {});
+  if (r.error) return { untestable: `Bookmark Manager open-all not reachable: ${r.error}` };
+  const created = s.log.filter(e => e.type === 'created' && /\/tab\/(doc|bm)/.test(e.pending ?? e.url ?? '')).map(e => e.t);
+  const opened = s.tabs.filter(t => t.url.startsWith(`/tab/bm${n}-`)).length;
+  return verdict(count(s, doc) === 2 && opened === n - 1, `${count(s, doc)} doc copies; ${opened} of ${n - 1} other bookmarks open; ${created.length} tabs created over ${created.length > 1 ? created.at(-1) - created[0] : '?'} ms`, s, { via: `browser (chrome://bookmarks bookmarkManagerPrivate.openInNewTab x${n})` });
+}
+scenario('P5f', 'Open All of a 25-bookmark folder, open page first', 'Ignored: all kept', async ({ id }) => {
+  if (name !== 'chromium') return { untestable: 'Chromium-only: drives chrome://bookmarks.' };
+  return bookmarkOpenAll(id, 25, 0);
+});
+scenario('P5g', 'Open All of a 25-bookmark folder, open page 13th', 'Ignored: all kept', async ({ id }) => {
+  if (name !== 'chromium') return { untestable: 'Chromium-only: drives chrome://bookmarks.' };
+  return bookmarkOpenAll(id, 25, 12);
+});
+scenario('D1', 'Lone duplicate opened while an unrelated new tab is still loading in the same window', 'Switch within about 1 s', async ({ id }) => {
+  const { doc, other } = slugs(id);
+  const { ids } = await setup([doc, other], {}, { activeIndex: 1 });
+  await b.api(`await api.tabs.create({ url: ${JSON.stringify(abs(`/slow/unrelated-${id.toLowerCase()}`))}, active: false }); return true;`);
+  await sleep(100);
+  await b.external(abs(doc));
+  const s = await observe(x => switched(x, doc, ids[0]), 4000);
+  const lat = latency(s).map(l => l.fromCreated);
+  return verdict(switched(s, doc, ids[0]) && lat.length === 1 && lat[0] < 1100, `${switchObs(s, doc, ids[0])}; switched ${lat.join(', ')} ms after the duplicate opened`, s, { via: 'api (unrelated slow tab) + external' });
+});
+scenario('D1b', 'Duplicate, then an unrelated new tab 150 ms later in the same window', 'Switch (2 tabs is not a bulk open), within about 1 s', async ({ id }) => {
+  const { doc, other } = slugs(id);
+  const { ids } = await setup([doc, other], {}, { activeIndex: 1 });
+  await b.external(abs(doc));
+  await sleep(150);
+  await b.api(`await api.tabs.create({ url: ${JSON.stringify(abs(`/tab/later-${id.toLowerCase()}`))}, active: false }); return true;`);
+  const s = await observe(x => switched(x, doc, ids[0]), 4000);
+  const lat = latency(s).map(l => l.fromCreated);
+  return verdict(switched(s, doc, ids[0]) && count(s, `/tab/later-${id.toLowerCase()}`) === 1 && lat[0] < 1100, `${switchObs(s, doc, ids[0])}; switched ${lat.join(', ')} ms after the duplicate opened; unrelated tab kept`, s, { via: 'external + api' });
+});
+scenario('D2', 'Duplicate in window A while a 12-tab burst opens in window B', 'A switches normally; all of B is kept', async ({ id }) => {
+  const { doc, other } = slugs(id);
+  const { ids, win } = await setup([doc, other], {}, { activeIndex: 1 });
+  const wB = await b.api(`return (await api.windows.create({ url: ${JSON.stringify(abs(`/tab/winb-${id.toLowerCase()}`))}, focused: false, left: 0, top: 0, width: ${W}, height: ${H} })).id;`);
+  await b.api(`await api.windows.update(${win}, { focused: true }); return true;`);
+  await sleep(1500); await snap();
+  const burst = Array.from({ length: 12 }, (_, i) => abs(i === 0 ? doc : `/tab/burstb-${id.toLowerCase()}-${i}`));
+  await b.api(`for (const u of ${JSON.stringify(burst)}) api.tabs.create({ windowId: ${wB}, url: u, active: false }); await new Promise(r => setTimeout(r, 30)); await api.tabs.create({ windowId: ${win}, url: ${JSON.stringify(abs(doc))}, active: true }); return true;`);
+  const s = await observe(null, 4000);
+  const inA = s.tabs.filter(t => t.win === win && t.url === doc).length;
+  const inB = s.tabs.filter(t => t.win === wB && /burstb|doc/.test(t.url)).length;
+  const lat = latency(s).map(l => l.fromCreated);
+  return verdict(inA === 1 && inB === 12 && s.tabs.find(t => t.id === ids[0])?.active, `window A: ${inA} doc copy, doc ${s.tabs.find(t => t.id === ids[0])?.active ? 'active' : 'not active'}, switched ${lat.join(', ')} ms after opening; window B: ${inB} of 12 burst tabs kept (one is a copy of the doc)`, s, { via: 'api (12 tabs.create in B, then the duplicate in A)' });
 });
 scenario('P6a', 'Doc is the rightmost tab; Ctrl+T and type its URL', 'Switch', async ({ id }) => {
   const { doc, other } = slugs(id);
