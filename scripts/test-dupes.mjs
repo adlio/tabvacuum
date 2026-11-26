@@ -969,7 +969,8 @@ scenario('U3', 'User switches to another tab within the duplicate\'s first secon
   await until(async () => { s0 = await snap(); return s0.tabs.find(t => t.url === doc && t.id !== ids[0])?.active; }, 'duplicate in front', 3000).catch(() => {});
   const dup = s0.tabs.find(t => t.url === doc && t.id !== ids[0]);
   const t0 = Date.now();
-  keys(['Control_L', '3'], `doc-${id.toLowerCase()}`); // the user picks the third tab
+  // The user picks the third tab. Firefox on Linux selects tabs with Alt+number; Ctrl+number selects nothing.
+  keys([name === 'firefox' ? 'Alt_L' : 'Control_L', '3'], `doc-${id.toLowerCase()}`);
   const s = await observe(null, 3500);
   const acts = activationsAfter({ log: [...s0.log, ...s.log] }, t0, { [ids[0]]: 'doc', [ids[1]]: 'other', [ids[2]]: 'third', [dup?.id]: 'dup' });
   const front = s.tabs.find(t => t.active);

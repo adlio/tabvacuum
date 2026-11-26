@@ -130,18 +130,26 @@ export function createDuplicateService(api, { now = () => Date.now(), notify = a
   // (and stale tracking does not record) a neighbour; then close the new tab
   // only if it is still the same new page.
   async function switchTo(tab, match, record, store, s) {
-    const same = async () => {
+    const read = async () => {
       try {
         const current = await api.tabs.get(tab.id);
-        return current.url === tab.url && isStillNew({ ...record, done: undefined }, now());
-      } catch { return false; }
+        return current.url === tab.url && isStillNew({ ...record, done: undefined }, now()) ? current : null;
+      } catch { return null; }
     };
-    if (!(await same())) return;
-    try {
-      await api.tabs.update(match.id, { active: true });
-      if (match.windowId !== tab.windowId || tab.active) await api.windows.update(match.windowId, { focused: true });
-    } catch { return; } // the match went away: keep the new tab
-    if (!(await same())) return;
+    const current = await read();
+    if (!current) return;
+    // F2: the duplicate was in front and the user has since picked another
+    // tab. Close it quietly and leave focus where the user put it. A
+    // duplicate that opened in the background (never in front) still brings
+    // the open copy forward.
+    const userLeft = record.seenActive === true && !current.active;
+    if (!userLeft) {
+      try {
+        await api.tabs.update(match.id, { active: true });
+        if (match.windowId !== tab.windowId || current.active) await api.windows.update(match.windowId, { focused: true });
+      } catch { return; } // the match went away: keep the new tab
+    }
+    if (!(await read())) return;
     try { await api.tabs.remove(tab.id); } catch { return; } // already gone, or another extension closed it
     store.closed.push({ key: dupeKey(tab.url, tab, s), at: now(), created: record.created });
     await firstSwitchNotice();
@@ -163,6 +171,7 @@ export function createDuplicateService(api, { now = () => Date.now(), notify = a
       const record = newTabRecord(tab, { now: at, quietUntil: store.quietUntil, windowCreatedAt: store.windows[tab.windowId], recent });
       // A bulk open (Open All in Tabs, restore) ignores the whole burst, earlier tabs included.
       if (record.ignored === 'bulk') for (const r of recent) r.ignored = 'bulk';
+      if (tab.active === true) record.seenActive = true;
       store.tabs[tab.id] = record;
       await judge(tab.id, store, s, space);
     });
@@ -190,6 +199,18 @@ export function createDuplicateService(api, { now = () => Date.now(), notify = a
   // Chromium reports a new window before its tabs; Firefox reports the first
   // tab first, so tabs already recorded for this window in the burst are
   // marked too (a reopened window, a restored session).
+  // Remembers that a new tab has been in front, so a later switch can tell a
+  // background open from a tab the user has already left (F2).
+  function onActivated({ tabId }) {
+    return queue(async () => {
+      if (!(await settings()).preventDuplicates) return;
+      for (const space of owned) {
+        const record = (await load(space)).tabs[tabId];
+        if (record && !record.seenActive) { record.seenActive = true; await save(space); }
+      }
+    });
+  }
+
   function onWindowCreated(win) {
     return withStore(win.incognito, store => {
       const at = now();
@@ -221,6 +242,7 @@ export function createDuplicateService(api, { now = () => Date.now(), notify = a
     on(api.tabs.onCreated, onCreated);
     on(api.tabs.onUpdated, onUpdated);
     on(api.tabs.onRemoved, onRemoved);
+    on(api.tabs.onActivated, onActivated);
     on(api.windows?.onCreated, onWindowCreated);
     on(api.runtime.onStartup, onStartup);
     on(api.storage.onChanged, (changes, area) => {
@@ -228,5 +250,5 @@ export function createDuplicateService(api, { now = () => Date.now(), notify = a
     });
   }
 
-  return { install, allow, onCreated, onUpdated, onRemoved, onWindowCreated, onStartup, idle: () => queue(() => {}) };
+  return { install, allow, onCreated, onUpdated, onRemoved, onActivated, onWindowCreated, onStartup, idle: () => queue(() => {}) };
 }

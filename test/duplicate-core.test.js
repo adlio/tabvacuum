@@ -33,7 +33,7 @@ describe('judgeNewTab: when it acts at all', () => {
     expect(judge(newTab(9, DOC), { settings: { ...ON, preventDuplicates: false } })).toEqual({ action: 'ignore', reason: 'off' });
   });
 
-  it('waits until a new tab is 1 s old, so a burst is known before anything closes (F1)', () => {
+  it('waits until a new tab is 200 ms old, so a burst is known before anything closes (F1)', () => {
     expect(judge(newTab(9, DOC, { created: NOW - DUPE_SETTLE_MS + 1 }))).toEqual({ action: 'wait', reason: 'settling' });
     expect(judge(newTab(9, DOC, { created: NOW - DUPE_SETTLE_MS })).action).toBe('switch');
   });

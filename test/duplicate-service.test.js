@@ -2,7 +2,7 @@
 // and window events in the order the real browsers did (docs/design.md probe).
 import { describe, it, expect, vi } from 'vitest';
 import { createDuplicateService, DUPE_NOTICE_KEY, FIRST_SWITCH_MESSAGE } from '../src/duplicate-service.js';
-import { DUPE_SETTLE_MS } from '../src/core.js';
+import { DUPE_BURST_MS, DUPE_SETTLE_MS } from '../src/core.js';
 
 const DOC = 'https://docs.example.com/d/1';
 const settle = () => new Promise(resolve => setImmediate(resolve));
@@ -28,7 +28,7 @@ function world({ enabled = true, split = false, incognitoContext = false, local 
       onChanged: on('storage'),
     },
     tabs: {
-      onCreated: on('created'), onUpdated: on('updated'), onRemoved: on('removed'),
+      onCreated: on('created'), onUpdated: on('updated'), onRemoved: on('removed'), onActivated: on('activated'),
       get: vi.fn(async id => { const t = w.tabs.find(x => x.id === id); if (!t) throw new Error('No tab'); return clone(t); }),
       query: vi.fn(async () => clone(w.tabs)),
       update: vi.fn(async (id, props) => { w.calls.push(['tabs.update', id, props]); }),
@@ -70,6 +70,12 @@ function world({ enabled = true, split = false, incognitoContext = false, local 
     return t;
   };
   w.emit = emit;
+  // The user (or the browser) brings a tab to the front of its window.
+  w.activate = async id => {
+    const t = w.tabs.find(x => x.id === id);
+    for (const x of w.tabs) if (x.windowId === t.windowId) x.active = x.id === id;
+    await emit('activated', { tabId: id, windowId: t.windowId });
+  };
   w.alive = id => w.tabs.some(t => t.id === id);
   return w;
 }
@@ -143,6 +149,77 @@ describe('duplicate service: switching', () => {
     await w.open(DOC, { extra: { id: 50 } });
     expect(w.alive(50)).toBe(true);
     expect(w.calls.some(c => c[0] === 'tabs.remove')).toBe(false);
+  });
+});
+
+describe('duplicate service: the user moved on (F2) and the settle period', () => {
+  // A duplicate created in front whose URL commits, without running the settle timer yet.
+  async function frontDuplicate(w, url, { active = true } = {}) {
+    const t = { id: w.nextId++, windowId: 1, index: w.tabs.length, url: 'about:blank', status: 'loading', active, incognito: false };
+    if (active) for (const x of w.tabs) if (x.windowId === 1) x.active = false;
+    w.tabs.push(t);
+    await w.emit('created', clone(t));
+    w.now += 20;
+    t.url = url;
+    await w.emit('updated', t.id, { status: 'loading', url }, clone(t));
+    await w.service.idle();
+    return t;
+  }
+
+  it('user picks another tab while a front duplicate settles: duplicate closed, focus left alone', async () => {
+    const w = world();
+    const doc = w.existing(DOC, { windowId: 2 });
+    const third = w.existing('https://third.example/');
+    const dup = await frontDuplicate(w, DOC);
+    await w.activate(third.id);
+    await w.settle();
+    expect(w.alive(dup.id)).toBe(false);
+    expect(w.calls).toEqual([['tabs.remove', dup.id]]);
+    expect(w.tabs.find(t => t.id === third.id).active).toBe(true);
+    expect(doc.active).toBe(false);
+  });
+
+  it('Firefox shape: created in the background, then shown, then left: still a quiet close', async () => {
+    const w = world();
+    w.existing(DOC);
+    const third = w.existing('https://third.example/');
+    const dup = await frontDuplicate(w, DOC, { active: false });
+    await w.activate(dup.id);
+    await w.activate(third.id);
+    await w.settle();
+    expect(w.calls).toEqual([['tabs.remove', dup.id]]);
+  });
+
+  it('a duplicate that opened in the background and was never shown still brings the open copy forward', async () => {
+    const w = world();
+    const doc = w.existing(DOC);
+    const chat = w.existing('https://chat.example/', { active: true });
+    const dup = await frontDuplicate(w, DOC, { active: false });
+    await w.settle();
+    expect(w.calls).toEqual([['tabs.update', doc.id, { active: true }], ['tabs.remove', dup.id]]);
+    expect(chat.id).toBeDefined();
+  });
+
+  it('a duplicate still in front is switched as before', async () => {
+    const w = world();
+    const doc = w.existing(DOC);
+    w.existing('https://other.example/');
+    const dup = await frontDuplicate(w, DOC);
+    await w.settle();
+    expect(w.calls).toEqual([['tabs.update', doc.id, { active: true }], ['windows.update', 1, { focused: true }], ['tabs.remove', dup.id]]);
+  });
+
+  it('switches 200 ms after creation, not before, while the bulk rule keeps its 1 s window', async () => {
+    expect(DUPE_SETTLE_MS).toBe(200);
+    expect(DUPE_BURST_MS).toBe(1000);
+    const w = world();
+    w.existing(DOC);
+    w.existing('https://other.example/');
+    const dup = await frontDuplicate(w, DOC);
+    await w.tick(DUPE_SETTLE_MS - 40); // 180 ms after creation
+    expect(w.alive(dup.id)).toBe(true);
+    await w.tick(40); // 220 ms: past the settle period and its timer slack
+    expect(w.alive(dup.id)).toBe(false);
   });
 });
 
