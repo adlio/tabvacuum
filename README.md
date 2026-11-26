@@ -73,6 +73,7 @@ Access via the browser's extension settings page (Aaron's Tab Vacuum → Prefere
 
 - Stale tab threshold (default: 7 days)
 - URL normalization for duplicate detection (ignore fragments, ignore query params)
+- Prevent duplicate tabs (off by default): a new tab that opens a page already open switches to the open tab instead. Duplicate Tab and links to the same page are kept, and Reopen Closed Tab within a minute keeps a second copy. A never list excludes sites.
 - Protected tab behavior (skip pinned, skip audio-playing)
 
 ## Stale-tab review and automatic cleanup (0.6.0 candidate)

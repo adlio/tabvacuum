@@ -13,6 +13,8 @@ export function startOptions({ document, window, browser, locale }) {
     searchScope: $('search-scope'),
     ignoreFragments: $('ignore-fragments'),
     ignoreQuery: $('ignore-query'),
+    preventDuplicates: $('prevent-duplicates'),
+    preventDuplicatesNever: $('prevent-duplicates-never'),
     skipPinned: $('skip-pinned'),
     skipAudible: $('skip-audible'),
     blankNewTab: $('blank-newtab'),
@@ -192,6 +194,8 @@ export function startOptions({ document, window, browser, locale }) {
     general.searchScope.value = settings.searchScope === 'current' ? 'current' : 'all';
     general.ignoreFragments.checked = settings.ignoreFragments;
     general.ignoreQuery.checked = settings.ignoreQueryParams;
+    general.preventDuplicates.checked = settings.preventDuplicates === true;
+    general.preventDuplicatesNever.value = (settings.preventDuplicatesNever || []).join('\n');
     general.skipPinned.checked = settings.skipPinned;
     general.skipAudible.checked = settings.skipAudible;
     general.blankNewTab.checked = settings.blankNewTab;
@@ -211,6 +215,8 @@ export function startOptions({ document, window, browser, locale }) {
       searchScope: general.searchScope.value,
       ignoreFragments: general.ignoreFragments.checked,
       ignoreQueryParams: general.ignoreQuery.checked,
+      preventDuplicates: general.preventDuplicates.checked,
+      preventDuplicatesNever: general.preventDuplicatesNever.value.split('\n').map(l => l.trim()).filter(Boolean),
       skipPinned: general.skipPinned.checked,
       skipAudible: general.skipAudible.checked,
       blankNewTab: general.blankNewTab.checked,

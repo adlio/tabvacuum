@@ -14,6 +14,8 @@
     "test:search:chromium": "node scripts/test-chromium.mjs",
     "test:stale:firefox": "node scripts/test-stale-cleanup.mjs firefox",
     "test:stale:chromium": "node scripts/test-stale-cleanup.mjs chromium",
+    "test:dupes:firefox": "npm run build && node scripts/test-dupes.mjs firefox",
+    "test:dupes:chromium": "npm run build && node scripts/test-dupes.mjs chromium",
     "test:age:chromium": "node scripts/test-age-journal-chromium.mjs",
     "test:feedback:firefox": "node scripts/test-action-feedback.mjs firefox",
     "test:feedback:chromium": "node scripts/test-action-feedback.mjs chromium",

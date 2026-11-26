@@ -176,6 +176,178 @@ export function findDuplicates(tabs, settings) {
   return { toClose, message };
 }
 
+// ---- Duplicate-tab prevention (R14) ----------------------------------------
+// Pure rules for judging a brand-new tab. The service (duplicate-service.js)
+// records what it saw and acts on the verdict. Timings are in docs/design.md.
+
+export const DUPE_NEW_TAB_CAP_MS = 15 * 1000;      // a tab stops being "new" this long after creation
+export const DUPE_COMPLETE_GRACE_MS = 3 * 1000;    // ...or this long after its first http(s) load completes
+export const DUPE_DOUBLE_FIRE_MS = 1000;           // copies created this close together are one click
+export const DUPE_KEEP_MS = 60 * 1000;             // a page TabVacuum closed may be reopened and kept
+export const DUPE_STARTUP_QUIET_MS = 10 * 1000;    // ignore tabs created this long after browser start
+export const DUPE_BURST_MS = 1000;                 // a new window's tabs, or a bulk open, within this window
+export const DUPE_BULK_COUNT = 3;                  // this many tabs in one window within DUPE_BURST_MS is a bulk open
+// A new tab is judged only once no other tab has been created in its window for
+// this long (each creation re-arms the wait), and at most DUPE_BURST_MS after
+// its own creation. A lone tab is judged after DUPE_SETTLE_MS.
+export const DUPE_SETTLE_MS = 200;
+export const DUPE_ALLOW_MS = 5 * 1000;             // TabVacuum Search's own opens are kept this long
+export const DUPE_MODES = ['switch'];
+const DUPE_NEVER_MAX = 200;
+
+const isWebUrl = url => typeof url === 'string' && /^https?:\/\//i.test(url);
+// The first URL a tab reports that is not the browser's placeholder.
+const isPlaceholder = url => url === undefined || url === '' || url === 'about:blank';
+
+/**
+ * Never-list lines: a /regex/ is a regex; a plain line matches when the URL
+ * starts with it or the URL's host equals it.
+ */
+export function isNeverUrl(url, lines) {
+  let host = '';
+  try { host = new URL(url).hostname; } catch { /* not a URL */ }
+  for (const matcher of parseCustomMatchers(lines)) {
+    if (typeof matcher === 'string') {
+      if (url.startsWith(matcher) || host === matcher.toLowerCase()) return true;
+    } else if (matcher.test(url)) return true;
+  }
+  return false;
+}
+
+/** Validates duplicate-prevention settings from a settings message. */
+export function validateDuplicateSettings(patch) {
+  if ('preventDuplicates' in patch && typeof patch.preventDuplicates !== 'boolean') return 'Prevent duplicate tabs must be on or off.';
+  if ('preventDuplicatesMode' in patch && !DUPE_MODES.includes(patch.preventDuplicatesMode)) return 'Unknown duplicate-tab mode.';
+  if ('preventDuplicatesNever' in patch) {
+    const list = patch.preventDuplicatesNever;
+    if (!Array.isArray(list) || list.length > DUPE_NEVER_MAX || !list.every(l => typeof l === 'string' && l.length <= 2000)) {
+      return `The never list takes up to ${DUPE_NEVER_MAX} lines.`;
+    }
+  }
+  return null;
+}
+
+/** Same page, same container, same private/normal context. */
+export const dupeContextKey = tab => `${tab.incognito === true ? 'p' : 'n'}|${tab.cookieStoreId ?? ''}`;
+export const dupeKey = (url, tab, settings) => `${dupeContextKey(tab)}|${normalizeUrl(url, settings)}`;
+
+/**
+ * What the service records when a tab is created. `ignored` names why the tab
+ * is never judged: restored at startup or as a reopened window, part of a bulk
+ * open, or created when no record could be trusted.
+ */
+export function newTabRecord(tab, { now, quietUntil = 0, windowCreatedAt, recent = [] }) {
+  const record = { created: now, windowId: tab.windowId, opener: tab.openerTabId, ctx: dupeContextKey(tab) };
+  const first = isPlaceholder(tab.pendingUrl) ? (isPlaceholder(tab.url) ? undefined : tab.url) : tab.pendingUrl;
+  if (first !== undefined) record.first = first;
+  if (now < quietUntil) record.ignored = 'startup';
+  else if (tab.discarded === true || tab.status === 'unloaded') record.ignored = 'restored';
+  else if (windowCreatedAt !== undefined && now - windowCreatedAt <= DUPE_BURST_MS) record.ignored = 'new-window';
+  else if (recent.filter(r => r.windowId === tab.windowId && now - r.created <= DUPE_BURST_MS).length + 1 >= DUPE_BULK_COUNT) record.ignored = 'bulk';
+  return record;
+}
+
+/** Records the first non-placeholder URL a tab reaches (the opener rule reads it). */
+export function noteTabUrl(record, url) {
+  if (record.first === undefined && !isPlaceholder(url)) record.first = url;
+}
+
+/**
+ * When a new tab may first be judged: DUPE_SETTLE_MS after the latest tab
+ * created in its window (a per-window debounce), capped at DUPE_BURST_MS after
+ * its own creation.
+ */
+export function settleDeadline(record, records = {}) {
+  let last = record.created;
+  for (const r of Object.values(records)) {
+    if (r && r.windowId === record.windowId && r.created > last && r.created - record.created <= DUPE_BURST_MS) last = r.created;
+  }
+  return Math.min(record.created + DUPE_BURST_MS, last + DUPE_SETTLE_MS);
+}
+
+/** Is a record still inside its new-tab window? */
+export function isStillNew(record, now) {
+  if (!record || record.ignored || record.done) return false;
+  if (now - record.created > DUPE_NEW_TAB_CAP_MS) return false;
+  if (record.completedAt !== undefined && now - record.completedAt > DUPE_COMPLETE_GRACE_MS) return false;
+  return true;
+}
+
+/**
+ * Judges one new tab. Returns { action, reason, matchId? } where action is:
+ *   'switch' - focus matchId and close this tab
+ *   'keep'   - keep this tab; stop judging it
+ *   'ignore' - never judge this tab
+ *   'wait'   - nothing yet; judge again on its next URL change
+ *
+ * tab:     the new tab as the browser reports it now (url = committed URL)
+ * record:  what the service recorded at creation, or undefined if it missed it
+ * tabs:    every tab this worker can see
+ * records: id -> record, for tabs that are still new
+ * closed:  [{ key, at, created }] pages TabVacuum closed
+ * allowed: [{ url, at }] URLs TabVacuum Search is opening
+ */
+export function judgeNewTab({ tab, record, tabs, records = {}, closed = [], allowed = [], settings, now }) {
+  if (!settings.preventDuplicates) return { action: 'ignore', reason: 'off' };
+  // A tab with no creation record already existed (or was created while the
+  // worker could not see it): it may have back history, so it is never closed.
+  if (!record) return { action: 'ignore', reason: 'unknown' };
+  if (record.ignored) return { action: 'ignore', reason: record.ignored };
+  if (!isStillNew(record, now)) return { action: 'ignore', reason: 'not-new' };
+  // Chromium can commit the first tab of a bulk open before the rest of the
+  // burst exists, so no tab is judged until its window has been quiet for
+  // DUPE_SETTLE_MS (or DUPE_BURST_MS has passed); the service judges it again then.
+  if (now < settleDeadline(record, records)) return { action: 'wait', reason: 'settling' };
+  // Judge only the committed URL. Chrome does not offer an uncommitted tab to
+  // Reopen Closed Tab, so closing before commit would leave no undo.
+  if (!isWebUrl(tab.url)) return { action: 'wait', reason: 'not-web' };
+  if (isNeverUrl(tab.url, settings.preventDuplicatesNever)) return { action: 'wait', reason: 'never' };
+  // R7.1: the last tab in a window is never closed.
+  if (!tabs.some(t => t.windowId === tab.windowId && t.id !== tab.id)) return { action: 'wait', reason: 'alone' };
+
+  const key = dupeKey(tab.url, tab, settings);
+  if (allowed.some(a => now - a.at <= DUPE_ALLOW_MS && dupeKey(a.url, tab, settings) === key)) return { action: 'keep', reason: 'search' };
+
+  const matches = tabs.filter(t => {
+    if (t.id === tab.id || dupeContextKey(t) !== record.ctx) return false;
+    const other = records[t.id];
+    const otherNew = isStillNew(other, now);
+    // A younger new copy never closes an older one: the older copy wins.
+    if (otherNew && (other.created > record.created || (other.created === record.created && t.id > tab.id))) return false;
+    // An older copy that is still loading counts by where it is going (Chrome
+    // pendingUrl); an established tab navigating away does not count.
+    let url = t.url;
+    if (t.pendingUrl && t.pendingUrl !== t.url) {
+      if (!otherNew) return false;
+      url = t.pendingUrl;
+    }
+    return isWebUrl(url) && dupeKey(url, t, settings) === key;
+  });
+  if (!matches.length) return { action: 'wait', reason: 'no-match' };
+  // Prefer an established tab, then the one in this window, then the oldest.
+  const match = matches.sort((a, b) =>
+    (isStillNew(records[a.id], now) - isStillNew(records[b.id], now)) ||
+    ((b.windowId === tab.windowId) - (a.windowId === tab.windowId)) ||
+    (a.id - b.id))[0];
+
+  // Opened from its match on purpose: Duplicate Tab, or a link on the page to
+  // the same page. The first URL must already be the match's page, so a tab
+  // opened blank from the match (Chrome Ctrl+T) and then typed into still switches.
+  if (record.opener !== undefined && matches.some(m => m.id === record.opener) &&
+      record.first !== undefined && isWebUrl(record.first) && dupeKey(record.first, tab, settings) === key) {
+    return { action: 'keep', reason: 'from-match' };
+  }
+  // The user brought back a page TabVacuum just closed (Reopen Closed Tab or
+  // opening it again), with no lower bound on how soon. Only a tab that already
+  // existed when the copy was closed, and was created within a second of it,
+  // is excluded: that is one click fired twice, and cannot be a reopen.
+  const sameClick = c => record.created < c.at && Math.abs(record.created - c.created) <= DUPE_DOUBLE_FIRE_MS;
+  if (closed.some(c => c.key === key && now - c.at <= DUPE_KEEP_MS && !sameClick(c))) {
+    return { action: 'keep', reason: 'repeated' };
+  }
+  return { action: 'switch', reason: 'duplicate', matchId: match.id };
+}
+
 export function planMerge(windows, targetWindowId) {
   const targetWindow = windows.find(w => w.id === targetWindowId);
   if (!targetWindow) {
