@@ -187,6 +187,7 @@ export const DUPE_KEEP_MS = 60 * 1000;             // a page TabVacuum closed ma
 export const DUPE_STARTUP_QUIET_MS = 10 * 1000;    // ignore tabs created this long after browser start
 export const DUPE_BURST_MS = 1000;                 // a new window's tabs, or a bulk open, within this window
 export const DUPE_BULK_COUNT = 3;                  // this many tabs in one window within DUPE_BURST_MS is a bulk open
+export const DUPE_SETTLE_MS = DUPE_BURST_MS;       // no new tab is judged before its burst window has passed
 export const DUPE_ALLOW_MS = 5 * 1000;             // TabVacuum Search's own opens are kept this long
 export const DUPE_MODES = ['switch'];
 const DUPE_NEVER_MAX = 200;
@@ -277,6 +278,10 @@ export function judgeNewTab({ tab, record, tabs, records = {}, closed = [], allo
   if (!record) return { action: 'ignore', reason: 'unknown' };
   if (record.ignored) return { action: 'ignore', reason: record.ignored };
   if (!isStillNew(record, now)) return { action: 'ignore', reason: 'not-new' };
+  // A burst is only known once its window has passed. Chromium can commit the
+  // first tab of a bulk open before the third tab exists, so no tab is judged
+  // until it is DUPE_SETTLE_MS old; the service judges it again then.
+  if (now - record.created < DUPE_SETTLE_MS) return { action: 'wait', reason: 'settling' };
   // Judge only the committed URL. Chrome does not offer an uncommitted tab to
   // Reopen Closed Tab, so closing before commit would leave no undo.
   if (!isWebUrl(tab.url)) return { action: 'wait', reason: 'not-web' };

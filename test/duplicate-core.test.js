@@ -4,7 +4,7 @@
 // about:blank at creation and the page URL at commit.
 import { describe, it, expect } from 'vitest';
 import {
-  DUPE_ALLOW_MS, DUPE_COMPLETE_GRACE_MS, DUPE_KEEP_MS, DUPE_NEW_TAB_CAP_MS, DUPE_STARTUP_QUIET_MS,
+  DUPE_ALLOW_MS, DUPE_COMPLETE_GRACE_MS, DUPE_SETTLE_MS, DUPE_KEEP_MS, DUPE_NEW_TAB_CAP_MS, DUPE_STARTUP_QUIET_MS,
   dupeKey, isNeverUrl, isStillNew, judgeNewTab, newTabRecord, noteTabUrl, validateDuplicateSettings,
 } from '../src/core.js';
 
@@ -17,7 +17,7 @@ const doc = tab(1, DOC);
 const other = tab(2, 'https://chat.example.com/room');
 
 // A tab created at `created`, with the browser's first report `atCreate`, then committed to `url`.
-function newTab(id, url, { created = NOW - 200, atCreate = { url: 'about:blank' }, opener, extra = {}, recordExtra = {} } = {}) {
+function newTab(id, url, { created = NOW - 200 - DUPE_SETTLE_MS, atCreate = { url: 'about:blank' }, opener, extra = {}, recordExtra = {} } = {}) {
   const shape = { id, windowId: 1, index: id, incognito: false, openerTabId: opener, ...atCreate };
   const record = { ...newTabRecord(shape, { now: created }), ...recordExtra };
   noteTabUrl(record, url);
@@ -33,6 +33,11 @@ describe('judgeNewTab: when it acts at all', () => {
     expect(judge(newTab(9, DOC), { settings: { ...ON, preventDuplicates: false } })).toEqual({ action: 'ignore', reason: 'off' });
   });
 
+  it('waits until a new tab is 1 s old, so a burst is known before anything closes (F1)', () => {
+    expect(judge(newTab(9, DOC, { created: NOW - DUPE_SETTLE_MS + 1 }))).toEqual({ action: 'wait', reason: 'settling' });
+    expect(judge(newTab(9, DOC, { created: NOW - DUPE_SETTLE_MS })).action).toBe('switch');
+  });
+
   it('switches a new tab whose committed URL is already open', () => {
     expect(judge(newTab(9, DOC))).toEqual({ action: 'switch', reason: 'duplicate', matchId: 1 });
   });
@@ -43,7 +48,7 @@ describe('judgeNewTab: when it acts at all', () => {
   });
 
   it('stops judging 15 s after creation, and 3 s after its first web page finished loading', () => {
-    expect(judge(newTab(9, DOC, { created: NOW - DUPE_NEW_TAB_CAP_MS - 1 })).reason).toBe('not-new');
+    expect(judge(newTab(9, DOC, { created: NOW - DUPE_NEW_TAB_CAP_MS - DUPE_SETTLE_MS - 1 })).reason).toBe('not-new');
     expect(judge(newTab(9, DOC, { recordExtra: { completedAt: NOW - DUPE_COMPLETE_GRACE_MS - 1 } })).reason).toBe('not-new');
     expect(judge(newTab(9, DOC, { recordExtra: { completedAt: NOW - DUPE_COMPLETE_GRACE_MS + 100 } })).action).toBe('switch');
   });
@@ -195,31 +200,35 @@ describe('judgeNewTab: opened from its match (D7, rule 4)', () => {
 describe('judgeNewTab: repeated and double-fired opens (D3, D4)', () => {
   const key = dupeKey(DOC, { incognito: false }, ON);
   it('keeps a page TabVacuum closed in the last 60 s, however soon it comes back', () => {
-    for (const ago of [300, 5000, DUPE_KEEP_MS]) {
-      const closed = [{ key, at: NOW - ago, created: NOW - ago - 100 }];
-      expect(judge(newTab(9, DOC, { created: NOW - 50 }), { closed })).toEqual({ action: 'keep', reason: 'repeated' });
+    // gap = reopen created this long after the close; judged once it has settled.
+    for (const gap of [0, 300, 5000]) {
+      const at = NOW - DUPE_SETTLE_MS - gap;
+      const closed = [{ key, at, created: at - 100 }];
+      expect(judge(newTab(9, DOC, { created: at + gap }), { closed })).toEqual({ action: 'keep', reason: 'repeated' });
     }
+    const closed = [{ key, at: NOW - DUPE_KEEP_MS, created: NOW - DUPE_KEEP_MS - 100 }];
+    expect(judge(newTab(9, DOC, { created: NOW - DUPE_SETTLE_MS }), { closed }).action).toBe('keep');
   });
   it('switches again after 60 s', () => {
-    const closed = [{ key, at: NOW - DUPE_KEEP_MS - 1, created: NOW - DUPE_KEEP_MS - 100 }];
-    expect(judge(newTab(9, DOC, { created: NOW - 50 }), { closed }).action).toBe('switch');
+    const closed = [{ key, at: NOW - DUPE_KEEP_MS - 1, created: NOW - DUPE_KEEP_MS - DUPE_SETTLE_MS - 100 }];
+    expect(judge(newTab(9, DOC, { created: NOW - 50 - DUPE_SETTLE_MS }), { closed }).action).toBe('switch');
   });
   it('keys the keep record by context: a private reopen does not unlock a normal one', () => {
-    const closed = [{ key: dupeKey(DOC, { incognito: true }, ON), at: NOW - 500, created: NOW - 700 }];
-    expect(judge(newTab(9, DOC, { created: NOW - 50 }), { closed }).action).toBe('switch');
+    const closed = [{ key: dupeKey(DOC, { incognito: true }, ON), at: NOW - 500, created: NOW - 700 - DUPE_SETTLE_MS }];
+    expect(judge(newTab(9, DOC, { created: NOW - 50 - DUPE_SETTLE_MS }), { closed }).action).toBe('switch');
   });
   it('a copy that already existed when its twin was closed, created within 1 s of it, is the same click', () => {
-    const closed = [{ key, at: NOW - 100, created: NOW - 400 }];
-    expect(judge(newTab(9, DOC, { created: NOW - 200 }), { closed }).action).toBe('switch');
+    const closed = [{ key, at: NOW - 100, created: NOW - 400 - DUPE_SETTLE_MS }];
+    expect(judge(newTab(9, DOC, { created: NOW - 200 - DUPE_SETTLE_MS }), { closed }).action).toBe('switch');
   });
   it('double-fire: the younger copy switches to the older one, even while the older is still loading (Chromium)', () => {
-    const older = { tab: tab(5, '', { pendingUrl: DOC, status: 'loading' }), record: { created: NOW - 900, windowId: 1, ctx: 'n|', first: DOC } };
-    const younger = newTab(6, DOC, { created: NOW - 700 });
+    const older = { tab: tab(5, '', { pendingUrl: DOC, status: 'loading' }), record: { created: NOW - 900 - DUPE_SETTLE_MS, windowId: 1, ctx: 'n|', first: DOC } };
+    const younger = newTab(6, DOC, { created: NOW - 700 - DUPE_SETTLE_MS });
     expect(judge(younger, { tabs: [other, older.tab], records: { 5: older.record } })).toMatchObject({ action: 'switch', matchId: 5 });
   });
   it('double-fire: the older copy never closes for the younger one', () => {
-    const younger = { tab: tab(6, DOC, { status: 'loading' }), record: { created: NOW - 700, windowId: 1, ctx: 'n|', first: DOC } };
-    const older = newTab(5, DOC, { created: NOW - 900 });
+    const younger = { tab: tab(6, DOC, { status: 'loading' }), record: { created: NOW - 700 - DUPE_SETTLE_MS, windowId: 1, ctx: 'n|', first: DOC } };
+    const older = newTab(5, DOC, { created: NOW - 900 - DUPE_SETTLE_MS });
     expect(judge(older, { tabs: [other, younger.tab], records: { 6: younger.record } }).action).toBe('wait');
   });
 });
@@ -263,7 +272,7 @@ describe('issue #20 scenario table', () => {
     expect(judge(fresh).action).toBe(action);
   });
   it('Pasting it again within a minute keeps the second copy', () => {
-    const closed = [{ key: dupeKey(DOC, { incognito: false }, ON), at: NOW - 8000, created: NOW - 8200 }];
+    const closed = [{ key: dupeKey(DOC, { incognito: false }, ON), at: NOW - 8000, created: NOW - 8200 - DUPE_SETTLE_MS }];
     expect(judge(newTab(9, DOC), { closed }).action).toBe('keep');
   });
 });

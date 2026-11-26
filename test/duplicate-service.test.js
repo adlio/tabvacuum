@@ -2,6 +2,7 @@
 // and window events in the order the real browsers did (docs/design.md probe).
 import { describe, it, expect, vi } from 'vitest';
 import { createDuplicateService, DUPE_NOTICE_KEY, FIRST_SWITCH_MESSAGE } from '../src/duplicate-service.js';
+import { DUPE_SETTLE_MS } from '../src/core.js';
 
 const DOC = 'https://docs.example.com/d/1';
 const settle = () => new Promise(resolve => setImmediate(resolve));
@@ -42,7 +43,17 @@ function world({ enabled = true, split = false, incognitoContext = false, local 
     windows: { onCreated: on('windowCreated'), update: vi.fn(async (id, props) => { w.calls.push(['windows.update', id, props]); }) },
   };
   w.notify = vi.fn(async () => {});
-  w.service = createDuplicateService(w.api, { now: () => w.now, notify: w.notify });
+  // Timers run only when the test advances the clock with w.tick().
+  w.timers = [];
+  w.schedule = (fn, ms) => { w.timers.push({ at: w.now + ms, fn }); };
+  w.tick = async ms => {
+    w.now += ms;
+    for (const timer of w.timers.filter(t => t.at <= w.now)) { w.timers.splice(w.timers.indexOf(timer), 1); timer.fn(); }
+    await settle();
+    await w.service.idle();
+  };
+  w.settle = () => w.tick(DUPE_SETTLE_MS + 20);
+  w.service = createDuplicateService(w.api, { now: () => w.now, notify: w.notify, schedule: w.schedule });
   w.service.install();
   w.existing = (url, extra = {}) => { const t = { id: w.nextId++, windowId: 1, index: w.tabs.length, url, status: 'complete', active: false, incognito: false, ...extra }; w.tabs.push(t); return t; };
   // Firefox shape: about:blank at creation, then the page URL at commit.
@@ -55,6 +66,7 @@ function world({ enabled = true, split = false, incognitoContext = false, local 
     delete t.pendingUrl;
     await emit('updated', t.id, { status: 'loading', url }, clone(t));
     await w.service.idle();
+    await w.settle();
     return t;
   };
   w.emit = emit;
@@ -171,8 +183,48 @@ describe('duplicate service: keeps', () => {
       w.now += 100;
     }
     for (const t of created) { t.url = DOC; await w.emit('updated', t.id, { url: DOC, status: 'loading' }, clone(t)); }
-    await w.service.idle();
+    await w.settle();
     expect(created.every(t => w.alive(t.id))).toBe(true);
+  });
+
+  it('F1: a Chromium bulk open whose first tab commits before the others exist keeps that tab', async () => {
+    const w = world();
+    w.existing(DOC);
+    const shape = (id, url) => ({ id, windowId: 1, index: w.tabs.length, url: '', pendingUrl: url, status: 'loading', incognito: false });
+    // Chromium order seen in P5/P5c: create #1, commit #1, then create #2 and #3.
+    const first = shape(60, DOC);
+    w.tabs.push(first);
+    await w.emit('created', clone(first));
+    w.now += 20;
+    first.url = DOC; delete first.pendingUrl;
+    await w.emit('updated', first.id, { status: 'loading', url: DOC }, clone(first));
+    await w.service.idle();
+    for (const [id, url] of [[61, 'https://a.example/'], [62, 'https://b.example/']]) {
+      w.now += 15;
+      const t = shape(id, url);
+      w.tabs.push(t);
+      await w.emit('created', clone(t));
+    }
+    await w.settle();
+    await w.tick(5000);
+    expect(w.alive(60)).toBe(true);
+    expect(w.calls).toEqual([]);
+    expect(w.session['dupe.normal'].tabs[60].ignored).toBe('bulk');
+  });
+
+  it('a lone new tab (no burst) that commits at once is still switched after the settle period', async () => {
+    const w = world();
+    w.existing(DOC);
+    w.existing('https://other.example/');
+    const t = { id: 63, windowId: 1, index: 2, url: '', pendingUrl: DOC, status: 'loading', incognito: false };
+    w.tabs.push(t);
+    await w.emit('created', clone(t));
+    t.url = DOC; delete t.pendingUrl;
+    await w.emit('updated', t.id, { status: 'loading', url: DOC }, clone(t));
+    await w.service.idle();
+    expect(w.alive(63)).toBe(true); // nothing closes inside the burst window
+    await w.settle();
+    expect(w.alive(63)).toBe(false);
   });
 
   it("ignores a reopened window's tabs, including Firefox's first tab reported before its window (D6)", async () => {
@@ -186,7 +238,7 @@ describe('duplicate service: keeps', () => {
     await w.emit('created', clone(b));
     a.url = DOC;
     await w.emit('updated', a.id, { url: DOC, status: 'loading' }, clone(a));
-    await w.service.idle();
+    await w.settle();
     expect(w.alive(40) && w.alive(41)).toBe(true);
   });
 
@@ -211,9 +263,11 @@ describe('duplicate service: worker lifetime and contexts (D10, D11)', () => {
     w.tabs.push(t);
     await w.emit('created', clone(t));
     await w.service.idle();
-    const second = createDuplicateService(w.api, { now: () => w.now, notify: w.notify });
+    const second = createDuplicateService(w.api, { now: () => w.now, notify: w.notify, schedule: w.schedule });
+    w.service = second;
     t.url = DOC;
     await second.onUpdated(t.id, { url: DOC, status: 'loading' }, clone(t));
+    await w.settle();
     expect(w.alive(70)).toBe(false);
   });
 

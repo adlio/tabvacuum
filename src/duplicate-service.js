@@ -8,7 +8,7 @@
 // records. Firefox runs one background for both contexts and keys by
 // tab.incognito. Nothing here is written while the feature is off.
 import {
-  DUPE_ALLOW_MS, DUPE_BURST_MS, DUPE_COMPLETE_GRACE_MS, DUPE_KEEP_MS, DUPE_NEW_TAB_CAP_MS, DUPE_STARTUP_QUIET_MS,
+  DUPE_ALLOW_MS, DUPE_BURST_MS, DUPE_SETTLE_MS, DUPE_COMPLETE_GRACE_MS, DUPE_KEEP_MS, DUPE_NEW_TAB_CAP_MS, DUPE_STARTUP_QUIET_MS,
   dupeKey, isStillNew, judgeNewTab, newTabRecord, noteTabUrl,
 } from './core.js';
 
@@ -56,7 +56,7 @@ function prune(store, now) {
   store.allowed = store.allowed.filter(a => now - a.at <= DUPE_ALLOW_MS);
 }
 
-export function createDuplicateService(api, { now = () => Date.now(), notify = async () => {} } = {}) {
+export function createDuplicateService(api, { now = () => Date.now(), notify = async () => {}, schedule = (fn, ms) => setTimeout(fn, ms) } = {}) {
   const local = api.storage.local;
   const session = api.storage.session;
   const split = api.runtime.getManifest?.()?.incognito === 'split';
@@ -101,11 +101,29 @@ export function createDuplicateService(api, { now = () => Date.now(), notify = a
     // Records of other new tabs in the same context, so an older copy wins.
     const records = store.tabs;
     const verdict = judgeNewTab({ tab, record, tabs, records, closed: store.closed, allowed: store.allowed, settings: s, now: now() });
-    if (verdict.action === 'wait') return;
+    if (verdict.action === 'wait') {
+      if (verdict.reason === 'settling') settleLater(tabId, tab.incognito, record);
+      return;
+    }
     if (verdict.action !== 'switch') { record.done = verdict.reason; return; }
     const match = tabs.find(t => t.id === verdict.matchId);
     record.done = 'switched';
     await switchTo(tab, match, record, store, s);
+  }
+
+  // Judges a settling tab again once its burst window has passed (F1). A timer
+  // lost to a worker restart only means the tab is judged on its next URL
+  // change or not at all, so it fails toward keeping the tab.
+  const settling = new Set();
+  function settleLater(tabId, incognito, record) {
+    if (settling.has(tabId)) return;
+    settling.add(tabId);
+    schedule(() => {
+      settling.delete(tabId);
+      withStore(incognito, async (store, s, space) => {
+        if (store.tabs[tabId] !== undefined) await judge(tabId, store, s, space);
+      }).catch(() => {});
+    }, Math.max(0, record.created + DUPE_SETTLE_MS - now()) + 10);
   }
 
   // D9 order: bring the match forward first, so the browser does not activate
@@ -140,7 +158,8 @@ export function createDuplicateService(api, { now = () => Date.now(), notify = a
   function onCreated(tab) {
     return withStore(tab.incognito, async (store, s, space) => {
       const at = now();
-      const recent = Object.values(store.tabs).filter(r => r.windowId === tab.windowId && at - r.created <= DUPE_BURST_MS && !r.done);
+      // Judged tabs count too: a burst is a burst whichever of its tabs was seen first.
+      const recent = Object.values(store.tabs).filter(r => r.windowId === tab.windowId && at - r.created <= DUPE_BURST_MS);
       const record = newTabRecord(tab, { now: at, quietUntil: store.quietUntil, windowCreatedAt: store.windows[tab.windowId], recent });
       // A bulk open (Open All in Tabs, restore) ignores the whole burst, earlier tabs included.
       if (record.ignored === 'bulk') for (const r of recent) r.ignored = 'bulk';
