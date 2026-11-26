@@ -9,7 +9,7 @@
 // tab.incognito. Nothing here is written while the feature is off.
 import {
   DUPE_ALLOW_MS, DUPE_BURST_MS, DUPE_SETTLE_MS, DUPE_COMPLETE_GRACE_MS, DUPE_KEEP_MS, DUPE_NEW_TAB_CAP_MS, DUPE_STARTUP_QUIET_MS,
-  dupeKey, isStillNew, judgeNewTab, newTabRecord, noteTabUrl,
+  dupeKey, isStillNew, judgeNewTab, newTabRecord, noteTabUrl, settleDeadline,
 } from './core.js';
 
 export const DUPE_NOTICE_KEY = 'preventDuplicatesNoticeShown'; // storage.local: the first-switch notice was shown
@@ -96,26 +96,36 @@ export function createDuplicateService(api, { now = () => Date.now(), notify = a
   async function judge(tabId, store, s, space) {
     const record = store.tabs[tabId];
     if (!isStillNew(record, now())) return;
+    // A tab created in this window has arrived but is still queued: it may be
+    // the rest of a burst, so judge again after it is recorded (F3).
+    if (queuedCreates.get(record.windowId)) { settleLater(tabId, space === 'private', record, store.tabs); return; }
     let tab, tabs;
     try { [tab, tabs] = await Promise.all([api.tabs.get(tabId), api.tabs.query({})]); } catch { return; }
     // Records of other new tabs in the same context, so an older copy wins.
     const records = store.tabs;
     const verdict = judgeNewTab({ tab, record, tabs, records, closed: store.closed, allowed: store.allowed, settings: s, now: now() });
     if (verdict.action === 'wait') {
-      if (verdict.reason === 'settling') settleLater(tabId, tab.incognito, record);
+      if (verdict.reason === 'settling') settleLater(tabId, tab.incognito, record, records);
       return;
     }
     if (verdict.action !== 'switch') { record.done = verdict.reason; return; }
     const match = tabs.find(t => t.id === verdict.matchId);
     record.done = 'switched';
-    await switchTo(tab, match, record, store, s);
+    await switchTo(tab, match, record, store, s, space);
   }
 
-  // Judges a settling tab again once its burst window has passed (F1). A timer
-  // lost to a worker restart only means the tab is judged on its next URL
-  // change or not at all, so it fails toward keeping the tab.
+  // Judges a settling tab again once its window has been quiet (F1, F3). A
+  // later tab in the window moves the deadline, and the re-judge then simply
+  // schedules again. A timer lost to a worker restart only means the tab is
+  // judged on its next URL change or not at all, so it fails toward keeping it.
   const settling = new Set();
-  function settleLater(tabId, incognito, record) {
+  // Tab creations per window that have arrived but not yet been recorded.
+  const queuedCreates = new Map();
+  const bumpQueued = (windowId, by) => {
+    const n = (queuedCreates.get(windowId) ?? 0) + by;
+    if (n > 0) queuedCreates.set(windowId, n); else queuedCreates.delete(windowId);
+  };
+  function settleLater(tabId, incognito, record, records) {
     if (settling.has(tabId)) return;
     settling.add(tabId);
     schedule(() => {
@@ -123,13 +133,21 @@ export function createDuplicateService(api, { now = () => Date.now(), notify = a
       withStore(incognito, async (store, s, space) => {
         if (store.tabs[tabId] !== undefined) await judge(tabId, store, s, space);
       }).catch(() => {});
-    }, Math.max(0, record.created + DUPE_SETTLE_MS - now()) + 10);
+    }, Math.max(0, settleDeadline(record, records) - now()) + 10);
   }
 
   // D9 order: bring the match forward first, so the browser does not activate
   // (and stale tracking does not record) a neighbour; then close the new tab
   // only if it is still the same new page.
-  async function switchTo(tab, match, record, store, s) {
+  async function switchTo(tab, match, record, store, s, space) {
+    // Right before each step: a tab created meanwhile in this window may make
+    // this one part of a burst, so wait for it to be recorded and judge again.
+    const deferred = () => {
+      if (!queuedCreates.get(tab.windowId)) return false;
+      delete record.done;
+      settleLater(tab.id, space === 'private', record, store.tabs);
+      return true;
+    };
     const read = async () => {
       try {
         const current = await api.tabs.get(tab.id);
@@ -137,7 +155,7 @@ export function createDuplicateService(api, { now = () => Date.now(), notify = a
       } catch { return null; }
     };
     const current = await read();
-    if (!current) return;
+    if (!current || deferred()) return;
     // F2: the duplicate was in front and the user has since picked another
     // tab. Close it quietly and leave focus where the user put it. A
     // duplicate that opened in the background (never in front) still brings
@@ -149,7 +167,7 @@ export function createDuplicateService(api, { now = () => Date.now(), notify = a
         if (match.windowId !== tab.windowId || current.active) await api.windows.update(match.windowId, { focused: true });
       } catch { return; } // the match went away: keep the new tab
     }
-    if (!(await read())) return;
+    if (!(await read()) || deferred()) return;
     try { await api.tabs.remove(tab.id); } catch { return; } // already gone, or another extension closed it
     store.closed.push({ key: dupeKey(tab.url, tab, s), at: now(), created: record.created });
     await firstSwitchNotice();
@@ -163,9 +181,16 @@ export function createDuplicateService(api, { now = () => Date.now(), notify = a
     } catch { /* a missing notice never undoes the switch */ }
   }
 
+  // F3: stamped when the event arrives, not when the queue reaches it. A busy
+  // queue (Chromium creating a dozen tabs while each handler awaits the tabs
+  // API) otherwise spreads a 40 ms burst over more than a second.
   function onCreated(tab) {
+    const at = now();
+    bumpQueued(tab.windowId, 1);
+    let queued = true;
+    const arrived = () => { if (queued) { queued = false; bumpQueued(tab.windowId, -1); } };
     return withStore(tab.incognito, async (store, s, space) => {
-      const at = now();
+      arrived();
       // Judged tabs count too: a burst is a burst whichever of its tabs was seen first.
       const recent = Object.values(store.tabs).filter(r => r.windowId === tab.windowId && at - r.created <= DUPE_BURST_MS);
       const record = newTabRecord(tab, { now: at, quietUntil: store.quietUntil, windowCreatedAt: store.windows[tab.windowId], recent });
@@ -174,7 +199,7 @@ export function createDuplicateService(api, { now = () => Date.now(), notify = a
       if (tab.active === true) record.seenActive = true;
       store.tabs[tab.id] = record;
       await judge(tab.id, store, s, space);
-    });
+    }).finally(arrived);
   }
 
   function onUpdated(tabId, change, tab) {
@@ -212,8 +237,8 @@ export function createDuplicateService(api, { now = () => Date.now(), notify = a
   }
 
   function onWindowCreated(win) {
+    const at = now();
     return withStore(win.incognito, store => {
-      const at = now();
       store.windows[win.id] = at;
       for (const r of Object.values(store.tabs)) {
         if (r.windowId === win.id && at - r.created <= DUPE_BURST_MS && !r.done) r.ignored ??= 'new-window';

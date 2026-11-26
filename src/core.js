@@ -187,8 +187,9 @@ export const DUPE_KEEP_MS = 60 * 1000;             // a page TabVacuum closed ma
 export const DUPE_STARTUP_QUIET_MS = 10 * 1000;    // ignore tabs created this long after browser start
 export const DUPE_BURST_MS = 1000;                 // a new window's tabs, or a bulk open, within this window
 export const DUPE_BULK_COUNT = 3;                  // this many tabs in one window within DUPE_BURST_MS is a bulk open
-// No new tab is judged before it is this old, so the rest of a burst has arrived.
-// Real bulk opens measured 19-41 ms from first to third tab (docs/design.md).
+// A new tab is judged only once no other tab has been created in its window for
+// this long (each creation re-arms the wait), and at most DUPE_BURST_MS after
+// its own creation. A lone tab is judged after DUPE_SETTLE_MS.
 export const DUPE_SETTLE_MS = 200;
 export const DUPE_ALLOW_MS = 5 * 1000;             // TabVacuum Search's own opens are kept this long
 export const DUPE_MODES = ['switch'];
@@ -251,6 +252,19 @@ export function noteTabUrl(record, url) {
   if (record.first === undefined && !isPlaceholder(url)) record.first = url;
 }
 
+/**
+ * When a new tab may first be judged: DUPE_SETTLE_MS after the latest tab
+ * created in its window (a per-window debounce), capped at DUPE_BURST_MS after
+ * its own creation.
+ */
+export function settleDeadline(record, records = {}) {
+  let last = record.created;
+  for (const r of Object.values(records)) {
+    if (r && r.windowId === record.windowId && r.created > last && r.created - record.created <= DUPE_BURST_MS) last = r.created;
+  }
+  return Math.min(record.created + DUPE_BURST_MS, last + DUPE_SETTLE_MS);
+}
+
 /** Is a record still inside its new-tab window? */
 export function isStillNew(record, now) {
   if (!record || record.ignored || record.done) return false;
@@ -280,10 +294,10 @@ export function judgeNewTab({ tab, record, tabs, records = {}, closed = [], allo
   if (!record) return { action: 'ignore', reason: 'unknown' };
   if (record.ignored) return { action: 'ignore', reason: record.ignored };
   if (!isStillNew(record, now)) return { action: 'ignore', reason: 'not-new' };
-  // Chromium can commit the first tab of a bulk open before the third tab
-  // exists, so no tab is judged until it is DUPE_SETTLE_MS old, by which time
-  // the rest of the burst has been recorded; the service judges it again then.
-  if (now - record.created < DUPE_SETTLE_MS) return { action: 'wait', reason: 'settling' };
+  // Chromium can commit the first tab of a bulk open before the rest of the
+  // burst exists, so no tab is judged until its window has been quiet for
+  // DUPE_SETTLE_MS (or DUPE_BURST_MS has passed); the service judges it again then.
+  if (now < settleDeadline(record, records)) return { action: 'wait', reason: 'settling' };
   // Judge only the committed URL. Chrome does not offer an uncommitted tab to
   // Reopen Closed Tab, so closing before commit would leave no undo.
   if (!isWebUrl(tab.url)) return { action: 'wait', reason: 'not-web' };

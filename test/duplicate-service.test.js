@@ -223,6 +223,89 @@ describe('duplicate service: the user moved on (F2) and the settle period', () =
   });
 });
 
+describe('duplicate service: spread-out bulk opens (F3)', () => {
+  const shape = (w, id, url, extra = {}) => ({ id, windowId: 1, index: w.tabs.length, url: '', pendingUrl: url, status: 'loading', incognito: false, ...extra });
+  async function create(w, t) { w.tabs.push(t); await w.emit('created', clone(t)); }
+  async function commit(w, t) { t.url = t.pendingUrl; delete t.pendingUrl; await w.emit('updated', t.id, { status: 'loading', url: t.url }, clone(t)); }
+
+  it('P5d: three tabs 150 ms apart, doc first and committed at once: the doc copy is kept and marked bulk after it was created', async () => {
+    const w = world();
+    w.existing(DOC);
+    const first = shape(w, 80, DOC);
+    await create(w, first);
+    await commit(w, first);
+    await w.tick(150);
+    await create(w, shape(w, 81, 'https://a.example/'));
+    await w.tick(150);
+    await create(w, shape(w, 82, 'https://b.example/'));
+    await w.tick(1500);
+    expect(w.alive(80)).toBe(true);
+    expect(w.calls).toEqual([]);
+    expect(['80', '81', '82'].map(id => w.session['dupe.normal'].tabs[id]?.ignored)).toEqual(['bulk', 'bulk', 'bulk']);
+  });
+
+  it('two tabs 150 ms apart are not a burst: the duplicate switches once the window is quiet, within the 1 s cap', async () => {
+    const w = world();
+    w.existing(DOC);
+    w.existing('https://other.example/');
+    const first = shape(w, 83, DOC);
+    await create(w, first);
+    await commit(w, first);
+    await w.tick(150);
+    await create(w, shape(w, 84, 'https://a.example/'));
+    await w.tick(150); // 300 ms: the second tab re-armed the wait to 350 ms
+    expect(w.alive(83)).toBe(true);
+    await w.tick(100); // 400 ms
+    expect(w.alive(83)).toBe(false);
+  });
+
+  it('the 1 s cap: restored tabs arriving every 150 ms keep re-arming the wait, but the duplicate is judged 1 s after creation', async () => {
+    const w = world();
+    w.existing(DOC);
+    w.existing('https://other.example/');
+    const first = shape(w, 85, DOC);
+    await create(w, first);
+    await commit(w, first);
+    // Sleeping restored tabs are ignored as 'restored', so they never start a bulk open.
+    for (let i = 0; i < 6; i++) {
+      await w.tick(150);
+      await create(w, { id: 120 + i, windowId: 1, index: w.tabs.length, url: `https://r.example/${i}`, status: 'unloaded', discarded: true, incognito: false });
+    }
+    await w.tick(50); // 950 ms
+    expect(w.alive(85)).toBe(true);
+    await w.tick(80); // 1030 ms: capped
+    expect(w.alive(85)).toBe(false);
+  });
+
+  it('P5e order: a burst whose handlers queue behind a slow tabs API, with the doc committed before they run, keeps the doc', async () => {
+    const w = world();
+    w.existing(DOC);
+    w.existing('https://other.example/');
+    // Hold the tabs API while Chromium is busy creating tabs, so handlers queue up.
+    let release;
+    const held = new Promise(r => { release = r; });
+    const query = w.api.tabs.query.getMockImplementation();
+    w.api.tabs.query.mockImplementation(async () => { await held; return query(); });
+    const first = shape(w, 90, DOC);
+    w.tabs.push(first);
+    const pending = [w.emit('created', clone(first))];
+    for (const [id, gap] of [[91, 23], [92, 21]]) {
+      w.now += gap;
+      const t = shape(w, id, `https://bm.example/${id}`);
+      w.tabs.push(t);
+      pending.push(w.emit('created', clone(t)));
+    }
+    first.url = DOC; delete first.pendingUrl;
+    pending.push(w.emit('updated', first.id, { status: 'loading', url: DOC }, clone(first)));
+    w.now += 1500; // the queue drains long after the burst arrived
+    release();
+    await Promise.all(pending);
+    await w.tick(2000);
+    expect(w.alive(90)).toBe(true);
+    expect(w.session['dupe.normal'].tabs['90'].ignored).toBe('bulk');
+  });
+});
+
 describe('duplicate service: keeps', () => {
   it('keeps Duplicate Tab (opener is the match)', async () => {
     const w = world();

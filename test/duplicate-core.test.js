@@ -5,7 +5,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   DUPE_ALLOW_MS, DUPE_COMPLETE_GRACE_MS, DUPE_SETTLE_MS, DUPE_KEEP_MS, DUPE_NEW_TAB_CAP_MS, DUPE_STARTUP_QUIET_MS,
-  dupeKey, isNeverUrl, isStillNew, judgeNewTab, newTabRecord, noteTabUrl, validateDuplicateSettings,
+  dupeKey, isNeverUrl, isStillNew, judgeNewTab, newTabRecord, noteTabUrl, settleDeadline, validateDuplicateSettings,
 } from '../src/core.js';
 
 const NOW = 1_800_000_000_000;
@@ -82,6 +82,34 @@ describe('judgeNewTab: when it acts at all', () => {
   it('an active new tab is still switched: R7.2 is about bulk closing, not this (D8)', () => {
     const fresh = newTab(9, DOC, { extra: { active: true } });
     expect(judge(fresh).action).toBe('switch');
+  });
+});
+
+describe('settleDeadline: per-window debounce (F3)', () => {
+  const rec = (created, windowId = 1) => ({ created, windowId });
+  it('a lone tab settles 200 ms after it was created', () => {
+    expect(settleDeadline(rec(NOW), { 1: rec(NOW) })).toBe(NOW + DUPE_SETTLE_MS);
+  });
+  it('each later tab in the same window re-arms the wait for another 200 ms', () => {
+    const first = rec(NOW);
+    expect(settleDeadline(first, { 1: first, 2: rec(NOW + 150) })).toBe(NOW + 350);
+    expect(settleDeadline(first, { 1: first, 2: rec(NOW + 150), 3: rec(NOW + 300) })).toBe(NOW + 500);
+  });
+  it('tabs in other windows and earlier tabs do not move it', () => {
+    const t = rec(NOW);
+    expect(settleDeadline(t, { 1: t, 2: rec(NOW + 150, 2), 3: rec(NOW - 100) })).toBe(NOW + DUPE_SETTLE_MS);
+  });
+  it('is capped at 1 s after the tab was created', () => {
+    const first = rec(NOW);
+    const others = Object.fromEntries([150, 300, 450, 600, 750, 900, 990].map((ms, i) => [i + 2, rec(NOW + ms)]));
+    expect(settleDeadline(first, { 1: first, ...others })).toBe(NOW + 1000);
+    expect(settleDeadline(first, { 1: first, 2: rec(NOW + 1100) })).toBe(NOW + DUPE_SETTLE_MS);
+  });
+  it('judgeNewTab waits until the debounced deadline', () => {
+    const fresh = newTab(9, DOC, { created: NOW - 300 });
+    const later = { created: NOW - 150, windowId: 1, ctx: 'n|' };
+    expect(judge(fresh, { records: { 20: later } })).toEqual({ action: 'wait', reason: 'settling' });
+    expect(judge(fresh, { records: { 20: later }, now: NOW + 60 }).action).toBe('switch');
   });
 });
 
