@@ -10,6 +10,32 @@ and the auto-generated GitHub release notes for each tag.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-25
+
+### Added
+- Opt-in **Prevent duplicate tabs** in Settings > Duplicate Detection, off by
+  default and off after upgrading. When a new tab opens a page that is already
+  open in the same kind of window (and the same Firefox container), Tab Vacuum
+  switches to the open tab and closes the new copy, about a quarter second after
+  it opens. Only new tabs are checked; navigating inside an existing tab is never
+  touched ([#20], [#21]).
+- Copies you make on purpose are kept: Duplicate Tab, links on a page to the same
+  page, pages that Tab Vacuum's Search opens, and a page you reopen within a minute
+  of it being closed, so Reopen Closed Tab (Ctrl+Shift+T, or Cmd+Shift+T on a Mac)
+  undoes a switch. The first switch shows one notification saying so.
+- A **Never on these sites** list: one URL prefix, host name (such as
+  `docs.example.com`) or `/regex/` per line.
+- This release ships the Switch mode only. An "Ask first" mode is still to come.
+
+### Safety
+- Bulk opens are left alone: 3 or more tabs created in one window within 200 ms
+  of each other, up to 1 s in total (for example Open All in Tabs), are all
+  kept. Tabs opened 400 ms or more apart count as separate opens. Restored tabs,
+  tabs that open with a new window or in the 10 s after browser startup, blank
+  and browser pages, and the last tab in a window are never closed.
+- If you move to another tab before a duplicate is handled, the duplicate is
+  closed without changing focus. No new permissions are requested.
+
 ## [0.7.0] - 2026-11-02
 
 ### Added
@@ -102,7 +128,8 @@ and the auto-generated GitHub release notes for each tag.
   sort-tabs actions; frecency sort; ES-module background script; and the
   packaging scripts for Firefox and Chrome builds.
 
-[Unreleased]: https://github.com/adlio/tabvacuum/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/adlio/tabvacuum/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/adlio/tabvacuum/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/adlio/tabvacuum/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/adlio/tabvacuum/compare/v0.5.3...v0.6.0
 [0.5.3]: https://github.com/adlio/tabvacuum/compare/v0.5.2...v0.5.3
@@ -115,6 +142,8 @@ and the auto-generated GitHub release notes for each tag.
 [0.3.1]: https://github.com/adlio/tabvacuum/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/adlio/tabvacuum/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/adlio/tabvacuum/releases/tag/v0.2.0
+[#21]: https://github.com/adlio/tabvacuum/pull/21
+[#20]: https://github.com/adlio/tabvacuum/issues/20
 [#17]: https://github.com/adlio/tabvacuum/pull/17
 [#16]: https://github.com/adlio/tabvacuum/pull/16
 [#15]: https://github.com/adlio/tabvacuum/pull/15
