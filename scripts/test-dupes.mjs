@@ -976,6 +976,23 @@ scenario('U3', 'User switches to another tab within the duplicate\'s first secon
   return verdict(count(s, doc) === 1 && front?.id === ids[2],
     `${count(s, doc)} doc copies; front tab after 3.5 s: ${front?.url}; activations after the user's switch: ${acts.join(' -> ')}`, s, { via: 'external + native Ctrl+3' });
 });
+scenario('U3b', 'User switches to another tab within the duplicate\'s first second (API activation)', 'Duplicate closed; tester expectation: focus stays on the tab the user chose', async ({ id }) => {
+  const { doc, other } = slugs(id);
+  const third = `/tab/third-${id.toLowerCase()}`;
+  const { ids } = await setup([doc, other, third], {}, { activeIndex: 1 });
+  await b.external(abs(doc));
+  let s0;
+  await until(async () => { s0 = await snap(); return s0.tabs.find(t => t.url === doc && t.id !== ids[0])?.active; }, 'duplicate in front', 3000).catch(() => {});
+  const dup = s0.tabs.find(t => t.url === doc && t.id !== ids[0]);
+  const t0 = Date.now();
+  const sinceCreated = t0 - (s0.log.find(e => e.type === 'created' && e.id === dup?.id)?.t ?? t0);
+  await b.api(`await api.tabs.update(${ids[2]}, { active: true }); return true;`);
+  const s = await observe(null, 3500);
+  const acts = activationsAfter({ log: [...s0.log, ...s.log] }, t0, { [ids[0]]: 'doc', [ids[1]]: 'other', [ids[2]]: 'third', [dup?.id]: 'dup' });
+  const front = s.tabs.find(t => t.active);
+  return verdict(count(s, doc) === 1 && front?.id === ids[2],
+    `${count(s, doc)} doc copies; user switched ${sinceCreated} ms after the duplicate was created; front tab after 3.5 s: ${front?.url}; activations after: ${acts.join(' -> ')}`, s, { via: 'external + api tabs.update(active) for the user\'s tab click' });
+});
 scenario('I6b', 'Double-fire of a fast page, both copies inside the first second', 'One tab: the second copy is closed, the first kept', async ({ id }) => {
   const page = `/tab/fast-${id.toLowerCase()}`;
   await setup([slugs(id).other]);
