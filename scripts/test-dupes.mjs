@@ -856,6 +856,36 @@ scenario('P5c', 'Open All in Tabs from the Bookmark Manager, open page first (Ch
   const opened = s.tabs.filter(t => /\/tab\/bm-/.test(t.url)).length;
   return verdict(count(s, doc) === 2 && opened === 2, `${count(s, doc)} doc copies; ${opened} of 2 other bookmarks opened (${r.form})`, s, { via: 'browser (chrome://bookmarks bookmarkManagerPrivate.openInNewTab)' });
 });
+scenario('P5d', 'Bulk open spread over 300 ms (3 tabs 150 ms apart, open page first)', 'Ignored: all kept (3 tabs within 1 s is a bulk open)', async ({ id }) => {
+  const { doc, other } = slugs(id);
+  await setup([doc, other]);
+  await b.api(`for (const u of ${JSON.stringify([doc, '/tab/spread-a', '/tab/spread-b'].map(abs))}) { api.tabs.create({ url: u, active: false }); await new Promise(r => setTimeout(r, 150)); } return true;`);
+  const s = await observe(null, 4000);
+  const created = s.log.filter(e => e.type === 'created').map(e => e.t);
+  return verdict(count(s, doc) === 2, `${count(s, doc)} doc copies; burst spread ${created.length > 1 ? created.at(-1) - created[0] : '?'} ms over ${created.length} tabs`, s, { via: 'api: 3 tabs.create, 150 ms apart' });
+});
+scenario('P5e', 'Open All in Tabs of a 12-bookmark folder from the Bookmark Manager, open page first', 'Ignored: all kept', async ({ id }) => {
+  if (name !== 'chromium') return { untestable: 'Chromium-only: drives chrome://bookmarks.' };
+  const { doc, other } = slugs(id);
+  await setup([doc, other]);
+  const urls = [doc, ...Array.from({ length: 11 }, (_, i) => `/tab/bm12-${i}`)].map(abs);
+  const m = await b.context.newPage();
+  await m.goto('chrome://bookmarks/'); await sleep(800);
+  await snap();
+  const r = await m.evaluate(async list => {
+    const folder = await chrome.bookmarks.create({ parentId: '1', title: 'dupes-p5e' });
+    const ids = [];
+    for (const url of list) ids.push((await chrome.bookmarks.create({ parentId: folder.id, url })).id);
+    for (const i of ids) chrome.bookmarkManagerPrivate.openInNewTab(i);
+    return { n: ids.length };
+  }, urls).catch(e => ({ error: String(e.message).split('\n')[0] }));
+  const s = await observe(null, 5000);
+  await m.close().catch(() => {});
+  if (r.error) return { untestable: `Bookmark Manager open-all not reachable: ${r.error}` };
+  const created = s.log.filter(e => e.type === 'created' && /\/tab\/(doc|bm12)/.test(e.pending ?? e.url ?? '')).map(e => e.t);
+  const opened = s.tabs.filter(t => /\/tab\/bm12-/.test(t.url)).length;
+  return verdict(count(s, doc) === 2 && opened === 11, `${count(s, doc)} doc copies; ${opened} of 11 other bookmarks open; ${created.length} tabs created over ${created.length > 1 ? created.at(-1) - created[0] : '?'} ms`, s, { via: 'browser (chrome://bookmarks bookmarkManagerPrivate.openInNewTab x12)' });
+});
 scenario('P6a', 'Doc is the rightmost tab; Ctrl+T and type its URL', 'Switch', async ({ id }) => {
   const { doc, other } = slugs(id);
   const { ids } = await setup([other, doc], {}, { activeIndex: 1 });
@@ -926,23 +956,42 @@ scenario('X3', 'Last tab in a window is never closed', 'Kept: a new tab that is 
   const r = (await b.api('return (await api.storage.session.get("dupe.normal"))["dupe.normal"]?.tabs?.[' + fresh + '];'));
   return verdict(count(s, doc) === 2 && s.tabs.some(t => t.id === fresh), `${count(s, doc)} copies; the lone new tab ${s.tabs.some(t => t.id === fresh) ? 'kept' : 'CLOSED'}; its record ${JSON.stringify(r)}`, s, { via: 'api (windows.create, tabs.create, tabs.remove, tabs.update)' });
 });
-// ---- Rows for the 1 s settle delay (judging waits until a new tab is 1 s old) ----
+// ---- Rows for the settle delay (a new tab is judged only once it is DUPE_SETTLE_MS old) ----
 const activationsAfter = (s, t0, ids) => s.log.filter(e => e.type === 'activated' && e.t >= t0).map(e => (ids[e.id] ?? e.id));
-scenario('U1', 'User closes the duplicate within its first second (Ctrl+W)', 'Nothing else happens: the open doc is not activated, no error', async ({ id }) => {
+// U1a/U1b: Ctrl+W on a duplicate that opened in front. The window is focused first, so the key
+// needs no focus step and lands as soon as the tab exists.
+async function ctrlW(id, delayMs) {
   const { doc, other } = slugs(id);
   const { ids } = await setup([doc, other], {}, { activeIndex: 1 });
+  focus(`other-${id.toLowerCase()}`);
+  await sleep(300); await snap();
   await b.external(abs(doc));
-  let s0;
-  await until(async () => { s0 = await snap(); return count(s0, doc) === 2 && s0.tabs.find(t => t.url === doc && t.id !== ids[0])?.active; }, 'duplicate in front', 3000).catch(() => {});
-  const dup = s0.tabs.find(t => t.url === doc && t.id !== ids[0]);
-  const t0 = Date.now();
-  keys(['Control_L', 'w'], `doc-${id.toLowerCase()}`);
-  const closedMs = Date.now() - (dup ? s0.log.find(e => e.type === 'created' && e.id === dup.id)?.t ?? t0 : t0);
-  const s = await observe(null, 3000);
-  const acts = activationsAfter({ log: [...s0.log, ...s.log] }, t0, { [ids[0]]: 'doc', [ids[1]]: 'other' });
-  const front = s.tabs.find(t => t.active);
-  return verdict(!!dup && count(s, doc) === 1 && !s.tabs.some(t => t.id === dup?.id) && acts.filter(a => a === 'doc').length === 0,
-    `duplicate ${dup ? 'was in front' : 'NOT SEEN'}; Ctrl+W ~${closedMs} ms after it was created; activations after: ${acts.join(' -> ') || 'none'}; front tab ${front?.url}`, s, { via: 'external + native Ctrl+W' });
+  let s0 = await snap(), dup;
+  const log = [...s0.log];
+  for (let i = 0; i < 60 && !(dup = log.find(e => e.type === 'created' && e.url !== undefined || e.type === 'created')); i++) { await sleep(10); s0 = await snap(); log.push(...s0.log); }
+  if (delayMs) { const wait = dup.t + delayMs - Date.now(); if (wait > 0) await sleep(wait); }
+  const sent = Date.now();
+  nativeKeys(env, ['Control_L', 'w']);
+  const s = await observe(null, 2500);
+  s.log = [...log, ...s.log];
+  const removedDup = s.log.find(e => e.type === 'removed' && e.id === dup?.id);
+  const removedDoc = s.log.find(e => e.type === 'removed' && e.id === ids[0]);
+  const acts = activationsAfter(s, sent, { [ids[0]]: 'doc', [ids[1]]: 'other', [dup?.id]: 'dup' });
+  return { doc, ids, dup, sent, keyMs: dup ? sent - dup.t : null, s, removedDup, removedDoc, acts };
+}
+scenario('U1a', 'Ctrl+W on the duplicate inside the settle window', 'Only the duplicate closes; nothing else is activated', async ({ id }) => {
+  const r = await ctrlW(id, 0);
+  const switched = r.s.log.some(e => e.type === 'activated' && e.id === r.ids[0] && e.t < r.sent);
+  if (!r.dup || r.keyMs >= 150 || switched) return { untestable: `Ctrl+W left the harness ${r.keyMs} ms after the duplicate was created${switched ? ', after TabVacuum had already switched' : ''}; it must land well inside the 200 ms settle window. Python process start for the key adds tens of ms.` };
+  const front = r.s.tabs.find(t => t.active);
+  const pass = !!r.removedDup && !r.removedDoc && !r.acts.includes('doc') && count(r.s, r.doc) === 1;
+  return verdict(pass, `Ctrl+W sent ${r.keyMs} ms after creation; duplicate ${r.removedDup ? 'closed' : 'OPEN'}; open doc ${r.removedDoc ? 'CLOSED' : 'kept'}; activations after the key: ${r.acts.join(' -> ') || 'none'}; front ${front?.url}`, r.s, { via: 'external + native Ctrl+W', keyMs: r.keyMs });
+});
+scenario('U1b', 'Ctrl+W about 400 ms after the duplicate opened (after the switch)', 'Documented: TabVacuum has switched, so Ctrl+W closes the open doc now in front', async ({ id }) => {
+  const r = await ctrlW(id, 400);
+  const switchedBefore = r.removedDup && r.removedDup.t < r.sent;
+  const pass = switchedBefore && !!r.removedDoc && count(r.s, r.doc) === 0;
+  return verdict(pass, `Ctrl+W sent ${r.keyMs} ms after creation; duplicate closed by TabVacuum ${r.removedDup ? `${r.removedDup.t - r.dup.t} ms after creation` : 'NEVER'}; open doc ${r.removedDoc ? 'closed by the key' : 'kept'}; ${count(r.s, r.doc)} doc copies left`, r.s, { via: 'external + native Ctrl+W', keyMs: r.keyMs });
 });
 scenario('U2', 'User navigates the duplicate elsewhere within its first second', 'Kept on the new page; the open doc is not activated', async ({ id }) => {
   const { doc, other } = slugs(id);
