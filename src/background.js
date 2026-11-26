@@ -223,6 +223,14 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .catch(err => sendResponse({ error: err.message, message: `Error: ${err.message}` }));
     return true;
   }
+  // The Ask first prompt page authorizes itself by its own tab (R14.11).
+  const asking = dupes.handleAskMessage(message, sender);
+  if (asking) {
+    asking
+      .then(sendResponse)
+      .catch(err => sendResponse({ error: errorText(err) }));
+    return true;
+  }
   if (!isTrustedPage(sender)) return;
 
   const handlers = {

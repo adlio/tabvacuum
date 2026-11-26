@@ -56,6 +56,12 @@
         Prevent duplicate tabs
       </label>
       <p id="prevent-duplicates-help" class="help">When a new tab opens a page that is already open in this kind of window (and the same container), switch to the open tab and close the new one. Only new tabs are checked. A tab opened from its match (Duplicate Tab, or a link to the same page) is kept, and so is a page you reopen within a minute of it being closed, so Reopen Closed Tab (Ctrl+Shift+T, or Cmd+Shift+T on a Mac) undoes a switch.</p>
+      <label for="prevent-duplicates-mode">When it happens</label>
+      <select id="prevent-duplicates-mode" aria-describedby="prevent-duplicates-mode-help">
+        <option value="switch">Switch to the open tab</option>
+        <option value="ask">Ask first</option>
+      </select>
+      <p id="prevent-duplicates-mode-help" class="help">Ask first shows "Already open" in the new tab, with Switch and Keep both. Keep both loads the page and leaves the tab alone.</p>
       <label for="prevent-duplicates-never">Never on these sites (one per line)</label>
       <textarea id="prevent-duplicates-never" rows="3" aria-describedby="prevent-duplicates-never-help" placeholder="docs.example.com&#10;https://example.com/dashboard&#10;/^https:\/\/sso\./"></textarea>
       <p id="prevent-duplicates-never-help" class="help">A line matches a page when the page's address starts with it, or when the line is the page's host name (such as docs.example.com). Write /pattern/ for a regular expression.</p>

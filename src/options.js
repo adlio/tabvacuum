@@ -14,6 +14,7 @@ export function startOptions({ document, window, browser, locale }) {
     ignoreFragments: $('ignore-fragments'),
     ignoreQuery: $('ignore-query'),
     preventDuplicates: $('prevent-duplicates'),
+    preventDuplicatesMode: $('prevent-duplicates-mode'),
     preventDuplicatesNever: $('prevent-duplicates-never'),
     skipPinned: $('skip-pinned'),
     skipAudible: $('skip-audible'),
@@ -195,6 +196,7 @@ export function startOptions({ document, window, browser, locale }) {
     general.ignoreFragments.checked = settings.ignoreFragments;
     general.ignoreQuery.checked = settings.ignoreQueryParams;
     general.preventDuplicates.checked = settings.preventDuplicates === true;
+    general.preventDuplicatesMode.value = settings.preventDuplicatesMode === 'ask' ? 'ask' : 'switch';
     general.preventDuplicatesNever.value = (settings.preventDuplicatesNever || []).join('\n');
     general.skipPinned.checked = settings.skipPinned;
     general.skipAudible.checked = settings.skipAudible;
@@ -216,6 +218,7 @@ export function startOptions({ document, window, browser, locale }) {
       ignoreFragments: general.ignoreFragments.checked,
       ignoreQueryParams: general.ignoreQuery.checked,
       preventDuplicates: general.preventDuplicates.checked,
+      preventDuplicatesMode: general.preventDuplicatesMode.value === 'ask' ? 'ask' : 'switch',
       preventDuplicatesNever: general.preventDuplicatesNever.value.split('\n').map(l => l.trim()).filter(Boolean),
       skipPinned: general.skipPinned.checked,
       skipAudible: general.skipAudible.checked,

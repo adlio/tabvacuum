@@ -5,6 +5,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   DUPE_ALLOW_MS, DUPE_COMPLETE_GRACE_MS, DUPE_SETTLE_MS, DUPE_KEEP_MS, DUPE_NEW_TAB_CAP_MS, DUPE_STARTUP_QUIET_MS,
+  addAskEntry, askOutcome, authorizeAskMessage, dupeAction, isAskPageUrl, DUPE_ASK_MAX,
   dupeKey, isNeverUrl, isStillNew, judgeNewTab, newTabRecord, noteTabUrl, settleDeadline, validateDuplicateSettings,
 } from '../src/core.js';
 
@@ -306,12 +307,56 @@ describe('issue #20 scenario table', () => {
 });
 
 describe('validateDuplicateSettings (D17)', () => {
-  it('accepts the defaults and switch mode only', () => {
+  it('accepts the defaults, and Switch or Ask first as the mode', () => {
     expect(validateDuplicateSettings({ preventDuplicates: false, preventDuplicatesMode: 'switch', preventDuplicatesNever: [] })).toBeNull();
-    expect(validateDuplicateSettings({ preventDuplicatesMode: 'ask' })).toMatch(/mode/);
+    expect(validateDuplicateSettings({ preventDuplicatesMode: 'ask' })).toBeNull();
+    expect(validateDuplicateSettings({ preventDuplicatesMode: 'prompt' })).toMatch(/mode/);
     expect(validateDuplicateSettings({ preventDuplicates: 'yes' })).toMatch(/on or off/);
     expect(validateDuplicateSettings({ preventDuplicatesNever: 'docs.example.com' })).toMatch(/never list/);
     expect(validateDuplicateSettings({ preventDuplicatesNever: Array(201).fill('a') })).toMatch(/never list/);
     expect(validateDuplicateSettings({ searchScope: 'all' })).toBeNull();
+  });
+});
+
+describe('Ask first rules (R14.11)', () => {
+  const ASK = 'moz-extension://atv/ask.html';
+  const entry = { matchId: 1, url: DOC, key: dupeKey(DOC, { incognito: false }, ON), ctx: 'n|', created: NOW, at: NOW };
+  it('maps the mode: only Ask first asks', () => {
+    expect(dupeAction({ preventDuplicatesMode: 'ask' })).toBe('ask');
+    expect(dupeAction({ preventDuplicatesMode: 'switch' })).toBe('switch');
+    expect(dupeAction({})).toBe('switch');
+  });
+  it('recognizes the prompt page exactly', () => {
+    expect(isAskPageUrl(ASK, ASK)).toBe(true);
+    expect(isAskPageUrl(`${ASK}#x`, ASK)).toBe(true);
+    expect(isAskPageUrl(`${ASK}x`, ASK)).toBe(false);
+    expect(isAskPageUrl('https://ask.html/', ASK)).toBe(false);
+    expect(isAskPageUrl(undefined, ASK)).toBe(false);
+  });
+  it('accepts messages only from this extension, from a tab showing the prompt', () => {
+    const entries = { 9: entry };
+    const ok = { id: 'atv', url: ASK, tab: { id: 9 } };
+    expect(authorizeAskMessage({ sender: ok, extensionId: 'atv', askUrl: ASK, entries })).toEqual({ ok: true, tabId: 9, entry });
+    expect(authorizeAskMessage({ sender: { ...ok, tab: { id: 8 } }, extensionId: 'atv', askUrl: ASK, entries })).toEqual({ ok: true, tabId: 8, entry: null });
+    for (const sender of [{ ...ok, id: 'other' }, { ...ok, url: 'moz-extension://atv/options.html' }, { ...ok, tab: undefined }, { ...ok, url: 'https://evil.example/ask.html' }]) {
+      expect(authorizeAskMessage({ sender, extensionId: 'atv', askUrl: ASK, entries }).ok).toBe(false);
+    }
+  });
+  it('Switch goes ahead only while the open copy still shows the same page in the same context', () => {
+    const match = tab(1, DOC);
+    expect(askOutcome({ choice: 'switch', entry, match, settings: ON })).toBe('switch');
+    expect(askOutcome({ choice: 'keep', entry, match, settings: ON })).toBe('back');
+    expect(askOutcome({ choice: 'switch', entry, match: null, settings: ON })).toBe('back');
+    expect(askOutcome({ choice: 'switch', entry, match: tab(1, 'https://elsewhere.example/'), settings: ON })).toBe('back');
+    expect(askOutcome({ choice: 'switch', entry, match: tab(1, DOC, { cookieStoreId: 'firefox-container-1' }), settings: ON })).toBe('back');
+    expect(askOutcome({ choice: 'switch', entry, match: tab(1, DOC, { incognito: true }), settings: ON })).toBe('back');
+    expect(askOutcome({ choice: 'bogus', entry, match, settings: ON })).toBe('back');
+    expect(askOutcome({ choice: 'switch', entry: null, match, settings: ON })).toBe('back');
+  });
+  it('remembers at most DUPE_ASK_MAX prompts, dropping the oldest', () => {
+    const entries = {};
+    for (let i = 0; i < DUPE_ASK_MAX; i++) addAskEntry(entries, i, { at: NOW + i });
+    expect(addAskEntry(entries, 999, { at: NOW + 999 })).toEqual([0]);
+    expect(Object.keys(entries)).toHaveLength(DUPE_ASK_MAX);
   });
 });
