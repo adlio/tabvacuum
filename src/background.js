@@ -1,12 +1,18 @@
 // background.js — Wiring layer for TabVacuum
 import './polyfill.js';
-import { findDuplicates, planMerge, planSort, findBlankTabs, computeFrecency } from './core.js';
+import { findDuplicates, planMerge, planSort, findBlankTabs, computeFrecency, validateDuplicateSettings } from './core.js';
 
 import { createSearchService } from './search-service.js';
 import { createSearchLauncher } from './search-launcher.js';
 import { createStaleService, OPEN_FAILED } from './stale-service.js';
+import { createDuplicateService } from './duplicate-service.js';
 
-const search = createSearchService(browser);
+// Listeners register synchronously at top level, so a sleeping worker still
+// hears the tab event that wakes it (R14).
+const dupes = createDuplicateService(browser, { notify: message => notify(message) });
+dupes.install();
+
+const search = createSearchService(browser, { beforeOpen: url => dupes.allow(url) });
 search.installFocusTracking();
 const launcher = createSearchLauncher(browser, search);
 launcher.installCleanup();
@@ -33,6 +39,10 @@ const DEFAULTS = {
   blankWelcome: true,
   blankSearchEngines: true,
   blankCustomUrls: [],
+  // R14: off by default, including on upgrade.
+  preventDuplicates: false,
+  preventDuplicatesMode: 'switch',
+  preventDuplicatesNever: [],
 };
 
 async function getSettings() {
@@ -43,6 +53,8 @@ async function getSettings() {
 // Every settings write, Settings page included, goes through the stale
 // service's gate, which validates stale-rule fields and reconciles the schedule.
 function saveSettings(settings, windowId) {
+  const error = settings && typeof settings === 'object' ? validateDuplicateSettings(settings) : null;
+  if (error) return Promise.reject(new Error(error));
   return stale.saveSettings(settings, { windowId, generalKeys: Object.keys(DEFAULTS) });
 }
 

@@ -413,3 +413,48 @@ The scheduler adds only `alarms`. Enabling schedules a future whole local hour; 
 Native age probes established Firefox's deselection-based timestamp and Chromium's selection-based timestamp in the tested versions. The current Chrome implementation uses session observations and a first-seen baseline; full browser/extension restart or discard replacement can reset that baseline. This affects manual and automatic stale counts and can prevent weekly cleanup for frequent restarters. A proposed local-only timestamp table has not been approved or implemented. Do not represent it as a working cross-restart feature.
 
 Verification uses unit tests for boundaries, races and privacy, the original search/closing suites, and `scripts/test-stale-cleanup.mjs` for native popup controls, safe editing, previews, protection checks, private isolation, shortcuts/context menus, alarm events and visible error recovery. Browser fixtures use disposable profiles on loopback. Firefox age fixtures use privileged native timestamp setup; Chromium fixtures offset only the extension's test clock. Accelerated alarm plans and injected transport failures are labelled in result JSON. These runs do not establish a real week of unattended use, minimum-version execution, physical macOS behavior or full Firefox restart behavior with a signed installed add-on.
+
+## Duplicate-tab prevention (R14, issue #20)
+
+### Probe: what the browsers report
+
+`scripts/probe-duplicate-tabs.mjs` loads a generated probe extension (`tabs` permission only, not the product build) into a disposable profile on an isolated Xvfb display, against a loopback fixture site, and logs `tabs.onCreated`/`onUpdated`/`onRemoved`, `windows.onCreated` and `onAttached`/`onDetached` with `url`, `pendingUrl`, `openerTabId`, `index`, `status` and `discarded`. Browser gestures are real XTest input (`scripts/test-native-key.py` plus pointer events). Run on 2026-11-25 with Firefox 161.0 and Chromium 145.0.7632.0 on Linux aarch64; two runs gave the same results. Values are what `onCreated` reported, then how the URL arrived.
+
+| Case | Firefox 161 | Chromium 145 |
+|---|---|---|
+| `tabs.duplicate` (stands in for Duplicate Tab) | `about:blank`, opener = source, index = source + 1; page URL ~60 ms later | `url` and `pendingUrl` = page at creation, opener = source, index = source + 1 |
+| Address bar Alt+Enter on the doc | `about:blank`, no opener, appended at the end | `pendingUrl` = doc, opener = doc, appended at the end |
+| Middle-click or Ctrl-click a link to the same page | `about:blank`, opener = the page, index + 1 | `pendingUrl` = page, opener = the page, index + 1 |
+| Ctrl-click / middle-click a link from another page (also `rel=noopener`) | opener = the linking page (kept with `noopener`) | opener = the linking page (kept with `noopener`) |
+| `window.open`, with and without `noopener` | `about:blank`, opener = the opening page | `url` empty, no `pendingUrl`, status `complete`, opener = the opening page |
+| Ctrl+T, then typing the doc's URL | `about:newtab`, **no opener**; typed URL arrives ~2 s later | `pendingUrl` = `chrome://newtab/`, **opener = current tab**; typed URL arrives later |
+| Server redirect to an open page | `about:blank`, then the final URL only | `pendingUrl` = redirector, then `url` = final page at commit |
+| Script redirect (300 ms) to an open page | redirector loads and completes, final URL ~300 ms later | same |
+| Another app opens a URL (doc is the rightmost tab) | `about:blank`, no opener, index = doc + 1 | not measured: the second launch hit Chromium's profile lock in this harness |
+| Same URL created twice 200 ms apart | two tabs, both `about:blank` at creation | two tabs, both with `pendingUrl` = the page |
+| Close at `onCreated` (before commit), then Ctrl+Shift+T | URL unknown at `onCreated` (`about:blank`), so nothing to close yet | **not restorable**: Ctrl+Shift+T restored the older closed tab |
+| Close when `url` first arrives (commit, status `loading`), then Ctrl+Shift+T | restored the closed page | restored the closed page |
+| Close a two-tab window, then reopen it | first tab `about:blank`, **then** `windows.onCreated` in the same ms; second tab `discarded: true` | `windows.onCreated` first; tabs status `unloaded` with `url` set |
+| `tabs.move` to another window | `onDetached`/`onAttached` only | same |
+| Browser restart with session restore | not measured: the temporary probe add-on is installed after startup | the worker started after the restored tabs were created and saw only their `onUpdated` events |
+
+What the design takes from it:
+
+- **Opener rule (D7).** Both browsers set the opener on Duplicate Tab and same-page links, so the tab-index fallback is dropped: an app link next to a rightmost doc lands at doc + 1 with no opener, which the fallback would have kept. Chromium sets the opener on Ctrl+T, so the opener counts only when the tab's first real URL (Chromium `pendingUrl`, or the first URL after Firefox's `about:blank`) was already the match's page.
+- **Close timing (D5).** Chromium does not restore a tab closed before commit, so both browsers judge only the committed `url`. In Chromium that is the `url` change at commit; Firefox reports nothing earlier.
+- **Restore and bulk heuristics (D6).** Reopened windows are caught by `discarded` (Firefox), status `unloaded` (Chromium) and the new-window burst. Firefox reports a window's first tab before the window, so `windows.onCreated` also marks already-recorded tabs of that window. Tabs the worker never saw created are never judged, which covers Chromium's late-starting worker after a restart.
+- **Redirects (D2).** Both browsers deliver the final URL through `onUpdated`; script redirects arrive after the first page completed, hence the 3 s grace.
+
+### Design
+
+`core.js` holds the rules as pure functions: `newTabRecord` (what to remember at creation, and whether the tab is never judged), `noteTabUrl`, `isStillNew`, `isNeverUrl`, `validateDuplicateSettings`, and `judgeNewTab`, which returns `switch` (with the match), `keep`, `ignore` or `wait`. It never calls the bulk-closing filters; it applies R7.1 itself. `duplicate-service.js` owns the events, state and the switch. `background.js` installs its listeners synchronously at top level, like the stale service, so a sleeping Chromium worker still hears the event that wakes it.
+
+State is in `storage.session` under `dupe.normal` and `dupe.private`: per-tab creation records, recent window creations, the 60 s keep records, Search's 5 s allowances and the startup quiet deadline. Chromium split-incognito workers each write only their own key; Firefox's one background keys by `tab.incognito`. All reads and writes run on one serial queue in event order, and the store is loaded once per worker. Settings are read from `storage.local` and cached until `storage.onChanged`. Nothing is written while the feature is off.
+
+A switch activates the match, focuses its window when it is elsewhere or the new tab was in front, re-reads the new tab and closes it only if it still shows the same page inside its new-tab period. Activating first means the browser does not pick a neighbour to activate, so stale-age tracking does not record a spurious view. A failed removal is silent. The first switch sets `preventDuplicatesNoticeShown` in `storage.local` and sends one notification through the existing `notify()`.
+
+TabVacuum's own Search (D13): `createSearchService` takes a `beforeOpen(url)` hook, which the background points at `dupes.allow(url)`. A history result Search opens is kept for 5 s, so Search's exact-URL reuse rule is unchanged even with "Ignore URL fragments" on. Tabs opened by other extensions cannot be identified; the never list covers them.
+
+No permission is added: `tabs`, `storage` and `notifications` are already in both manifests.
+
+Not covered by the probe and left to real-browser acceptance tests: native Duplicate Tab from the tab context menu (the probe used `tabs.duplicate`), Open All in Tabs, Chromium external-app links, and Firefox startup restore.

@@ -76,9 +76,34 @@ describe('settings: stale tabs', () => {
     expect(settings).toEqual({
       searchScope: 'all', ignoreFragments: true, ignoreQueryParams: true, skipPinned: true, skipAudible: false,
       blankNewTab: true, blankWelcome: true, blankSearchEngines: false, blankCustomUrls: ['https://a.example/'],
+      preventDuplicates: false, preventDuplicatesNever: [],
     });
     expect(settings).not.toHaveProperty('staleThresholdMs');
     expect(settings).not.toHaveProperty('autoCloseStaleEnabled');
+  });
+
+  it('duplicate prevention is off when the setting is absent (upgrade) and saves the never list trimmed', async () => {
+    const ui = setup();
+    await ui.ready;
+    await settle();
+    expect(ui.$('prevent-duplicates').checked).toBe(false);
+    ui.$('prevent-duplicates').checked = true;
+    ui.$('prevent-duplicates-never').value = '  docs.example.com \n\n/^https:\\/\\/sso\\./\n';
+    ui.$('prevent-duplicates').dispatch('change');
+    await settle();
+    const [{ settings }] = ui.sent('saveSettings');
+    expect(settings.preventDuplicates).toBe(true);
+    expect(settings.preventDuplicatesNever).toEqual(['docs.example.com', '/^https:\\/\\/sso\\./']);
+    expect(html).toContain('Prevent duplicate tabs');
+    expect(html).toContain("the line is the page's host name");
+  });
+
+  it('shows saved duplicate-prevention settings', async () => {
+    const ui = setup({ getSettings: async () => ({ searchScope: 'all', preventDuplicates: true, preventDuplicatesNever: ['a.example', 'b.example'] }) });
+    await ui.ready;
+    await settle();
+    expect(ui.$('prevent-duplicates').checked).toBe(true);
+    expect(ui.$('prevent-duplicates-never').value).toBe('a.example\nb.example');
   });
 
   it('does not save defaults over settings that failed to load', async () => {

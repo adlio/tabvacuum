@@ -365,6 +365,17 @@ describe('expanded search sources', () => {
     expect(api.tabs.create).not.toHaveBeenCalled();
   });
 
+  it('announces a history result it opens before creating the tab, and a failing hook never blocks it (R14.7)', async () => {
+    const { api } = sources();
+    const order = [];
+    api.tabs.create.mockImplementation(async () => { order.push('create'); });
+    const beforeOpen = vi.fn(async url => { order.push(`allow ${url}`); });
+    await createSearchService(api, { beforeOpen }).activateHistory('https://h.test/?a=1#x', 10);
+    expect(order).toEqual(['allow https://h.test/?a=1#x', 'create']);
+    const failing = createSearchService(api, { beforeOpen: async () => { throw new Error('x'); } });
+    expect(await failing.activateHistory('https://h.test/?a=1#x', 10)).toEqual({ ok: true });
+  });
+
   it('focuses an already-open tab with the exact URL instead of duplicating it', async () => {
     const { api, service } = sources();
     api.history.search.mockResolvedValue([{ url: 'https://other.test/', lastVisitTime: 1 }]);

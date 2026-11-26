@@ -9,7 +9,7 @@ import {
 export const CONTENT_ORIGINS = Object.freeze(['http://*/*', 'https://*/*']);
 const HISTORY_RECHECK_LIMIT = 1000;
 
-export function createSearchService(api, { contentTimeoutMs = CONTENT_TIMEOUT_MS } = {}) {
+export function createSearchService(api, { contentTimeoutMs = CONTENT_TIMEOUT_MS, beforeOpen = async () => {} } = {}) {
   const prefix = api.extension?.inIncognitoContext ? 'search.focus.private.' : 'search.focus.';
   const focusKey = id => `${prefix}${id}`;
   const searchUrl = api.runtime.getURL('search.html');
@@ -116,6 +116,8 @@ export function createSearchService(api, { contentTimeoutMs = CONTENT_TIMEOUT_MS
     }
     const open = scope.tabs.find(tab => tab.url === url && !isSearchPage(tab.pendingUrl));
     if (open) return activate(open.id, windowId);
+    // Duplicate-tab prevention must keep a tab Search chose to open (R14).
+    try { await beforeOpen(url); } catch { /* never blocks opening */ }
     await api.tabs.create({ url, windowId, active: true });
     await api.windows.update(windowId, { focused: true });
     return { ok: true };
