@@ -7,7 +7,8 @@
 //   node scripts/test-dupes.mjs firefox|chromium [--only=ID,ID]
 // Env: KIROCREW_SCRATCH or TMPDIR (required), FIREFOX_BINARY, GECKODRIVER,
 //   CHROMIUM_BINARY, XVFB_BINARY, UPGRADE_FROM (git ref of the "old" build for
-//   the upgrade check, default origin/main).
+//   the upgrade check, default origin/main), TABVACUUM_DIST (a different build
+//   directory to test, for before/after comparisons).
 // Output: $KIROCREW_SCRATCH/dupes/<browser>-<run>/result.json and summary.md.
 //
 // How each gesture is produced is recorded per scenario ("via"):
@@ -105,7 +106,7 @@ const typeUrl = text => execFileSync('python3', ['-c', POINTER, 'type', text], {
 const typed = p => `127.0.0.1:${server.address().port}${p}`;
 
 // ---- builds: the PR build, and the old build for the upgrade check ----------
-const distDir = path.resolve(name === 'firefox' ? 'dist/firefox' : 'dist/chrome');
+const distDir = path.resolve(process.env.TABVACUUM_DIST || (name === 'firefox' ? 'dist/firefox' : 'dist/chrome')); // TABVACUUM_DIST: test another build
 const extDir = path.join(directory, 'extension'); // the installed copy; swapped for the upgrade check
 async function buildOld() {
   const ref = process.env.UPGRADE_FROM || 'origin/main';
@@ -483,7 +484,13 @@ const brief = s => ({ tabs: s.tabs.map(t => `${t.id}@w${t.win}:${t.url}${t.activ
 // A scenario returns { pass: bool, observed: string, detail } or { untestable: why }.
 const scenarios = [];
 const scenario = (id, title, expected, fn) => scenarios.push({ id, title, expected, fn });
-const verdict = (pass, observed, s, extra = {}) => ({ pass, observed, detail: { ...(s ? brief(s) : {}), ...extra } });
+// Switch latency: for each new tab that was removed, ms from onCreated and from its first web URL to onRemoved.
+const latency = s => (s?.log || []).filter(e => e.type === 'created').map(c => {
+  const gone = s.log.find(e => e.type === 'removed' && e.id === c.id);
+  const commit = s.log.find(e => e.type === 'updated' && e.id === c.id && /^\//.test(e.url ?? ''));
+  return gone ? { id: c.id, fromCreated: gone.t - c.t, fromCommit: commit ? gone.t - commit.t : null } : null;
+}).filter(Boolean);
+const verdict = (pass, observed, s, extra = {}) => ({ pass, observed, detail: { ...(s ? brief(s) : {}), latency: latency(s), ...extra } });
 const slugs = id => ({ doc: `/tab/doc-${id.toLowerCase()}`, other: `/tab/other-${id.toLowerCase()}`, chat: `/tab/chat-${id.toLowerCase()}`, sdoc: `doc-${id.toLowerCase()}` });
 // Doc open once, new tab closed, open copy active and (when asked) its window focused.
 const switched = (s, doc, docId, { win } = {}) => count(s, doc) === 1 && s.tabs.some(t => t.id === docId && t.active) && (win === undefined || s.wins.find(w => w.focused)?.id === win);
@@ -918,6 +925,81 @@ scenario('X3', 'Last tab in a window is never closed', 'Kept: a new tab that is 
   const s = await observe(null, 6000);
   const r = (await b.api('return (await api.storage.session.get("dupe.normal"))["dupe.normal"]?.tabs?.[' + fresh + '];'));
   return verdict(count(s, doc) === 2 && s.tabs.some(t => t.id === fresh), `${count(s, doc)} copies; the lone new tab ${s.tabs.some(t => t.id === fresh) ? 'kept' : 'CLOSED'}; its record ${JSON.stringify(r)}`, s, { via: 'api (windows.create, tabs.create, tabs.remove, tabs.update)' });
+});
+// ---- Rows for the 1 s settle delay (judging waits until a new tab is 1 s old) ----
+const activationsAfter = (s, t0, ids) => s.log.filter(e => e.type === 'activated' && e.t >= t0).map(e => (ids[e.id] ?? e.id));
+scenario('U1', 'User closes the duplicate within its first second (Ctrl+W)', 'Nothing else happens: the open doc is not activated, no error', async ({ id }) => {
+  const { doc, other } = slugs(id);
+  const { ids } = await setup([doc, other], {}, { activeIndex: 1 });
+  await b.external(abs(doc));
+  let s0;
+  await until(async () => { s0 = await snap(); return count(s0, doc) === 2 && s0.tabs.find(t => t.url === doc && t.id !== ids[0])?.active; }, 'duplicate in front', 3000).catch(() => {});
+  const dup = s0.tabs.find(t => t.url === doc && t.id !== ids[0]);
+  const t0 = Date.now();
+  keys(['Control_L', 'w'], `doc-${id.toLowerCase()}`);
+  const closedMs = Date.now() - (dup ? s0.log.find(e => e.type === 'created' && e.id === dup.id)?.t ?? t0 : t0);
+  const s = await observe(null, 3000);
+  const acts = activationsAfter({ log: [...s0.log, ...s.log] }, t0, { [ids[0]]: 'doc', [ids[1]]: 'other' });
+  const front = s.tabs.find(t => t.active);
+  return verdict(!!dup && count(s, doc) === 1 && !s.tabs.some(t => t.id === dup?.id) && acts.filter(a => a === 'doc').length === 0,
+    `duplicate ${dup ? 'was in front' : 'NOT SEEN'}; Ctrl+W ~${closedMs} ms after it was created; activations after: ${acts.join(' -> ') || 'none'}; front tab ${front?.url}`, s, { via: 'external + native Ctrl+W' });
+});
+scenario('U2', 'User navigates the duplicate elsewhere within its first second', 'Kept on the new page; the open doc is not activated', async ({ id }) => {
+  const { doc, other } = slugs(id);
+  const away = `/tab/away-${id.toLowerCase()}`;
+  const { ids } = await setup([doc, other], {}, { activeIndex: 1 });
+  await b.external(abs(doc));
+  let s0;
+  await until(async () => { s0 = await snap(); return s0.tabs.some(t => t.url === doc && t.id !== ids[0]); }, 'duplicate committed', 3000).catch(() => {});
+  const dup = s0.tabs.find(t => t.url === doc && t.id !== ids[0]);
+  const t0 = Date.now();
+  if (dup) await b.api(`await api.tabs.update(${dup.id}, { url: ${JSON.stringify(abs(away))} }); return true;`);
+  const s = await observe(null, 4000);
+  const acts = activationsAfter({ log: [...s0.log, ...s.log] }, t0, { [ids[0]]: 'doc', [ids[1]]: 'other', [dup?.id]: 'dup' });
+  const kept = s.tabs.find(t => t.id === dup?.id);
+  return verdict(!!dup && kept?.url === away && count(s, doc) === 1 && !acts.includes('doc'),
+    `duplicate ${kept ? `kept on ${kept.url}` : 'CLOSED'}; navigated ~${t0 - (s0.log.find(e => e.type === 'created' && e.id === dup?.id)?.t ?? t0)} ms after creation; activations after: ${acts.join(' -> ') || 'none'}`, s, { via: 'external + api tabs.update (stands in for typing a new address)' });
+});
+scenario('U3', 'User switches to another tab within the duplicate\'s first second', 'Duplicate closed; tester expectation: focus stays on the tab the user chose', async ({ id }) => {
+  const { doc, other } = slugs(id);
+  const third = `/tab/third-${id.toLowerCase()}`;
+  const { ids } = await setup([doc, other, third], {}, { activeIndex: 1 });
+  await b.external(abs(doc));
+  let s0;
+  await until(async () => { s0 = await snap(); return s0.tabs.find(t => t.url === doc && t.id !== ids[0])?.active; }, 'duplicate in front', 3000).catch(() => {});
+  const dup = s0.tabs.find(t => t.url === doc && t.id !== ids[0]);
+  const t0 = Date.now();
+  keys(['Control_L', '3'], `doc-${id.toLowerCase()}`); // the user picks the third tab
+  const s = await observe(null, 3500);
+  const acts = activationsAfter({ log: [...s0.log, ...s.log] }, t0, { [ids[0]]: 'doc', [ids[1]]: 'other', [ids[2]]: 'third', [dup?.id]: 'dup' });
+  const front = s.tabs.find(t => t.active);
+  return verdict(count(s, doc) === 1 && front?.id === ids[2],
+    `${count(s, doc)} doc copies; front tab after 3.5 s: ${front?.url}; activations after the user's switch: ${acts.join(' -> ')}`, s, { via: 'external + native Ctrl+3' });
+});
+scenario('U3b', 'User switches to another tab within the duplicate\'s first second (API activation)', 'Duplicate closed; tester expectation: focus stays on the tab the user chose', async ({ id }) => {
+  const { doc, other } = slugs(id);
+  const third = `/tab/third-${id.toLowerCase()}`;
+  const { ids } = await setup([doc, other, third], {}, { activeIndex: 1 });
+  await b.external(abs(doc));
+  let s0;
+  await until(async () => { s0 = await snap(); return s0.tabs.find(t => t.url === doc && t.id !== ids[0])?.active; }, 'duplicate in front', 3000).catch(() => {});
+  const dup = s0.tabs.find(t => t.url === doc && t.id !== ids[0]);
+  const t0 = Date.now();
+  const sinceCreated = t0 - (s0.log.find(e => e.type === 'created' && e.id === dup?.id)?.t ?? t0);
+  await b.api(`await api.tabs.update(${ids[2]}, { active: true }); return true;`);
+  const s = await observe(null, 3500);
+  const acts = activationsAfter({ log: [...s0.log, ...s.log] }, t0, { [ids[0]]: 'doc', [ids[1]]: 'other', [ids[2]]: 'third', [dup?.id]: 'dup' });
+  const front = s.tabs.find(t => t.active);
+  return verdict(count(s, doc) === 1 && front?.id === ids[2],
+    `${count(s, doc)} doc copies; user switched ${sinceCreated} ms after the duplicate was created; front tab after 3.5 s: ${front?.url}; activations after: ${acts.join(' -> ')}`, s, { via: 'external + api tabs.update(active) for the user\'s tab click' });
+});
+scenario('I6b', 'Double-fire of a fast page, both copies inside the first second', 'One tab: the second copy is closed, the first kept', async ({ id }) => {
+  const page = `/tab/fast-${id.toLowerCase()}`;
+  await setup([slugs(id).other]);
+  const ids = await b.api(`const a = await api.tabs.create({ url: ${JSON.stringify(abs(page))}, active: true }); await new Promise(r => setTimeout(r, 100)); const c = await api.tabs.create({ url: ${JSON.stringify(abs(page))}, active: true }); return [a.id, c.id];`);
+  const s = await observe(null, 4000);
+  const left = s.tabs.filter(t => t.url === page).map(t => t.id);
+  return verdict(left.length === 1 && left[0] === ids[0], `${left.length} copies; kept ${left[0] === ids[0] ? 'the first' : left[0] === ids[1] ? 'the SECOND' : 'none'}`, s, { via: 'api tabs.create x2, 100 ms apart' });
 });
 scenario('X4', 'First switch shows one notice; the flag persists in storage.local', 'preventDuplicatesNoticeShown = true after a switch', async () => {
   const v = await b.api('return (await api.storage.local.get("preventDuplicatesNoticeShown")).preventDuplicatesNoticeShown;');
