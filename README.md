@@ -6,7 +6,7 @@ Aaron's Tab Vacuum (ATV) is a browser extension for power-user tab management. F
 
 ## Features
 
-- **Search Tabs** — live fuzzy title/URL search with exact matches first; arrow keys highlight, Enter focuses the tab and its window, Escape dismisses. Empty queries show the 10 most recently focused tabs, forcing the current tab last before applying the limit. Typed queries give the current tab no special treatment.
+- **Search Tabs** — live fuzzy title/URL search with exact matches first; arrow keys highlight, Enter focuses the tab and its window, Escape dismisses. Empty queries show the 10 most recently focused tabs, forcing the current tab last before applying the limit. Typed queries give the current tab no special treatment. Search can also look in bookmarks, history and the text of open pages: pick sources with the buttons under the query, or type `@b`, `@h`, `@c` or `@all` (see [Search sources](#search-sources-0100)).
 - **Close Duplicate Tabs** — deduplicate by URL across all windows
 - **Merge All Windows** — consolidate every tab into the current window
 - **Sort Tabs** — by URL, title, last accessed, or visit count (ascending/descending)
@@ -55,6 +55,8 @@ Chrome allows at most four suggested shortcuts per extension. **Close Stale Tabs
 
 **Firefox**: remap in `about:addons` → gear icon → "Manage Extension Shortcuts".
 **Chrome**: remap in `chrome://extensions/shortcuts`.
+
+The Search shortcut can be changed the same way. For example, to open Search with Cmd+K (Ctrl+K on Windows and Linux), set **Search tabs** to that key on the shortcuts page above.
 
 ### Action feedback
 
@@ -131,12 +133,32 @@ To close every current match: type `amazon`, then Tab → m → a → x (or Dele
 
 Closures follow the explicit Close action. The current/active tab may be closed, including as part of a batch. If it hosts the palette, search first prepares a replacement on a loaded, already-permitted surviving page in the same window. When that is unavailable, it uses a separate extension window. Before removing an active host in that fallback, it selects an already-loaded surviving tab in the original window when possible, even if that page cannot host the palette. If only sleeping tabs remain, the browser may load whichever tab it activates after the close. The replacement must authenticate and receive the query, mode, source choices, remaining checks and focus before any tabs in that batch close. No new permission prompt appears; existing optional website access can support the handoff even with Page contents off. If neither replacement becomes ready, nothing in the batch closes. Queued keys do not carry over during the handoff. Dismissing the replacement before it takes over cancels the close. Existing results retain their relative order while the query is unchanged, so a browser-selected neighboring tab does not jump ahead of the next close target. Editing the query ranks results afresh. Otherwise search stays in place. Configured pinned/audio protections and the last-tab-in-window safeguard still apply, with skips and failures explained inline. Existing automatic cleanup actions retain their active-tab protections. Use the browser's Reopen Closed Tab command to recover closed tabs; unsaved page state is not guaranteed to recover.
 
-### Expand the search (0.5.0)
+### Search sources (0.10.0)
 
-Open tabs are always searched. Use **Search in** beside the query to independently add **History** or **Page contents**, or both. Extras start off each time the palette opens; the query is preserved when sources change. Shift+Tab from the query reaches Search in. Escape closes the source menu before stepping back through the palette modes.
+Search looks in four sources: **Tabs**, **Bookmarks**, **History** and **Contents** (the text of loaded pages). A row of buttons under the query shows which ones are on. Click a button to turn that source on or off for this search; at least one stays on. From the keyboard, press Shift+Tab from the query to reach the row, move with the arrow keys, and press Space to toggle. The query is kept when sources change.
+
+**Scope words** change sources without leaving the query:
+
+| Type | Searches |
+|---|---|
+| `@tabs` or `@t` | open tabs only |
+| `@bookmarks` or `@b` | bookmarks only |
+| `@history` or `@h` | history only |
+| `@contents` or `@c` | page contents only |
+| `@all` or `@a` | every source, page contents included |
+
+After the word and a space, it becomes a chip in the query box, such as "Only bookmarks ×". Backspace in an empty query removes the chip. Typing `@` opens a list of the scope words; pick one with the arrow keys and Enter. A source that still needs access shows its enable action instead of being searched.
+
+**Default sources.** Search starts with Tabs only, including after upgrading. A button click or scope word lasts for that search; the next time Search opens, it is back to your default. When the sources on screen differ from your default, **Save as default** appears at the end of the row. Settings has a **Search by default** choice to view or reset it. Contents can be turned on for one search but can't be saved as the default.
+
+**Counts.** A source button that's off shows a dimmed count of the extra results it would add, such as "Bookmarks 3". When nothing matches, the list says what would match ("No open tabs match. 3 bookmarks and 12 history pages do.") and Enter adds those sources for this search. Bookmarks are counted only after bookmark access is granted, history is never counted in private windows, and Contents is never counted automatically.
+
+Results are grouped in this order: Open tabs, Bookmarks, History. Each row shows its source. An open tab that is also bookmarked appears once, as the tab, with a ★; a bookmark that is also in history appears once, as the bookmark.
+
+- **Bookmarks** are matched on title and URL using the browser's bookmark search, up to 50 results, each with its folder path (for example "Bookmarks Bar › Work"). Folders, separators, `javascript:` bookmarklets and non-HTTP(S) entries are skipped. The first time you turn Bookmarks on, the browser asks for bookmark access; Settings can remove it. Enter opens the bookmark in a new tab, or switches to it if the same page is already open. Bookmark rows have no × or checkbox, and Search never edits or deletes bookmarks. Bookmarks are available in private windows.
 
 - **History** searches visited page titles and URLs using the browser's native matching across its full stored history, not just the last day. It retrieves up to the latest 100 matching unique pages, then ranks them below open tabs. Exact URLs are deduplicated without stripping query parameters or fragments. An already-open exact URL appears as the open tab rather than another history row; multiple real open tabs remain separate. History entries have no × or checkbox and can never be closed/deleted by search. Enter opens the page in a new tab, or focuses an eligible exact-URL tab if one is now open. History is unavailable in private search.
-- **Page contents** searches rendered text in loaded website tabs only. First choose **Enable in Settings**, then **Allow website access** and approve the browser prompt. Reopen Search in and check Page contents; granting access alone does not start a scan. Settings also provides Remove website access. The browser retains this optional permission, while the two source toggles reset every launch.
+- **Page contents** searches rendered text in loaded website tabs only. First choose **Enable in Settings**, then **Allow website access** and approve the browser prompt. Then turn on Contents in Search (or type `@c`); granting access alone does not start a scan. Settings also provides Remove website access. The browser retains this optional permission.
 - **Matching and coverage:** ordinary tab title/URL search keeps its fuzzy ranking. Contents requires all query terms to match literally, ignoring case, and adds a snippet without duplicating a tab already matched by title/URL. It reads main-document text only—not form controls, editable regions, hidden content, iframes or shadow roots. Sleeping/loading/protected tabs are skipped, not loaded. The status line reports searched/skipped counts and partially searched long pages. Each request examines at most 100 eligible tabs, with four scans at a time; each page is bounded to 100,000 text characters, 10,000 visited nodes and a 75ms traversal budget (1.5s request timeout). Expanded queries have a 256-character limit, explained inline; normal tab search remains available for longer queries.
 - **Responsive and local:** open-tab results appear immediately while extras load. Late results preserve the highlighted target; if it disappears, another tab is not silently armed for closing. Typing a new query, turning extras off, or ending search cancels pending scans. Scripts already running finish within their bounds and their cancelled results are discarded. Queries and snippets are not saved or sent off the device. There is no background content index.
 
@@ -144,7 +166,7 @@ The shadcn-inspired UI uses native CSS and JavaScript, with no framework or remo
 
 ### Permissions and privacy
 
-- `activeTab` grants temporary access to the current page after you invoke search. `scripting` mounts the palette there. There are no required broad host permissions or always-running content scripts. Page-content search separately requests optional HTTP/HTTPS website access through Settings, and runs only when explicitly selected in the palette.
+- `activeTab` grants temporary access to the current page after you invoke search. `scripting` mounts the palette there. There are no required broad host permissions or always-running content scripts. Page-content search separately requests optional HTTP/HTTPS website access through Settings, and runs only when explicitly selected in the palette. Bookmark search uses the optional `bookmarks` permission, requested the first time you turn Bookmarks on.
 - The palette lives in an extension-origin iframe inside a closed shadow tree. The page cannot read its query, titles, or URLs. The launch token is not in the page DOM or iframe URL. Each privileged search request is checked against its token, tab, frame, and privacy context. The only message sent back to the page is a data-free dismissal signal.
 - On browser-internal pages, local files, and pages where injection fails, search opens in a separate extension-owned window, centered over the browser. That fallback has OS-managed window chrome. It closes after selection or Escape; it never navigates the source tab. Its short-lived token appears only in the extension-owned window URL, not a website URL, and is bound to that exact tab/frame.
 - Private access must be enabled in the browser's extension settings. Chrome uses split incognito execution to support the protected-page fallback. Chrome still shares extension session storage between its workers; distinct session keys prevent normal/private launches overwriting each other. Private results never appear in normal search.

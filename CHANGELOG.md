@@ -10,6 +10,50 @@ and the auto-generated GitHub release notes for each tag.
 
 ## [Unreleased]
 
+## [0.10.0] - Unreleased
+
+### Added
+- **Bookmarks** in Search. Bookmarks are matched on title and URL, and each
+  result shows its folder, such as "Bookmarks Bar › Work". The first time you
+  turn Bookmarks on, the browser asks for bookmark access; you can remove that
+  access again in Settings ([#24]).
+- **Source buttons** under the search box: **Tabs · Bookmarks · History ·
+  Contents**. They are always visible and show which sources are being searched.
+  Click one to turn it on or off for this search. From the keyboard, press
+  Shift+Tab from the query, move with the arrow keys and press Space. They
+  replace the **Search in** menu.
+- **Scope words.** Type `@tabs`, `@bookmarks`, `@history` or `@contents` (or
+  `@t`, `@b`, `@h`, `@c`) to search only that source, or `@all` (`@a`) to search
+  every source, page contents included. The word becomes a chip such as "Only
+  bookmarks ×"; Backspace in an empty query removes it. Typing `@` lists the
+  scope words.
+- **A saved default.** Search still starts with Tabs only. When the sources on
+  screen differ from your default, **Save as default** keeps them for next time,
+  and Settings has a **Search by default** choice to view or reset it. Page
+  contents can be searched on request but not saved as the default.
+- **Counts for sources that are off.** A source button that's off shows how many
+  more results it would add, such as "Bookmarks 3". When nothing matches, Search
+  says what would ("No open tabs match. 3 bookmarks and 12 history pages do.")
+  and Enter adds those sources for this search. Bookmarks are counted only after
+  you've granted access, history is never counted in private windows, and page
+  contents are never counted automatically.
+- Results are grouped as Open tabs, Bookmarks, History, with a source label on
+  every row. An open tab that is also bookmarked appears once, marked ★.
+- Hints for the new controls: the placeholder reads "Search tabs · type @ for
+  more", the key-hint footer shows `@` Sources, and each source button shows a
+  one-time tip the first time you use it.
+
+### Changed
+- History stays on each time Search opens if you save it as part of your
+  default; before, it turned off every time. After upgrading, Search starts with
+  Tabs only, as before.
+
+### Safety
+- Bookmark access is an optional permission, so updating doesn't disable the
+  extension or ask for anything up front. Search never edits or deletes
+  bookmarks, and bookmark rows can't be closed or selected.
+- Queries and counts stay on your device.
+
 ## [0.9.0] - 2026-11-26
 
 ### Added
@@ -166,6 +210,7 @@ and the auto-generated GitHub release notes for each tag.
 [0.3.1]: https://github.com/adlio/tabvacuum/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/adlio/tabvacuum/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/adlio/tabvacuum/releases/tag/v0.2.0
+[#24]: https://github.com/adlio/tabvacuum/issues/24
 [#22]: https://github.com/adlio/tabvacuum/pull/22
 [#21]: https://github.com/adlio/tabvacuum/pull/21
 [#20]: https://github.com/adlio/tabvacuum/issues/20
