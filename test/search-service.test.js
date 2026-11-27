@@ -580,17 +580,15 @@ describe('bookmarks source (R15)', () => {
     expect(env.api.history.search).toHaveBeenCalledTimes(2); // The two normal-window counts; never the private one.
   });
 
-  it('records hints at most once per call and saves defaults without Contents', async () => {
+  it('records each tip once, never the retired "New" counter, and saves defaults without Contents', async () => {
     const env = withBookmarks();
     env.api.storage.local.get = vi.fn(async () => ({ searchTipsShown: { tabs: true }, searchBookmarksNew: 3 }));
     env.api.storage.local.set = vi.fn(async () => {});
-    await env.service.noteHints({ opened: true });
-    await env.service.noteHints({ usedBookmarks: true, tip: 'bookmarks' });
+    await env.service.noteHints({ opened: true, usedBookmarks: true });
+    await env.service.noteHints({ tip: 'bookmarks' });
     await env.service.noteHints({ tip: 'tabs' });
     await env.service.noteHints({ tip: 'evil' });
-    expect(env.api.storage.local.set.mock.calls).toEqual([
-      [{ searchBookmarksNew: 2 }], [{ searchBookmarksNew: 0, searchTipsShown: { tabs: true, bookmarks: true } }],
-    ]);
+    expect(env.api.storage.local.set.mock.calls).toEqual([[{ searchTipsShown: { tabs: true, bookmarks: true } }]]);
     expect(await env.service.saveDefaultSources({ tabs: false, bookmarks: true, content: true })).toEqual({ tabs: false, bookmarks: true, history: false });
     expect(env.api.storage.local.set).toHaveBeenLastCalledWith({ searchSources: { tabs: false, bookmarks: true, history: false } });
   });

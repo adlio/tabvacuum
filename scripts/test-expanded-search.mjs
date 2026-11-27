@@ -42,7 +42,7 @@ const STATE = `
   return { focus: document.activeElement?.id || document.activeElement?.localName || null, mode: $('palette').dataset.mode,
     query: $('query').value, groups, rows: groups.flatMap(g => g.rows), menu: false, access: shown($('source-access')),
     tabs: box('source-tabs'), bookmarks: box('source-bookmarks'), history: box('source-history'), content: box('source-content'),
-    enable: shown($('enable-content')), accessNote: shown($('content-access-note')), historyNote: shown($('history-private-note')), status: $('source-status').textContent,
+    enable: shown($('enable-content')), caption: Boolean($('content-access-note')), historyNote: shown($('history-private-note')), status: $('source-status').textContent,
     sources: $('palette').dataset.sources, busy: $('results').getAttribute('aria-busy') };`;
 
 // Source controls inside the viewport, and 4.5:1 text contrast using computed styles.
@@ -154,7 +154,7 @@ async function defaults({ a, x, check, state, press, open, dismiss, toQuery }) {
   t = await press(['Right']);
   t = await press(['space']);
   const granted = await x.permitted();
-  check(!granted && !t.content.checked && t.content.disabled && t.access && t.enable && t.accessNote,
+  check(!granted && !t.content.checked && t.content.disabled && t.access && t.enable && !t.caption,
     'defaults: without website access, pressing Contents shows Enable in Settings instead', brief(t));
   t = await press(['Tab']);
   check(t.focus === 'query', 'defaults: Tab from the toolbar returns to the query', brief(t));
@@ -256,7 +256,7 @@ async function contentFlow(ctx) {
   // (1) Before access: the Settings link opens the options page.
   let { s } = await open();
   s = await setSource('content', true);
-  check(s.content.disabled && !s.content.checked && s.accessNote && s.enable, 'contents: no access -> Contents locked with Enable in Settings', brief(s));
+  check(s.content.disabled && !s.content.checked && !s.caption && s.enable, 'contents: no access -> Contents locked with Enable in Settings, no caption', brief(s));
   await x.markOptions();
   s = await press(['Shift_L', 'Tab']);
   for (let i = 0; i < 4 && s.focus !== 'enable-content'; i++) s = await press(['Shift_L', 'Tab']);
@@ -288,7 +288,7 @@ async function contentFlow(ctx) {
   const hitsBefore = kinds.map(name => hits.get(pathOf(url[name])) || 0);
 
   ({ s } = await open());
-  check(!s.content.disabled && !s.accessNote && !s.enable && !s.content.checked, 'contents: with access Contents is available, still off, no Settings link', brief(s));
+  check(!s.content.disabled && !s.caption && !s.enable && !s.content.checked, 'contents: with access Contents is available, still off, no Settings link', brief(s));
   await setSource('content', true);
   await a.type(needle);
   const first = await ctx.state();
@@ -520,7 +520,7 @@ async function privateFlow(ctx) {
     check(kind === 'overlay' && first.rows.length === 2 && first.rows.every(r => [privContent, privVisit].includes(r.url)),
       'private: shortcut over a private page opens the overlay listing only private tabs', { kind, state: brief(first) });
     let s = await t.setSource('history', true);
-    check(s.history.disabled && !s.history.checked && s.historyNote && !s.content.disabled && !s.accessNote && !s.enable,
+    check(s.history.disabled && !s.history.checked && s.historyNote && !s.content.disabled && !s.caption && !s.enable,
       'private: pressing History leaves it off with its note; Contents is available with website access', brief(s));
     await p.type(tok);
     await t.settle(s => s.query === tok && s.busy === 'false', 4000);

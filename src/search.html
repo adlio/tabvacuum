@@ -28,7 +28,7 @@
     <!-- One tab stop; arrow keys move between sources (R15). -->
     <div id="sources" class="sources" role="toolbar" aria-label="Search sources">
         <button id="source-tabs" class="source" type="button" data-source="tabs" aria-pressed="false" tabindex="0" aria-describedby="source-tabs-count"><svg class="source-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><rect x="1.5" y="3.5" width="13" height="10" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M1.5 6.5h13" stroke="currentColor" stroke-width="1.5"/></svg><span class="source-label">Tabs</span><span class="source-on" aria-hidden="true">On</span><span id="source-tabs-badge" class="source-count" aria-hidden="true"></span><span id="source-tabs-count" class="sr-only"></span></button>
-        <button id="source-bookmarks" class="source" type="button" data-source="bookmarks" aria-pressed="false" tabindex="-1" aria-describedby="source-bookmarks-count"><svg class="source-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M4 2.5h8v11l-4-3-4 3z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg><span class="source-label">Bookmarks</span><span class="source-on" aria-hidden="true">On</span><span id="source-bookmarks-badge" class="source-count" aria-hidden="true"></span><span id="bookmarks-new" class="source-new" hidden>New</span><span id="source-bookmarks-count" class="sr-only"></span></button>
+        <button id="source-bookmarks" class="source" type="button" data-source="bookmarks" aria-pressed="false" tabindex="-1" aria-describedby="source-bookmarks-count"><svg class="source-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M4 2.5h8v11l-4-3-4 3z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg><span class="source-label">Bookmarks</span><span class="source-on" aria-hidden="true">On</span><span id="source-bookmarks-badge" class="source-count" aria-hidden="true"></span><span id="source-bookmarks-count" class="sr-only"></span></button>
         <button id="source-history" class="source" type="button" data-source="history" aria-pressed="false" tabindex="-1" aria-describedby="source-history-count"><svg class="source-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 4.5V8l2.5 1.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg><span class="source-label">History</span><span class="source-on" aria-hidden="true">On</span><span id="source-history-badge" class="source-count" aria-hidden="true"></span><span id="source-history-count" class="sr-only"></span></button>
         <button id="source-content" class="source" type="button" data-source="content" aria-pressed="false" tabindex="-1" aria-describedby="source-content-count"><svg class="source-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M3.5 2.5h6l3 3v8h-9z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M5.5 8h5M5.5 10.5h5" stroke="currentColor" stroke-width="1.5"/></svg><span class="source-label">Contents</span><span class="source-on" aria-hidden="true">On</span><span id="source-content-badge" class="source-count" aria-hidden="true"></span><span id="source-content-count" class="sr-only"></span></button>
         <button id="save-default" class="source-save" type="button" tabindex="-1" hidden>Save as default</button>
@@ -36,16 +36,14 @@
     <div id="source-access" class="source-access" hidden>
       <p id="history-private-note" class="source-note" hidden>History isn't searched in private windows.</p>
       <div id="bookmarks-access" class="access-row" hidden>
-        <button id="enable-bookmarks" class="action" type="button" aria-describedby="bookmarks-access-note">Allow bookmarks</button>
-        <p id="bookmarks-access-note" class="source-note">Search only reads bookmarks; the browser's prompt also mentions changing them.</p>
+        <button id="enable-bookmarks" class="action" type="button">Allow bookmarks</button>
       </div>
       <div id="content-access" class="access-row" hidden>
-        <button id="enable-content" class="action" type="button" aria-describedby="content-access-note">Enable in Settings</button>
-        <p id="content-access-note" class="source-note">Contents requires website access; sleeping tabs stay asleep. Opens Settings in a new tab.</p>
+        <button id="enable-content" class="action" type="button">Enable in Settings</button>
       </div>
     </div>
     <p class="source-line"><span id="source-status" role="status" aria-live="polite"></span></p>
-    <div class="list-heading">
+    <div id="list-heading" class="list-heading">
       <span class="heading-text">
         <span id="list-label">Recent tabs</span>
         <span id="result-count"></span>

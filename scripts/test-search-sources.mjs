@@ -36,9 +36,10 @@ const STATE = `
     tabs: source('tabs'), bookmarks: source('bookmarks'), history: source('history'), content: source('content'),
     chip: shown($('scope-chip')) ? $('scope-chip-label').textContent : null, list: shown($('scope-list')) ? [...$('scope-list').children].map(o => o.dataset.scope) : [],
     access: shown($('source-access')), enable: shown($('enable-bookmarks')) ? $('enable-bookmarks').textContent : null,
-    note: $('bookmarks-access-note').textContent, message: shown($('message')) ? $('message').textContent : '',
+    captions: [...document.querySelectorAll('#source-access .source-note:not(#history-private-note), #bookmarks-access-note, #content-access-note')].filter(shown).map(el => el.textContent),
+    heading: shown($('list-heading')), privateNote: shown($('history-private-note')), message: shown($('message')) ? $('message').textContent : '',
     include: shown($('include-line')), save: shown($('save-default')), tip: shown($('tip')) ? $('tip').textContent : null,
-    newMark: shown($('bookmarks-new')), select: shown($('select-toggle')), placeholder: $('query').placeholder,
+    newMark: Boolean($('bookmarks-new')) || /\bNew\b/.test($('source-bookmarks').textContent), select: shown($('select-toggle')), placeholder: $('query').placeholder,
     busy: $('results').getAttribute('aria-busy'), ariaControls: $('query').getAttribute('aria-controls') };`;
 
 export const brief = s => (!s?.tabs ? s : { focus: s.focus, mode: s.mode, query: s.query, chip: s.chip, list: s.list,
@@ -87,13 +88,26 @@ export function tools(a) {
     await a.type(text);
     return state();
   }
-  return { state, press, settle, open, dismiss, toQuery, toSource, setSource, typeKeys, visible };
+  // Key by key onto what is there: a.type clears with Backspace, which would remove a chip.
+  async function append(text) {
+    for (const character of text) await a.keys([character === ' ' ? 'space' : character]);
+    await sleep(150);
+    return state();
+  }
+  return { state, press, settle, open, dismiss, toQuery, toSource, setSource, typeKeys, append, visible };
 }
 
 export async function runSourceSearch(a) {
   const ctx = { a, y: a.sources, check: a.check, ...tools(a), tk: token('bk'), created: [], seeded: [] };
   const video = a.record('search-sources.mp4');
   try {
+    // --locked-repeat=N: only the locked-chip grant check, N times (flaky-timing hunts).
+    const repeat = Number(process.argv.find(arg => arg.startsWith('--locked-repeat='))?.split('=')[1]);
+    if (repeat > 0) {
+      const label = ctx.y.promptInOverlay ? 'Allow bookmarks' : 'Enable in Settings';
+      for (let i = 0; i < repeat; i++) { console.log(`INFO locked repeat ${i + 1}/${repeat}`); await lockedScope(ctx, label); }
+      return;
+    }
     await permissionFlow(ctx);
     await bookmarkFlow(ctx);
     await scopeFlow(ctx);
@@ -121,9 +135,8 @@ async function permissionFlow(ctx) {
   s = await toSource('bookmarks');
   s = await press(['space']);
   const wantLabel = y.promptInOverlay ? 'Allow bookmarks' : 'Enable in Settings';
-  check(s.access && s.enable === wantLabel && !s.bookmarks.on && /Search only reads bookmarks/.test(s.note) &&
-    (y.promptInOverlay || /Opens Settings in a new tab\./.test(s.note)),
-  `permission (overlay): pressing Bookmarks offers "${wantLabel}" and says Search only reads bookmarks`, brief(s));
+  check(s.access && s.enable === wantLabel && !s.bookmarks.on && !s.captions.length && !s.newMark,
+  `permission (overlay): pressing Bookmarks offers "${wantLabel}" with no caption under the source row and no "New" mark`, brief(s));
   // No earlier flow presses Bookmarks, so this is its first press in the profile.
   check(s.tip === 'Tip: type @b to search only bookmarks', 'tips: the first press of Bookmarks shows its one-time tip', s.tip);
   s = await press(['Shift_L', 'Tab']);
@@ -141,6 +154,7 @@ async function permissionFlow(ctx) {
     await dismiss();
     const revoked = await y.settings('revoke');
     check(!(await y.permitted()), 'permission: Remove bookmark access in Settings revokes the grant', revoked);
+    await lockedScope(ctx, wantLabel);
   } else {
     await y.markOptions();
     await a.keys(['Return']);
@@ -156,6 +170,7 @@ async function permissionFlow(ctx) {
     await dismiss();
     const revoked = await y.settings('revoke');
     check(!(await y.permitted()), 'permission: Remove bookmark access in Settings revokes the grant', revoked);
+    await lockedScope(ctx, wantLabel);
   }
   // The standalone window: its page has the permissions API in both browsers.
   await a.navigateOrigin('about:blank');
@@ -261,6 +276,60 @@ async function bookmarkFlow(ctx) {
   ctx.u = u;
 }
 
+// "@b" + Tab without access: the chip shows only the access action, with no
+// tab rows and Tabs off; granting lists the bookmark matching the same query,
+// and Search reopens normally afterwards.
+export async function lockedScope(ctx, wantLabel) {
+  const { a, y, check, open, dismiss, press, settle, typeKeys, append } = ctx;
+  const word = token('lg');
+  const url = `https://locked.example/${word}/grant`;
+  // Firefox seeds through Places; Chromium through the bookmarks API, which needs access for a moment.
+  const withAccess = async fn => fn().catch(async () => { await y.settings('grant'); return fn(); });
+  const seeded = await withAccess(() => y.seed([{ title: `Grantee ${word}`, url }]));
+  if (await y.permitted()) await y.settings('revoke');
+  try {
+    let { s } = await open();
+    s = await typeKeys('@b');
+    s = await press(['Tab']);
+    check(s.chip === 'Only bookmarks' && s.query === '' && s.focus === 'query', 'scope: "@b" then Tab picks Only bookmarks, as Enter does', brief(s));
+    await append(word);
+    s = await settle(st => st.query === word && st.busy === 'false');
+    const none = ['tabs', 'bookmarks', 'history', 'content'].every(n => !s[n].on);
+    check(s.chip === 'Only bookmarks' && !s.rows.length && none && !s.heading && !s.message && !s.include && s.access && s.enable === wantLabel
+      && !s.captions.length && !s.bookmarks.count && !s.history.count,
+    `locked scope: "Only bookmarks" without access lists no tabs, marks no source On, and shows only "${wantLabel}"`, { s: brief(s), heading: s.heading });
+    await a.shot('sources-locked-scope', '"Only bookmarks" chip without bookmark access: only the access action shows');
+    s = await press(['Tab']);
+    check(s.focus === 'enable-bookmarks', 'locked scope: Tab from the query reaches the access action', brief(s));
+    const listed = st => st?.bookmarks.on && st.busy === 'false' && st.rows.length === 1 && st.rows[0].url === url;
+    if (y.promptInOverlay) {
+      await a.keys(['Return']);
+      const allowed = await y.answer('allow');
+      s = await settle(listed, 8000);
+      check((allowed.shown || allowed.regranted) && listed(s) && !s.tabs.on && s.chip === 'Only bookmarks' && s.query === word && !s.access,
+        'locked scope: allowing access lists the bookmark matching the same query, with no retyping', { allowed, s: brief(s) });
+    } else {
+      await y.markOptions();
+      await a.keys(['Return']);
+      await until(() => y.optionsOpened(), 'settings opened', 6000).catch(() => false);
+      await y.closeOptions();
+      await y.settings('grant');
+      await a.focus(a.originUrl);
+      s = await settle(listed, 8000);
+      check(listed(s) && !s.tabs.on && s.chip === 'Only bookmarks' && s.query === word && !s.access,
+        'locked scope: granting in Settings and returning lists the bookmark matching the same query, with no retyping', brief(s));
+    }
+    await dismiss();
+    ({ s } = await open());
+    check(s && s.focus === 'query' && s.tabs.on && !s.chip, 'locked scope: after the grant, Search closes and reopens normally', brief(s));
+    await dismiss();
+  } finally {
+    await withAccess(() => y.unseed(seeded)).catch(() => {});
+  }
+  await y.settings('revoke');
+  check(!(await y.permitted()), 'locked scope: access revoked again for the next step');
+}
+
 async function scopeFlow(ctx) {
   const { a, check, tk, open, dismiss, settle, press, typeKeys, state } = ctx;
   let { s } = await open();
@@ -285,6 +354,14 @@ async function scopeFlow(ctx) {
   s = await typeKeys('@b ');
   s = await press(['BackSpace']);
   check(!s.chip && s.query === '@b ', 'scope: Backspace right after converting restores the typed "@b "', brief(s));
+  // Tab picks the highlighted word; a space converts only whole words and short forms.
+  await a.type('');
+  s = await typeKeys('@book');
+  s = await press(['Tab']);
+  check(s.chip === 'Only bookmarks' && s.bookmarks.on && !s.tabs.on && s.focus === 'query', 'scope: "@book" then Tab picks Only bookmarks', brief(s));
+  s = await press(['BackSpace']);
+  s = await typeKeys('@bo ');
+  check(!s.chip && s.query === '@bo ', 'scope: "@bo " (not a word or short form) stays text', brief(s));
   // Real queries that start with @ stay text.
   s = await typeKeys('@types ');
   check(!s.chip && s.query === '@types ' && !s.list.length, 'scope: "@types " stays literal text with no list', brief(s));

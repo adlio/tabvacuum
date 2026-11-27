@@ -9,6 +9,7 @@ import { validateTabIds } from './search-service.js';
 
 const TOKEN = /^[A-Za-z0-9_-]{43}$/;
 export const UNCLAIMED_MS = 60_000;
+const OPTIONS_OPEN_WAIT_MS = 1000;
 export const SESSION_MS = 60 * 60_000;
 export const CLAIM_TIMEOUT_MS = 4000;
 // Closing the tab that hosts an embedded search first moves search elsewhere.
@@ -691,12 +692,11 @@ export function createSearchLauncher(api, search, {
     return { ok: true, defaultSources: await search.saveDefaultSources(message.sources) };
   }
 
-  // One-time tips and the Bookmarks "New" mark (R15).
+  // One-time tips (R15).
   async function noteSearchHints(message, sender) {
     await authorize(message, sender);
     const hints = message.hints && typeof message.hints === 'object' ? message.hints : {};
-    return search.noteHints({ opened: hints.opened === true, usedBookmarks: hints.usedBookmarks === true,
-      tip: typeof hints.tip === 'string' ? hints.tip : undefined });
+    return search.noteHints({ tip: typeof hints.tip === 'string' ? hints.tip : undefined });
   }
 
   // Stops this search's source scan; carries no query.
@@ -707,9 +707,14 @@ export function createSearchLauncher(api, search, {
   }
 
   // Shows the options page, where the user can grant access. Grants nothing itself.
+  // Authorized in the queue, opened outside it: Firefox can leave the
+  // openOptionsPage promise pending, which would stall every later search
+  // command (refreshes, Escape, the next launch) behind it.
   async function openSearchPermissions(message, sender) {
-    await authorize(message, sender);
-    await api.runtime.openOptionsPage();
+    await serial(() => authorize(message, sender));
+    const opening = Promise.resolve(api.runtime.openOptionsPage());
+    // A quick failure is reported; a promise that never settles counts as opened.
+    await withTimeout(opening, OPTIONS_OPEN_WAIT_MS).catch(error => { if (error?.message !== 'Timed out.') throw error; });
     return { ok: true };
   }
 
@@ -781,7 +786,7 @@ export function createSearchLauncher(api, search, {
     activateBookmarkResult, saveSearchDefault, noteSearchHints, cancelSearchSources,
   };
   // Handlers that serialize their own critical sections.
-  const unqueued = new Set(['querySearchSources', 'closeSearchTabs', 'searchHandoffReady']);
+  const unqueued = new Set(['querySearchSources', 'closeSearchTabs', 'searchHandoffReady', 'openSearchPermissions']);
 
   /** Handles search commands; returns undefined for anything else. */
   function handleMessage(message, sender) {
