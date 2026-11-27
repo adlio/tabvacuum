@@ -10,6 +10,29 @@ and the auto-generated GitHub release notes for each tag.
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-26
+
+### Added
+- An **Ask first** mode for duplicate-tab prevention. With **Prevent duplicate
+  tabs** on, Settings > Duplicate Detection now has a **When it happens** choice:
+  **Switch to the open tab** (the default, so nothing changes if you already use
+  it) or **Ask first** ([#20], [#22]).
+- In Ask first mode, a new tab that would have been switched instead shows
+  "Already open: <title>" with two buttons. **Switch** has focus, so Enter takes
+  you to the open copy and closes the new tab. **Keep both** loads the page in
+  the new tab and leaves both open.
+- A duplicate that opens in the background gets its prompt there, and focus stays
+  where it is. Everything Switch mode already keeps (tabs opened from their match,
+  a reopen within a minute, bulk opens, restored tabs, pages opened by Search and
+  the **Never on these sites** list) gets no prompt.
+
+### Safety
+- Ask first never closes a tab without asking. If the open copy closes or moves to
+  another page while the prompt shows, or the prompt can't be shown, the new tab
+  keeps its page.
+- Duplicate-tab prevention is still off by default. No new permissions are
+  requested.
+
 ## [0.8.0] - 2026-11-25
 
 ### Added
@@ -128,7 +151,8 @@ and the auto-generated GitHub release notes for each tag.
   sort-tabs actions; frecency sort; ES-module background script; and the
   packaging scripts for Firefox and Chrome builds.
 
-[Unreleased]: https://github.com/adlio/tabvacuum/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/adlio/tabvacuum/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/adlio/tabvacuum/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/adlio/tabvacuum/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/adlio/tabvacuum/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/adlio/tabvacuum/compare/v0.5.3...v0.6.0
@@ -142,6 +166,7 @@ and the auto-generated GitHub release notes for each tag.
 [0.3.1]: https://github.com/adlio/tabvacuum/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/adlio/tabvacuum/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/adlio/tabvacuum/releases/tag/v0.2.0
+[#22]: https://github.com/adlio/tabvacuum/pull/22
 [#21]: https://github.com/adlio/tabvacuum/pull/21
 [#20]: https://github.com/adlio/tabvacuum/issues/20
 [#17]: https://github.com/adlio/tabvacuum/pull/17
