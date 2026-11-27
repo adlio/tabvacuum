@@ -126,9 +126,9 @@ describe('0.9.0 brand surfaces', () => {
     const pkg = json('package.json');
     const lock = json('package-lock.json');
     expect(pkg.name).toBe('tabvacuum');
-    expect(pkg.version).toBe('0.10.0');
-    expect([lock.name, lock.version]).toEqual(['tabvacuum', '0.10.0']);
-    expect([lock.packages[''].name, lock.packages[''].version]).toEqual(['tabvacuum', '0.10.0']);
+    expect(pkg.version).toBe('0.10.1');
+    expect([lock.name, lock.version]).toEqual(['tabvacuum', '0.10.1']);
+    expect([lock.packages[''].name, lock.packages[''].version]).toEqual(['tabvacuum', '0.10.1']);
     expect(lock.packages[''].devDependencies).toEqual(pkg.devDependencies);
   });
 

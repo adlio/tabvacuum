@@ -58,6 +58,9 @@ To change a shortcut, open Chrome's Extensions page and choose Keyboard shortcut
 Support link (both stores)
 https://github.com/adlio/tabvacuum/issues
 
+Release notes (0.10.1)
+Tab now completes an @ word in Search, so @book then Tab searches only bookmarks. Searching only a source that still needs access shows just its Allow or Enable in Settings button, then searches it as soon as access is granted. In Firefox, Search no longer stops responding after Enable in Settings. The "New" mark and the caption under the source buttons are gone. No new permissions.
+
 Release notes (0.10.0)
 Search can now find bookmarks. Buttons under the search box turn Tabs, Bookmarks, History and Contents on or off, and @ words such as @b and @all switch sources from the keyboard. Sources that are off show how many more results they would find, and Save as default keeps your choice. Search still starts with Tabs only after upgrading. Bookmarks use a new optional bookmarks permission, asked for only when you first turn Bookmarks on; Search only reads bookmarks and keeps them on your device.
 

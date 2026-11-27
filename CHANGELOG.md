@@ -10,6 +10,24 @@ and the auto-generated GitHub release notes for each tag.
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-11-27
+
+### Changed
+- Tab now completes an `@` word in Search: type `@book`, press Tab, and Search
+  shows only bookmarks ([#26]).
+- A scope label such as "Only bookmarks" for a source that still needs access
+  now shows only its Allow bookmarks or Enable in Settings button, with no
+  results from other sources. Once you grant access, Search searches that
+  source for what you typed ([#26]).
+
+### Fixed
+- Firefox: Search no longer stops responding after you press Enable in
+  Settings, and it opens normally again afterwards ([#26]).
+
+### Removed
+- The "New" mark on the Bookmarks button and the caption under the source
+  buttons ([#26]).
+
 ## [0.10.0] - 2026-11-27
 
 ### Added
@@ -209,7 +227,8 @@ and the auto-generated GitHub release notes for each tag.
   sort-tabs actions; frecency sort; ES-module background script; and the
   packaging scripts for Firefox and Chrome builds.
 
-[Unreleased]: https://github.com/adlio/tabvacuum/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/adlio/tabvacuum/compare/v0.10.1...HEAD
+[0.10.1]: https://github.com/adlio/tabvacuum/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/adlio/tabvacuum/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/adlio/tabvacuum/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/adlio/tabvacuum/compare/v0.7.0...v0.8.0
@@ -225,6 +244,7 @@ and the auto-generated GitHub release notes for each tag.
 [0.3.1]: https://github.com/adlio/tabvacuum/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/adlio/tabvacuum/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/adlio/tabvacuum/releases/tag/v0.2.0
+[#26]: https://github.com/adlio/tabvacuum/pull/26
 [#25]: https://github.com/adlio/tabvacuum/pull/25
 [#24]: https://github.com/adlio/tabvacuum/issues/24
 [#22]: https://github.com/adlio/tabvacuum/pull/22
