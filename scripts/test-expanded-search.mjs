@@ -1,4 +1,4 @@
-// Real-browser History and Page-contents flows for the Search in menu, shared by
+// Real-browser History and Page-contents flows for the source toolbar (R15), shared by
 // the Firefox and Chromium harnesses. Uses the closing adapter (see
 // test-search-closing.mjs) plus `a.expanded`:
 //
@@ -37,10 +37,11 @@ const STATE = `
     role: g.getAttribute('role'),
     heading: [...g.children].filter(c => !c.classList.contains('result') && shown(c)).map(c => c.textContent.trim()).join(' '),
     rows: [...g.querySelectorAll('.result')].map(rowOf) }));
-  const box = id => ({ checked: $(id).checked, disabled: $(id).disabled });
+  // A source button: pressed is "checked"; one that needs access is "disabled".
+  const box = id => ({ checked: $(id).getAttribute('aria-pressed') === 'true', disabled: $(id).dataset.state === 'locked' });
   return { focus: document.activeElement?.id || document.activeElement?.localName || null, mode: $('palette').dataset.mode,
-    query: $('query').value, groups, rows: groups.flatMap(g => g.rows), menu: shown($('source-menu')),
-    expanded: $('search-in').getAttribute('aria-expanded'), history: box('source-history'), content: box('source-content'),
+    query: $('query').value, groups, rows: groups.flatMap(g => g.rows), menu: false, access: shown($('source-access')),
+    tabs: box('source-tabs'), bookmarks: box('source-bookmarks'), history: box('source-history'), content: box('source-content'),
     enable: shown($('enable-content')), accessNote: shown($('content-access-note')), historyNote: shown($('history-private-note')), status: $('source-status').textContent,
     sources: $('palette').dataset.sources, busy: $('results').getAttribute('aria-busy') };`;
 
@@ -52,13 +53,13 @@ const FIT = `
     return c[0] * 0.2126 + c[1] * 0.7152 + c[2] * 0.0722;
   };
   const bad = [], low = [], checked = new Set();
-  for (const el of document.querySelectorAll('#search-in, #source-menu, #source-menu .source-option, #source-menu .source-note, #enable-content')) {
+  for (const el of document.querySelectorAll('#sources, #sources .source, #source-access .source-note, #enable-content, #enable-bookmarks, #scope-chip, #scope-list')) {
     if (!shown(el)) continue;
     const r = el.getBoundingClientRect();
     if (r.left < -0.5 || r.top < -0.5 || r.right > innerWidth + 0.5 || r.bottom > innerHeight + 0.5) bad.push((el.id || el.className) + ': ' + [r.left, r.top, r.right, r.bottom].map(Math.round));
   }
   if (document.documentElement.scrollWidth > innerWidth) bad.push('horizontal overflow');
-  const selectors = ['#search-in', '#source-menu .source-option', '#source-menu .source-note', '.source-always', '#enable-content',
+  const selectors = ['#sources .source-label', '#sources .source-on', '#sources .source-count', '#save-default', '#source-access .source-note', '#enable-content', '#enable-bookmarks', '#scope-chip-label', '.scope-option', '.path',
     '#source-status', '.snippet', '.result-group .title', '.result-group .url', '.badge', '#result-count', '.hint', 'kbd'];
   for (const selector of selectors) for (const el of document.querySelectorAll(selector)) {
     if (!shown(el) || !el.textContent.trim() || el.disabled) continue;
@@ -96,22 +97,19 @@ function tools(a) {
   }
   async function toQuery() {
     let s = await state();
-    for (let i = 0; i < 8 && s.focus !== 'query'; i++) s = await press([s.menu ? 'Escape' : 'Tab']);
+    for (let i = 0; i < 8 && s.focus !== 'query'; i++) s = await press(['Tab']);
     return s;
   }
+  // Shift+Tab from the query reaches the source toolbar (its last stop).
   async function openMenu() {
-    let s = await toQuery();
-    s = await press(['Shift_L', 'Tab']);
-    if (s.focus === 'search-in' && !s.menu) s = await press(['Return']);
-    return s;
+    await toQuery();
+    return press(['Shift_L', 'Tab']);
   }
-  // Keyboard only: Search in -> Tab to the checkbox -> Space -> Escape -> Tab back to the query.
+  // Keyboard only: query -> Shift+Tab to the toolbar -> arrows -> Space -> Tab back to the query.
   async function setSource(name, on) {
-    let s = await state();
-    if (!s.menu) s = await openMenu();
-    for (let i = 0; i < 6 && s.focus !== `source-${name}`; i++) s = await press(['Tab']);
+    let s = await openMenu();
+    for (let i = 0; i < 6 && s.focus !== `source-${name}`; i++) s = await press(['Right']);
     if (s.focus === `source-${name}` && s[name].checked !== on) s = await press(['space']);
-    await press(['Escape']);
     return toQuery();
   }
   return { state, press, settle, open, dismiss, toQuery, openMenu, setSource, visible };
@@ -138,37 +136,36 @@ export async function runExpandedSearch(a) {
 async function defaults({ a, x, check, state, press, open, dismiss, toQuery }) {
   const { kind, s } = await open();
   check(kind === 'overlay', 'defaults: shortcut opens the overlay', kind);
-  check(!s.history.checked && !s.content.checked && !s.menu && s.expanded === 'false' && s.sources === 'tabs',
-    'defaults: fresh launch has History and Contents off and the menu closed', brief(s));
+  check(s.tabs.checked && !s.bookmarks.checked && !s.history.checked && !s.content.checked && !s.access && s.sources === 'tabs',
+    'defaults: fresh launch searches Tabs only, with no access panel', brief(s));
   check(s.rows.length > 0 && s.rows.every(r => !r.history && !r.snippet) && !s.status, 'defaults: initial list is open tabs only', brief(s));
   let t = await press(['Shift_L', 'Tab']);
-  check(t.focus === 'search-in' && !t.menu && t.mode === 'search', 'defaults: Shift+Tab from the query reaches Search in', brief(t));
-  t = await press(['Return']);
-  check(t.menu && t.expanded === 'true' && t.focus === 'search-in', 'defaults: Enter on Search in opens the source menu', brief(t));
-  const granted = await x.permitted();
-  check(!granted && t.content.disabled && t.accessNote && t.enable && !t.history.disabled,
-    'defaults: without website access Contents is disabled with a Settings link; History is available', brief(t));
+  check(t.focus === 'source-tabs' && t.mode === 'search', 'defaults: Shift+Tab from the query reaches the source toolbar', brief(t));
   const order = [];
-  for (let i = 0; i < 4; i++) order.push((await press(['Tab'])).focus);
-  check(JSON.stringify(order) === JSON.stringify(['source-history', 'enable-content', 'search-in', 'source-history']),
-    'defaults: Tab cycles the available menu controls and the trigger', order);
+  for (let i = 0; i < 4; i++) order.push((await press(['Right'])).focus);
+  check(same(order, ['source-bookmarks', 'source-history', 'source-content', 'source-tabs']), 'defaults: Right arrow moves along the toolbar and wraps', order);
+  t = await press(['Left']);
+  t = await press(['Left']);
+  check(t.focus === 'source-history', 'defaults: Left arrow moves back', brief(t));
   t = await press(['space']);
-  check(t.history.checked && t.focus === 'source-history', 'defaults: Space checks History from the keyboard', brief(t));
+  check(t.history.checked && t.focus === 'source-history', 'defaults: Space turns History on from the keyboard', brief(t));
+  t = await press(['Return']);
+  check(!t.history.checked, 'defaults: Enter turns History off again', brief(t));
+  t = await press(['Right']);
   t = await press(['space']);
-  check(!t.history.checked, 'defaults: Space unchecks History again', brief(t));
-  t = await press(['Escape']);
-  check(!t.menu && t.focus === 'search-in' && t.mode === 'search' && await x.permitted() === false && (await a.uiCount()).overlays === 1,
-    'defaults: Escape closes only the menu and returns focus to Search in', brief(t));
-  // From the tab menu: Escape closes the menu before stepping back a mode.
+  const granted = await x.permitted();
+  check(!granted && !t.content.checked && t.content.disabled && t.access && t.enable && t.accessNote,
+    'defaults: without website access, pressing Contents shows Enable in Settings instead', brief(t));
+  t = await press(['Tab']);
+  check(t.focus === 'query', 'defaults: Tab from the toolbar returns to the query', brief(t));
+  t = await press(['Shift_L', 'Tab']);
+  t = await press(['Shift_L', 'Tab']);
+  check(t.focus === 'enable-content', 'defaults: the enable action is in the Tab order before the toolbar', brief(t));
   await toQuery();
   t = await press(['Tab']);
-  for (let i = 0; i < 4 && t.focus !== 'search-in'; i++) t = await press(['Tab']);
-  const before = t.mode;
-  t = await press(['Return']);
+  check(t.mode === 'tabs', 'defaults: Tab from the query still enters the tab menu', brief(t));
   t = await press(['Escape']);
-  check(before === 'tabs' && !t.menu && t.mode === 'tabs' && t.focus === 'search-in', 'defaults: in the tab menu, Escape closes the source menu first', brief(t));
-  t = await press(['Escape']);
-  check(t.mode === 'search' && t.focus === 'query' && (await a.uiCount()).overlays === 1, 'defaults: next Escape steps back to search, still open', brief(t));
+  check(t.mode === 'search' && t.focus === 'query' && (await a.uiCount()).overlays === 1, 'defaults: Escape steps back to search, still open', brief(t));
   await dismiss();
   check((await a.uiCount()).overlays + (await a.uiCount()).windows === 0, 'defaults: search dismissed');
 }
@@ -258,10 +255,11 @@ async function contentFlow(ctx) {
 
   // (1) Before access: the Settings link opens the options page.
   let { s } = await open();
-  s = await openMenu();
-  check(s.menu && s.content.disabled && s.accessNote && s.enable, 'contents: no access -> Contents disabled with Enable in Settings', brief(s));
+  s = await setSource('content', true);
+  check(s.content.disabled && !s.content.checked && s.accessNote && s.enable, 'contents: no access -> Contents locked with Enable in Settings', brief(s));
   await x.markOptions();
-  for (let i = 0; i < 4 && s.focus !== 'enable-content'; i++) s = await press(['Tab']);
+  s = await press(['Shift_L', 'Tab']);
+  for (let i = 0; i < 4 && s.focus !== 'enable-content'; i++) s = await press(['Shift_L', 'Tab']);
   await a.keys(['Return']);
   const shownSettings = await until(() => x.optionsOpened(), 'settings opened', 6000).catch(() => false);
   check(s.focus === 'enable-content' && shownSettings, 'contents: Enable in Settings opens the options page', brief(s));
@@ -290,7 +288,6 @@ async function contentFlow(ctx) {
   const hitsBefore = kinds.map(name => hits.get(pathOf(url[name])) || 0);
 
   ({ s } = await open());
-  s = await openMenu();
   check(!s.content.disabled && !s.accessNote && !s.enable && !s.content.checked, 'contents: with access Contents is available, still off, no Settings link', brief(s));
   await setSource('content', true);
   await a.type(needle);
@@ -319,10 +316,9 @@ async function contentFlow(ctx) {
     await a.scheme(scheme);
     s = await openMenu();
     await sleep(300);
-    await a.shot(`expanded-source-menu-${scheme}`, `Search in menu open, both sources on, ${scheme}`);
+    await a.shot(`expanded-source-menu-${scheme}`, `Source toolbar focused, History and Contents on, ${scheme}`);
     fit = await a.ui(FIT);
-    check(s.menu && fit.ok, `layout: source menu fits and meets 4.5:1 (${scheme})`, fit);
-    await press(['Escape']);
+    check(s.focus.startsWith('source-') && fit.ok, `layout: source toolbar fits and meets 4.5:1 (${scheme})`, fit);
     await ctx.toQuery();
   }
   await a.scheme(null);
@@ -355,8 +351,8 @@ async function contentFlow(ctx) {
       if (layout.shot) await a.shot(`expanded-${layout.shot}`, `${layout.name}: both sources with snippet`);
       s = await openMenu();
       fit = await a.ui(FIT);
-      check(s.menu && fit.ok, `layout: ${layout.name} source menu fits`, fit);
-      if (layout.shot) await a.shot(`expanded-${layout.shot}-menu`, `${layout.name}: source menu open`);
+      check(s.focus.startsWith('source-') && fit.ok, `layout: ${layout.name} source toolbar fits`, fit);
+      if (layout.shot) await a.shot(`expanded-${layout.shot}-menu`, `${layout.name}: source toolbar focused`);
       await dismiss();
     } finally {
       await layout.exit();
@@ -387,10 +383,8 @@ async function contentFlow(ctx) {
   await x.settingsClose();
   check(revoked.state === 'Not allowed' && !(await x.permitted()), 'permissions: Remove website access revokes the grant', revoked);
   ({ s } = await open());
-  s = await openMenu();
-  check(s.content.disabled && !s.content.checked && s.enable, 'permissions: after revoke Contents is disabled with the Settings link again', brief(s));
-  await press(['Escape']);
-  await ctx.toQuery();
+  s = await setSource('content', true);
+  check(s.content.disabled && !s.content.checked && s.enable, 'permissions: after revoke Contents is locked with the Settings link again', brief(s));
   await a.type(needle);
   s = await settle(s => s.rows.length >= 1);
   check(s.rows.every(r => !r.snippet) && !s.rows.some(r => r.url === url.main2), 'permissions: after revoke no content snippets remain', brief(s));
@@ -525,14 +519,9 @@ async function privateFlow(ctx) {
     const { kind, s: first } = await t.open(privContent);
     check(kind === 'overlay' && first.rows.length === 2 && first.rows.every(r => [privContent, privVisit].includes(r.url)),
       'private: shortcut over a private page opens the overlay listing only private tabs', { kind, state: brief(first) });
-    let s = await t.openMenu();
-    check(s.menu && s.history.disabled && !s.history.checked && s.historyNote && !s.content.disabled && !s.accessNote && !s.enable,
-      'private: History is disabled with its note; Contents is available with website access', brief(s));
-    const order = [];
-    for (let i = 0; i < 3; i++) order.push((await t.press(['Tab'])).focus);
-    check(!order.includes('source-history') && order.includes('source-content'), 'private: Tab skips the disabled History checkbox', order);
-    await t.press(['Escape']);
-    await t.setSource('history', true);
+    let s = await t.setSource('history', true);
+    check(s.history.disabled && !s.history.checked && s.historyNote && !s.content.disabled && !s.accessNote && !s.enable,
+      'private: pressing History leaves it off with its note; Contents is available with website access', brief(s));
     await p.type(tok);
     await t.settle(s => s.query === tok && s.busy === 'false', 4000);
     await sleep(1000);

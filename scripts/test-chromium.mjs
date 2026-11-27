@@ -21,9 +21,12 @@ function nativeKeys(...args) {
 // --closing-only runs setup plus the selection/closing flows (scripts/test-search-closing.mjs).
 const ACCEPTANCE_ONLY = process.argv.includes('--acceptance-only');
 const EXPANDED_ONLY = process.argv.includes('--expanded-only');
+// --sources-only runs setup plus the Search sources flows (scripts/test-search-sources.mjs).
+const SOURCES_ONLY = process.argv.includes('--sources-only');
 // --expanded-only runs setup plus the History/Contents flows (scripts/test-expanded-search.mjs).
-const CLOSING_ONLY = EXPANDED_ONLY || process.argv.includes('--closing-only');
+const CLOSING_ONLY = EXPANDED_ONLY || SOURCES_ONLY || process.argv.includes('--closing-only') || process.argv.includes('--verify-only');
 import { runExpandedSearch } from './test-expanded-search.mjs';
+import { runSourceSearch } from './test-search-sources.mjs';
 const { scratch, directory } = await outputDir('tabvacuum-chromium');
 const profile = await mkdtemp(path.join(directory, 'profile-'));
 const site = await startSite();
@@ -579,7 +582,7 @@ try {
     await page.bringToFront();
     frame = await openOverlay(page);
     check(!(await rows(frame)).includes(TITLES['/remote']), 'current-window scope excludes other window', await rows(frame));
-    check(await frame.evaluate(() => [...document.querySelectorAll('select,input[type=checkbox],input[type=range]')].every(el => ['source-history', 'source-content'].includes(el.id))), 'no persistent settings controls in search (only explicit source choices)');
+    check(await frame.evaluate(() => [...document.querySelectorAll('select,input[type=checkbox],input[type=range]')].length === 0), 'no persistent settings controls in search (sources are toggle buttons)');
 
     // Many tabs: every match reachable, highlight scrolls.
     const bulk = await worker.evaluate(async windowId => {
@@ -999,7 +1002,7 @@ try {
             if (focus !== 'query') throw new Error(`type() needs the query focused, not ${focus}`);
             await keys(['Control_L', 'a']);
             await keys(['BackSpace']);
-            for (const character of text) await keys([character]);
+            for (const character of text) await keys([character === ' ' ? 'space' : character]);
             await sleep(150);
           },
           async focus(url) {
@@ -1027,8 +1030,154 @@ try {
         };
       },
     };
-    if (!EXPANDED_ONLY) await runSearchClosing(closing);
-    await runExpandedSearch(closing);
+    // Search-sources adapter (R15): bookmarks and history are created from an extension
+    // page once access is granted; the browser's own permission dialog is answered
+    // with native X keys (Deny has focus; Tab moves to Allow).
+    const readBookmarkOptions = () => opt.evaluate(() => ({ state: document.getElementById('bookmark-access-state').textContent,
+      message: document.getElementById('bookmark-access-message').textContent }));
+    let promptShots = 0;
+    closing.navigateOrigin = async url => {
+      await page.goto(url);
+      await page.bringToFront();
+      await sleep(400);
+    };
+    closing.paste = async text => {
+      await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: base });
+      const helper = await context.newPage();
+      try {
+        await helper.goto(`${base}/remote`);
+        await helper.evaluate(text => navigator.clipboard.writeText(text), text);
+      } finally { await helper.close(); }
+      await closing.focus(ORIGIN);
+      await closing.keys(['Control_L', 'v']);
+      await sleep(400);
+      return true;
+    };
+    closing.sources = {
+      promptInOverlay: true,
+      permitted: () => api(() => chrome.permissions.contains({ permissions: ['bookmarks'] })),
+      markOptions: closing.expanded.markOptions,
+      optionsOpened: closing.expanded.optionsOpened,
+      closeOptions: closing.expanded.closeOptions,
+      async answer(decision) {
+        // The dialog's buttons are briefly disabled after it appears.
+        await sleep(1500);
+        captureDisplay(env, path.join(directory, `bookmark-prompt-${++promptShots}.png`));
+        // Chromium grants an optional permission the user granted before without asking again.
+        if (decision === 'allow' && await closing.sources.permitted()) return { shown: false, regranted: true, method: `no dialog: granted silently; screenshot bookmark-prompt-${promptShots}.png` };
+        nativeKeys(env, decision === 'allow' ? ['Tab'] : ['Escape']);
+        if (decision === 'allow') { await sleep(200); nativeKeys(env, ['Return']); }
+        await sleep(1000);
+        return { shown: true, method: `native X keys to the browser's own dialog; screenshot bookmark-prompt-${promptShots}.png` };
+      },
+      async settings(action) {
+        await closing.expanded.settingsOpen();
+        try {
+          await until(async () => (await readBookmarkOptions()).state !== 'Checking…', 'bookmark settings ready', 5000);
+          if (action === 'revoke') {
+            opt.once('dialog', d => d.accept());
+            await opt.click('#bookmark-access-revoke');
+            await until(async () => /removed/.test((await readBookmarkOptions()).message), 'bookmarks revoked', 5000).catch(() => {});
+          } else {
+            await opt.bringToFront();
+            await opt.click('#bookmark-access-allow');
+            await closing.sources.answer(action === 'grant' ? 'allow' : 'deny');
+            await until(async () => (await readBookmarkOptions()).message !== 'Waiting for your browser…', 'bookmark prompt answered', 5000).catch(() => {});
+          }
+          return readBookmarkOptions();
+        } finally {
+          await closing.expanded.settingsClose();
+        }
+      },
+      seed: items => api(async items => {
+        const make = async (item, parentId) => {
+          if (item.separator) return; // Chromium has no separators.
+          if (item.folder) {
+            const folder = await chrome.bookmarks.create({ parentId, title: item.folder });
+            for (const child of item.children) await make(child, folder.id);
+            return;
+          }
+          await chrome.bookmarks.create({ parentId, title: item.title, url: item.url });
+        };
+        const root = await chrome.bookmarks.create({ parentId: '1', title: `Seed ${Date.now()}` });
+        for (const item of items) await make(item, root.id);
+        return root.id;
+      }, items),
+      unseed: id => api(id => chrome.bookmarks.removeTree(id).then(() => true), id),
+      seedHistory: urls => api(async urls => { for (const url of urls) await chrome.history.addUrl({ url }); return true; }, urls),
+      async treeTiming(count) {
+        const id = await api(async count => {
+          const folder = await chrome.bookmarks.create({ parentId: '2', title: 'Timing' });
+          await Promise.all(Array.from({ length: count }, (_, i) => chrome.bookmarks.create({ parentId: folder.id, title: `Timing ${i}`, url: `https://timing.example/${i}` })));
+          return folder.id;
+        }, count);
+        try {
+          return await api(async () => {
+            const { buildBookmarkIndex } = await import(chrome.runtime.getURL('search-sources-core.js'));
+            const started = performance.now(); const tree = await chrome.bookmarks.getTree(); const ms = Math.round(performance.now() - started);
+            const built = performance.now(); const index = buildBookmarkIndex(tree);
+            return { count: index.length, ms, buildMs: Math.round(performance.now() - built) };
+          });
+        } finally {
+          await api(id => chrome.bookmarks.removeTree(id), id);
+        }
+      },
+      // chrome://extensions/shortcuts writes through the same developerPrivate call.
+      async remap(shortcut) {
+        const manager = await context.newPage();
+        try {
+          await manager.goto('chrome://extensions/shortcuts');
+          const error = await manager.evaluate(({ id, keybinding }) => new Promise(resolve => {
+            chrome.developerPrivate.updateExtensionCommand({ extensionId: id, commandName: 'search-tabs', keybinding },
+              () => resolve(chrome.runtime.lastError?.message ?? null));
+          }), { id: new URL(extOrigin).host, keybinding: shortcut });
+          const now = (await api(() => chrome.commands.getAll())).find(c => c.name === 'search-tabs')?.shortcut;
+          return { applied: !error && now === shortcut, now, error, via: 'developerPrivate.updateExtensionCommand (what chrome://extensions/shortcuts calls)' };
+        } finally { await manager.close(); }
+      },
+      async restoreShortcut() {
+        const manager = await context.newPage();
+        try {
+          await manager.goto('chrome://extensions/shortcuts');
+          await manager.evaluate(id => new Promise(resolve => chrome.developerPrivate.updateExtensionCommand(
+            { extensionId: id, commandName: 'search-tabs', keybinding: 'Ctrl+Shift+Period' }, () => resolve(true))), new URL(extOrigin).host);
+        } finally { await manager.close(); }
+      },
+      pressRemapped: async () => {
+        await page.bringToFront();
+        nativeKeys(env, ['Control_L', 'k'], await windowTitle(page));
+      },
+      async privateWindow(urls, title) {
+        const p = await closing.expanded.privateWindow(urls, title);
+        // Page targets outside Playwright's (normal) context are the incognito ones.
+        p.privateTabs = async () => {
+          const normal = new Set(context.pages().map(pg => pg.url()));
+          return (await targets()).filter(t => t.type === 'page' && !normal.has(t.url)).map(t => t.url);
+        };
+        return p;
+      },
+    };
+    // Independent verification hooks (scripts/test-search-sources-verify.mjs).
+    Object.assign(closing.sources, {
+      browserName: 'chromium',
+      // Runs `(src)(chrome, arg)` in the extension page; CDP evaluation is not bound by the page CSP.
+      ext: (src, arg) => extTab.evaluate(`(${src})(chrome, ${JSON.stringify(arg ?? null)})`),
+      tabsInfo: async () => (await api(() => chrome.tabs.query({}))).map(t => ({ url: t.url || t.pendingUrl, private: t.incognito, selected: t.active })),
+      // Page targets in the incognito browser context (the split worker's tabs).
+      privateUrls: async () => {
+        const all = await targets();
+        const normal = all.find(t => t.type === 'page' && t.url === ORIGIN)?.browserContextId;
+        return all.filter(t => t.type === 'page' && t.browserContextId !== normal).map(t => t.url);
+      },
+    });
+    if (process.argv.includes('--verify-only')) {
+      const { runVerifySearch } = await import('./test-search-sources-verify.mjs');
+      await runVerifySearch(closing);
+    } else {
+    if (!EXPANDED_ONLY && !SOURCES_ONLY) await runSearchClosing(closing);
+    if (!SOURCES_ONLY) await runExpandedSearch(closing);
+    await runSourceSearch(closing);
+    }
   }
 
   await writeFile(path.join(directory, 'screenshots.json'), JSON.stringify(shots, null, 2));

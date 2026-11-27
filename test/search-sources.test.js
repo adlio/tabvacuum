@@ -2,6 +2,8 @@ import { describe, it, expect, vi } from 'vitest';
 import {
   normalizeQuery, normalizeSources, isSafeWebUrl, selectHistory, contentSkipReason, readContentResult,
   mapLimit, withTimeout, MAX_QUERY_CHARS, HISTORY_LIMIT, composeSearchResults,
+  buildBookmarkIndex, searchBookmarkIndex, sourceCounts, scopeWord, scopeSuggestions, scopeSources,
+  normalizeDefaultSources, startingSources, differsFromDefault, BOOKMARK_LIMIT,
 } from '../src/search-sources-core.js';
 import { rankTabs } from '../src/search-core.js';
 
@@ -14,8 +16,10 @@ describe('search source rules', () => {
   });
 
   it('turns a source on only for an explicit true', () => {
-    expect(normalizeSources({ history: true, content: 'yes' })).toEqual({ history: true, content: false });
-    expect(normalizeSources(undefined)).toEqual({ history: false, content: false });
+    expect(normalizeSources({ history: true, content: 'yes', bookmarks: 1 })).toEqual({ tabs: true, bookmarks: false, history: true, content: false });
+    expect(normalizeSources(undefined)).toEqual({ tabs: true, bookmarks: false, history: false, content: false });
+    // Tabs is on unless explicitly off, so a handoff from an older search keeps it.
+    expect(normalizeSources({ tabs: false, bookmarks: true })).toEqual({ tabs: false, bookmarks: true, history: false, content: false });
   });
 
   it.each([
@@ -230,5 +234,169 @@ describe('composeSearchResults', () => {
       { kind: 'tab', key: 'tab:2', matchType: 'content', snippet: 'Invoice #4' },
       { kind: 'tab', key: 'tab:3', matchType: 'history' },
     ]);
+  });
+});
+
+describe('bookmark index (R15)', () => {
+  // Chromium's shape: an unnamed root, then named roots with parentId.
+  const tree = [{ id: '0', title: '', children: [
+    { id: '1', parentId: '0', title: 'Bookmarks bar', children: [
+      { id: '10', parentId: '1', title: 'Work', children: [
+        { id: '11', parentId: '10', title: 'Plan', url: 'https://docs.example/plan', dateAdded: 5 },
+        { id: '12', parentId: '10', title: 'Deep', children: [{ id: '13', parentId: '12', title: 'Deep page', url: 'https://deep.example/', dateAdded: 6 }] },
+      ] },
+      { id: '14', parentId: '1', title: 'Bookmarklet', url: 'javascript:alert(1)' },
+      { id: '15', parentId: '1', title: 'Creds', url: 'https://user:pw@example.org/' },
+      { id: '16', parentId: '1', type: 'separator' },
+      { id: '17', parentId: '1', title: 'Recent', url: 'place:sort=8' },
+      { id: '18', parentId: '1', title: 'Empty folder', children: [] },
+    ] },
+    { id: '2', parentId: '0', title: 'Other bookmarks', children: [
+      { id: '21', parentId: '2', title: 'Plan again', url: 'https://docs.example/plan', dateAdded: 9 },
+      { id: '22', parentId: '2', title: 'File', url: 'file:///etc/hosts' },
+    ] },
+  ] }];
+
+  it('keeps web bookmarks only, once per URL, with the browser folder path', () => {
+    expect(buildBookmarkIndex(tree)).toEqual([
+      { id: '11', title: 'Plan', url: 'https://docs.example/plan', path: 'Bookmarks bar › Work', folders: 1, dateAdded: 5 },
+      { id: '13', title: 'Deep page', url: 'https://deep.example/', path: 'Bookmarks bar › Work › Deep', folders: 0, dateAdded: 6 },
+    ]);
+    expect(buildBookmarkIndex(undefined)).toEqual([]);
+    expect(buildBookmarkIndex([{ id: 'root________', title: '', children: [{ id: 'x', parentId: 'root________', title: 'Bookmarks Toolbar', children: [{ id: 'y', parentId: 'x', title: 't', url: 'https://t.example/' }] }] }])[0].path).toBe('Bookmarks Toolbar');
+  });
+
+  it('ranks matches with the tab rules, newest first on ties, capped, listing every match URL', () => {
+    const index = Array.from({ length: 60 }, (_, i) => ({ id: String(i), title: `Alpha ${i}`, url: `https://a${i}.example/`, path: '', folders: 0, dateAdded: i }));
+    const { results, urls } = searchBookmarkIndex(index, 'alpha');
+    expect(results).toHaveLength(BOOKMARK_LIMIT);
+    expect(results[0].id).toBe('59'); // Not the oldest, as native Firefox order would give.
+    expect(urls).toHaveLength(60);
+    // Fuzzy, like tab search: a typo still finds it.
+    expect(searchBookmarkIndex(index, 'alpah 7').results.map(r => r.id)).toContain('7');
+    expect(searchBookmarkIndex(index, '  ')).toEqual({ results: [], urls: [] });
+  });
+});
+
+describe('composing bookmarks with other sources (R15)', () => {
+  const tabs = [
+    { id: 1, title: 'Docs plan', url: 'https://docs.example/plan', lastAccessed: 9 },
+    { id: 2, title: 'Mail', url: 'https://mail.example/', lastAccessed: 8 },
+  ];
+  const bookmarks = [
+    { id: 'b1', title: 'Plan bookmark', url: 'https://docs.example/plan', path: 'Work' },
+    { id: 'b2', title: 'Plan wiki', url: 'https://wiki.example/plan', path: 'Work', folders: 2 },
+    { id: 'b3', title: 'Mail plan', url: 'https://mail.example/', path: 'Work' },
+  ];
+  const history = [{ url: 'https://wiki.example/plan', title: 'Plan wiki', lastVisitTime: 3 }, { url: 'https://old.example/plan', title: 'Old plan', lastVisitTime: 2 }];
+  const shape = list => list.map(r => [r.kind, r.key, r.openTabId]);
+
+  it('orders tabs, then bookmarks, then history, each URL once', () => {
+    expect(shape(composeSearchResults({ tabs, query: 'plan', sources: { tabs: true }, bookmarks, history }))).toEqual([
+      ['tab', 'tab:1', undefined],
+      ['tab', 'tab:2', undefined], // Open, found only through its bookmark.
+      ['bookmark', 'bookmark:https://wiki.example/plan', undefined],
+      ['history', 'history:https://old.example/plan', undefined], // wiki.example is listed as a bookmark.
+    ]);
+  });
+
+  it('with Tabs off, shows open pages as bookmark or history rows that carry the open tab', () => {
+    const list = composeSearchResults({ tabs, query: 'plan', sources: { tabs: false }, bookmarks, history });
+    expect(shape(list)).toEqual([
+      ['bookmark', 'bookmark:https://docs.example/plan', 1],
+      ['bookmark', 'bookmark:https://wiki.example/plan', undefined],
+      ['bookmark', 'bookmark:https://mail.example/', 2],
+      ['history', 'history:https://old.example/plan', undefined],
+    ]);
+    expect(list[1]).toMatchObject({ bookmarkId: 'b2', path: 'Work', folders: 2 });
+  });
+
+  it('shows recent tabs for an empty query whatever sources are on', () => {
+    expect(shape(composeSearchResults({ tabs, query: ' ', sources: { tabs: false, bookmarks: true }, bookmarks, history }))).toEqual([
+      ['tab', 'tab:1', undefined], ['tab', 'tab:2', undefined],
+    ]);
+  });
+
+  it('drops unsafe bookmark URLs from a reply', () => {
+    expect(composeSearchResults({ tabs: [], query: 'x', bookmarks: [{ id: 'z', title: 'x', url: 'javascript:x' }] })).toEqual([]);
+  });
+});
+
+describe('off-source counts (R15)', () => {
+  it('counts what each source would add on its own after removing repeats', () => {
+    const counts = sourceCounts({
+      tabsOn: true, openUrls: ['https://a/'],
+      bookmarkUrls: ['https://a/', 'https://b/', 'https://b/'],
+      historyUrls: ['https://a/', 'https://b/', 'https://c/'],
+    });
+    // Bookmarks is off, so History alone adds b and c; with Bookmarks included too it adds only c.
+    expect(counts).toEqual({ bookmarks: { count: 1, limited: false }, history: { count: 2, limited: false, withBookmarks: 1 } });
+  });
+
+  it('subtracts bookmarked pages from History only while Bookmarks is on', () => {
+    const base = { openUrls: [], bookmarkUrls: ['https://u1/', 'https://u2/'], historyUrls: ['https://u1/', 'https://u2/', 'https://u3/'] };
+    expect(sourceCounts(base).history).toEqual({ count: 3, limited: false, withBookmarks: 1 });
+    expect(sourceCounts({ ...base, bookmarksOn: true }).history).toEqual({ count: 1, limited: false, withBookmarks: 1 });
+  });
+
+  it('caps Bookmarks at 50 and marks it limited when more match', () => {
+    const urls = n => Array.from({ length: n }, (_, i) => `https://b${i}/`);
+    expect(sourceCounts({ bookmarkUrls: urls(60) }).bookmarks).toEqual({ count: 50, limited: true });
+    expect(sourceCounts({ bookmarkUrls: urls(50) }).bookmarks).toEqual({ count: 50, limited: false });
+  });
+
+  it('keeps open pages in the count when Tabs is off, since they then show as those rows', () => {
+    expect(sourceCounts({ tabsOn: false, openUrls: ['https://a/'], bookmarkUrls: ['https://a/'], historyUrls: [] }))
+      .toEqual({ bookmarks: { count: 1, limited: false }, history: { count: 0, limited: false, withBookmarks: 0 } });
+  });
+
+  it('reports uncounted sources as null and a limited history as limited', () => {
+    expect(sourceCounts({ historyUrls: ['https://x/'], historyLimited: true })).toEqual({ bookmarks: null, history: { count: 1, limited: true, withBookmarks: 1 } });
+    expect(sourceCounts()).toEqual({ bookmarks: null, history: null });
+  });
+});
+
+describe('scope words (R15)', () => {
+  it.each([
+    ['@b', 'bookmarks'], ['@bookmarks', 'bookmarks'], ['@T', 'tabs'], ['@history', 'history'], ['@c', 'content'],
+    ['@contents', 'content'], ['@all', 'all'], ['@a', 'all'],
+  ])('recognizes %s as the whole query', (text, scope) => {
+    expect(scopeWord(text)?.scope).toBe(scope);
+  });
+
+  it.each(['@types', '@b x', ' @b', 'a@b.com', '@', '＠b', '@bookmark', '@angular/core', ''])('leaves %j as text', text => {
+    expect(scopeWord(text)).toBeUndefined();
+  });
+
+  it('suggests words only for a bare @ prefix', () => {
+    expect(scopeSuggestions('@').map(e => e.word)).toEqual(['tabs', 'bookmarks', 'history', 'contents', 'all']);
+    expect(scopeSuggestions('@b').map(e => e.word)).toEqual(['bookmarks']);
+    expect(scopeSuggestions('@a').map(e => e.word)).toEqual(['all']);
+    for (const text of ['@types', '@x', 'b', '＠', '@b ']) expect(scopeSuggestions(text)).toEqual([]);
+  });
+
+  it('maps @all to every source, Contents included', () => {
+    expect(scopeSources('all')).toEqual({ tabs: true, bookmarks: true, history: true, content: true });
+    expect(scopeSources('bookmarks')).toEqual({ tabs: false, bookmarks: true, history: false, content: false });
+  });
+});
+
+describe('default sources (R15)', () => {
+  it('stores tabs, bookmarks and history only, with Tabs when nothing valid is set', () => {
+    expect(normalizeDefaultSources(undefined)).toEqual({ tabs: true, bookmarks: false, history: false });
+    expect(normalizeDefaultSources({ tabs: false })).toEqual({ tabs: true, bookmarks: false, history: false });
+    expect(normalizeDefaultSources({ tabs: false, bookmarks: true, content: true })).toEqual({ tabs: false, bookmarks: true, history: false });
+  });
+
+  it('starts a search without sources this window cannot use, never with Contents', () => {
+    expect(startingSources({ tabs: true, bookmarks: true, history: true }, { incognito: true, bookmarkPermission: false }))
+      .toEqual({ tabs: true, bookmarks: false, history: false, content: false });
+    expect(startingSources({ tabs: false, history: true }, { incognito: true })).toEqual({ tabs: true, bookmarks: false, history: false, content: false });
+    expect(startingSources({ tabs: false, bookmarks: true }, { bookmarkPermission: true })).toEqual({ tabs: false, bookmarks: true, history: false, content: false });
+  });
+
+  it('ignores Contents when deciding whether Save as default changes anything', () => {
+    expect(differsFromDefault({ tabs: true, content: true }, { tabs: true })).toBe(false);
+    expect(differsFromDefault({ tabs: true, bookmarks: true, history: true, content: true }, undefined)).toBe(true);
   });
 });

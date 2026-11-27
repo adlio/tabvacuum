@@ -11,6 +11,9 @@ export function startOptions({ document, window, browser, locale }) {
   // Saved together through the generic saveSettings message.
   const general = {
     searchScope: $('search-scope'),
+    searchDefaultTabs: $('search-default-tabs'),
+    searchDefaultBookmarks: $('search-default-bookmarks'),
+    searchDefaultHistory: $('search-default-history'),
     ignoreFragments: $('ignore-fragments'),
     ignoreQuery: $('ignore-query'),
     preventDuplicates: $('prevent-duplicates'),
@@ -193,6 +196,10 @@ export function startOptions({ document, window, browser, locale }) {
   async function loadSettings() {
     const settings = await browser.runtime.sendMessage({ command: 'getSettings' });
     general.searchScope.value = settings.searchScope === 'current' ? 'current' : 'all';
+    const defaults = settings.searchSources && typeof settings.searchSources === 'object' ? settings.searchSources : { tabs: true };
+    general.searchDefaultTabs.checked = defaults.tabs === true || (!defaults.bookmarks && !defaults.history);
+    general.searchDefaultBookmarks.checked = defaults.bookmarks === true;
+    general.searchDefaultHistory.checked = defaults.history === true;
     general.ignoreFragments.checked = settings.ignoreFragments;
     general.ignoreQuery.checked = settings.ignoreQueryParams;
     general.preventDuplicates.checked = settings.preventDuplicates === true;
@@ -215,6 +222,12 @@ export function startOptions({ document, window, browser, locale }) {
     if (!loaded || disposed) return;
     const settings = {
       searchScope: general.searchScope.value,
+      // The background keeps at least one source on (R15).
+      searchSources: {
+        tabs: general.searchDefaultTabs.checked,
+        bookmarks: general.searchDefaultBookmarks.checked,
+        history: general.searchDefaultHistory.checked,
+      },
       ignoreFragments: general.ignoreFragments.checked,
       ignoreQueryParams: general.ignoreQuery.checked,
       preventDuplicates: general.preventDuplicates.checked,
@@ -236,6 +249,17 @@ export function startOptions({ document, window, browser, locale }) {
     clearTimeout(debounceTimer);
     debounceTimer = setTimeout(saveGeneral, 400);
   };
+  // Search by default keeps one source on, as Search itself does (R15).
+  const searchDefaults = [general.searchDefaultTabs, general.searchDefaultBookmarks, general.searchDefaultHistory];
+  for (const box of searchDefaults) {
+    box.addEventListener('change', () => { if (!searchDefaults.some(other => other.checked)) general.searchDefaultTabs.checked = true; });
+  }
+  $('search-default-reset').addEventListener('click', () => {
+    general.searchDefaultTabs.checked = true;
+    general.searchDefaultBookmarks.checked = false;
+    general.searchDefaultHistory.checked = false;
+    saveGeneral();
+  });
   for (const element of Object.values(general)) {
     element.addEventListener('change', saveGeneral);
     if (element.tagName === 'TEXTAREA') element.addEventListener('input', debouncedSave);

@@ -53,7 +53,7 @@ export const UI_STATE = `
     rows, highlight: rows.findIndex(r => r.active), checked: rows.filter(r => r.checked).length,
     query: q.value, selStart: q.selectionStart, selEnd: q.selectionEnd,
     status: $('selection-status').textContent, close: $('close-tabs').textContent, closeShown: shown($('close-tabs')),
-    toggle: $('select-toggle').textContent, hintGroup: group?.id || null, hints,
+    toggle: $('select-toggle').textContent, toggleShown: shown($('select-toggle')), hintGroup: group?.id || null, hints,
     message: m.hidden ? null : { state: m.dataset.state, text: m.textContent },
     background: getComputedStyle(document.body).backgroundColor, busy: $('results').getAttribute('aria-busy'),
     actionBackgrounds: [...document.querySelectorAll('.action')].filter(shown).map(b => getComputedStyle(b).backgroundColor),
@@ -102,10 +102,14 @@ const HINTS = {
 };
 /** Mode plus everything that must follow it: hints, action buttons and checkboxes. */
 export function inMode(s, mode) {
-  const hints = s.hintGroup === `hints-${mode}` && Object.entries(HINTS[mode]).every(([k, c]) => s.hints[k] === c);
+  // With no tab rows listed there is nothing to close or select, so those hints and Select multiple hide (R15).
+  const tabRows = s.rows.some(r => r.closer);
+  const want = mode === 'tabs' && !tabRows ? { '↵': 'Switch', Esc: 'Search' } : HINTS[mode];
+  const hints = s.hintGroup === `hints-${mode}` && Object.entries(want).every(([k, c]) => s.hints[k] === c) &&
+    (tabRows || mode !== 'tabs' || (!s.hints['X+Del'] && !s.hints.M));
   const select = mode === 'select';
   const chrome = select ? s.closeShown && s.toggle === 'Done' && s.rows.every(r => r.box)
-    : !s.closeShown && s.toggle === 'Select multiple' && s.checked === 0 && !s.rows.some(r => r.box);
+    : !s.closeShown && s.toggle === 'Select multiple' && s.toggleShown === tabRows && s.checked === 0 && !s.rows.some(r => r.box);
   return s.mode === mode && hints && chrome;
 }
 // LAYOUT labels are textContent, so adjacent keycaps run together ("XDel").
@@ -179,7 +183,7 @@ function tools(a) {
 
 /**
  * Native focus order with results: query -> results (tab menu) -> highlighted row's X ->
- * Select multiple -> (Close, select mode only) -> Search in -> query, and the reverse with Shift+Tab.
+ * Select multiple -> (Close, select mode only) -> source toolbar -> query, and the reverse with Shift+Tab.
  * Starts and ends with the query focused, search open.
  */
 export async function runTabCycle(a, label) {
@@ -196,10 +200,10 @@ export async function runTabCycle(a, label) {
     [['Tab'], 'results', 'tabs', 'Tab: query -> results again'],
     [['Tab'], x, 'tabs', 'Tab: results -> highlighted row X'],
     [['Tab'], 'select-toggle', 'tabs', 'Tab: row X -> Select multiple; Close is hidden'],
-    [['Tab'], 'search-in', 'tabs', 'Tab: Select multiple -> Search in (Close skipped outside select)'],
-    [['Tab'], 'query', 'search', 'Tab: Search in -> query wraps'],
-    [['Shift_L', 'Tab'], 'search-in', 'search', 'Shift+Tab: query -> Search in'],
-    [['Shift_L', 'Tab'], 'select-toggle', 'search', 'Shift+Tab: Search in -> Select multiple'],
+    [['Tab'], 'source-tabs', 'tabs', 'Tab: Select multiple -> the source toolbar (Close skipped outside select)'],
+    [['Tab'], 'query', 'search', 'Tab: the source toolbar -> query wraps'],
+    [['Shift_L', 'Tab'], 'source-tabs', 'search', 'Shift+Tab: query -> the source toolbar'],
+    [['Shift_L', 'Tab'], 'select-toggle', 'search', 'Shift+Tab: the source toolbar -> Select multiple'],
     [['Shift_L', 'Tab'], x, 'search', 'Shift+Tab: Select multiple -> row X'],
     [['Shift_L', 'Tab'], 'results', 'tabs', 'Shift+Tab: row X -> results opens the tab menu'],
     [['m'], 'results', 'select', 'M: tab menu -> select mode with checkboxes, none checked', s => s.checked === 0],
@@ -216,8 +220,8 @@ export async function runTabCycle(a, label) {
     [['Tab'], x, 'select', 'Tab: to row X'],
     [['Tab'], 'select-toggle', 'select', 'Tab: to Done'],
     [['Tab'], 'close-tabs', 'select', 'Tab: to Close'],
-    [['Tab'], 'search-in', 'select', 'Tab: Close -> Search in keeps select mode and checks', s => s.checked === 1],
-    [['Tab'], 'query', 'search', 'Tab: Search in -> query wraps, leaves select mode and clears checks'],
+    [['Tab'], 'source-tabs', 'select', 'Tab: Close -> the source toolbar keeps select mode and checks', s => s.checked === 1],
+    [['Tab'], 'query', 'search', 'Tab: the source toolbar -> query wraps, leaves select mode and clears checks'],
     [['Tab'], 'results', 'tabs', 'Tab: query -> tab menu, checks still cleared'],
     [['Escape'], 'query', 'search', 'Escape: tab menu -> query, search stays open'],
   ];

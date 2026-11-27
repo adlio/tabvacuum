@@ -15,23 +15,35 @@
         <path d="m20 20-3.5-3.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
       </svg>
       <label for="query" class="sr-only">Search tabs by title or URL</label>
+      <!-- A scope word becomes this chip: source state, never query text. -->
+      <span id="scope-chip" class="scope-chip" hidden><span id="scope-chip-label"></span><button id="scope-chip-remove" class="scope-chip-remove" type="button" tabindex="-1" aria-label="Remove filter"><span aria-hidden="true">×</span></button></span>
       <input id="query" type="text" role="combobox" aria-autocomplete="list"
         aria-controls="results" aria-haspopup="grid" aria-expanded="true" aria-describedby="query-help"
-        placeholder="Search tabs…" autocomplete="off" spellcheck="false" autofocus>
+        placeholder="Search tabs · type @ for more" autocomplete="off" spellcheck="false" autofocus>
       <!-- Mode changes are announced through #announcement. -->
       <span id="mode-indicator" class="mode-indicator" aria-hidden="true" hidden></span>
-      <!-- A disclosure: extra sources start off on every launch; open tabs are always searched. -->
-      <button id="search-in" class="source-trigger" type="button" aria-expanded="false" aria-controls="source-menu">Search in <span id="source-summary" class="source-summary"></span></button>
       <kbd class="esc-hint" aria-hidden="true">Esc</kbd>
-      <div id="source-menu" class="source-menu" role="group" aria-label="Search in" hidden>
-        <p class="source-option">Open tabs <span class="source-always">Always on</span></p>
-        <label class="source-option"><input id="source-history" type="checkbox" disabled> History</label>
-        <p id="history-private-note" class="source-note" hidden>History isn't searched in private windows.</p>
-        <label class="source-option"><input id="source-content" type="checkbox" disabled> Page contents</label>
-        <p id="content-access-note" class="source-note" hidden>Contents requires website access; sleeping tabs stay asleep.</p>
-        <button id="enable-content" class="action" type="button" aria-describedby="content-access-note" hidden>Enable in Settings</button>
-      </div>
+      <ul id="scope-list" class="scope-list" role="listbox" aria-label="Search only" hidden></ul>
     </header>
+    <!-- One tab stop; arrow keys move between sources (R15). -->
+    <div id="sources" class="sources" role="toolbar" aria-label="Search sources">
+        <button id="source-tabs" class="source" type="button" data-source="tabs" aria-pressed="false" tabindex="0" aria-describedby="source-tabs-count"><svg class="source-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><rect x="1.5" y="3.5" width="13" height="10" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M1.5 6.5h13" stroke="currentColor" stroke-width="1.5"/></svg><span class="source-label">Tabs</span><span class="source-on" aria-hidden="true">On</span><span id="source-tabs-badge" class="source-count" aria-hidden="true"></span><span id="source-tabs-count" class="sr-only"></span></button>
+        <button id="source-bookmarks" class="source" type="button" data-source="bookmarks" aria-pressed="false" tabindex="-1" aria-describedby="source-bookmarks-count"><svg class="source-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M4 2.5h8v11l-4-3-4 3z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg><span class="source-label">Bookmarks</span><span class="source-on" aria-hidden="true">On</span><span id="source-bookmarks-badge" class="source-count" aria-hidden="true"></span><span id="bookmarks-new" class="source-new" hidden>New</span><span id="source-bookmarks-count" class="sr-only"></span></button>
+        <button id="source-history" class="source" type="button" data-source="history" aria-pressed="false" tabindex="-1" aria-describedby="source-history-count"><svg class="source-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8 4.5V8l2.5 1.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg><span class="source-label">History</span><span class="source-on" aria-hidden="true">On</span><span id="source-history-badge" class="source-count" aria-hidden="true"></span><span id="source-history-count" class="sr-only"></span></button>
+        <button id="source-content" class="source" type="button" data-source="content" aria-pressed="false" tabindex="-1" aria-describedby="source-content-count"><svg class="source-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M3.5 2.5h6l3 3v8h-9z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/><path d="M5.5 8h5M5.5 10.5h5" stroke="currentColor" stroke-width="1.5"/></svg><span class="source-label">Contents</span><span class="source-on" aria-hidden="true">On</span><span id="source-content-badge" class="source-count" aria-hidden="true"></span><span id="source-content-count" class="sr-only"></span></button>
+        <button id="save-default" class="source-save" type="button" tabindex="-1" hidden>Save as default</button>
+    </div>
+    <div id="source-access" class="source-access" hidden>
+      <p id="history-private-note" class="source-note" hidden>History isn't searched in private windows.</p>
+      <div id="bookmarks-access" class="access-row" hidden>
+        <button id="enable-bookmarks" class="action" type="button" aria-describedby="bookmarks-access-note">Allow bookmarks</button>
+        <p id="bookmarks-access-note" class="source-note">Search only reads bookmarks; the browser's prompt also mentions changing them.</p>
+      </div>
+      <div id="content-access" class="access-row" hidden>
+        <button id="enable-content" class="action" type="button" aria-describedby="content-access-note">Enable in Settings</button>
+        <p id="content-access-note" class="source-note">Contents requires website access; sleeping tabs stay asleep. Opens Settings in a new tab.</p>
+      </div>
+    </div>
     <p class="source-line"><span id="source-status" role="status" aria-live="polite"></span></p>
     <div class="list-heading">
       <span class="heading-text">
@@ -46,6 +58,7 @@
     </div>
     <div class="scroll" id="scroll">
       <p id="message" role="status" aria-live="polite" data-state="loading">Loading tabs…</p>
+      <p id="include-line" class="include-line" hidden><button id="include-sources" class="action" type="button"></button> <kbd aria-hidden="true">↵</kbd></p>
       <div id="results" role="grid" aria-colcount="2" aria-labelledby="list-label" aria-describedby="tabs-help"
         tabindex="-1" aria-busy="true"></div>
     </div>
@@ -55,13 +68,14 @@
         <span class="hint optional"><kbd>↑</kbd><kbd>↓</kbd> Navigate</span>
         <span class="hint"><kbd>↵</kbd> <span id="enter-search">Switch</span></span>
         <span class="hint"><kbd>Tab</kbd> Tab menu</span>
+        <span class="hint" id="hint-sources"><kbd>@</kbd> Sources</span>
         <span class="hint"><kbd>Esc</kbd> Close</span>
       </div>
       <div id="hints-tabs" class="hint-group" hidden>
         <span class="hint optional"><kbd>J</kbd><kbd>K</kbd> Move</span>
         <span class="hint"><kbd>↵</kbd> <span id="enter-tabs">Switch</span></span>
-        <span class="hint hint-close"><kbd>X</kbd><kbd>Del</kbd> Close tab</span>
-        <span class="hint"><kbd>M</kbd> Select multiple</span>
+        <span id="hint-close-tab" class="hint hint-close"><kbd>X</kbd><kbd>Del</kbd> Close tab</span>
+        <span id="hint-select-tabs" class="hint hint-select"><kbd>M</kbd> Select multiple</span>
         <span class="hint"><kbd>Esc</kbd> Search</span>
       </div>
       <div id="hints-select" class="hint-group" hidden>
@@ -72,9 +86,10 @@
         <span class="hint"><kbd>M</kbd> Done</span>
         <span class="hint"><kbd>Esc</kbd> Back</span>
       </div>
+      <p id="tip" class="tip" hidden></p>
     </footer>
-    <p id="query-help" class="sr-only">Up and Down arrows move through results. Enter switches to the highlighted tab, or opens the highlighted history page. Tab opens the tab menu, where you can close tabs. Shift Tab reaches the Search in button, which chooses whether to also search history and page contents. Escape closes search.</p>
-    <p id="tabs-help" class="sr-only">Tab menu. Up and Down arrows, or J and K, move. Enter switches to the highlighted tab or opens the highlighted history page. X or Delete closes the highlighted tab; history results cannot be closed. M selects multiple tabs. Escape returns to search.</p>
+    <p id="query-help" class="sr-only">Up and Down arrows move through results. Enter switches to the highlighted tab, or opens the highlighted bookmark or history page. Tab opens the tab menu, where you can close tabs. Shift Tab reaches the search sources: Tabs, Bookmarks, History and Contents. Left and Right arrows move between them, and Space or Enter turns one on or off. Type @ and a source name, such as @b, then a space, to search only that source; @all searches every source. Escape closes search.</p>
+    <p id="tabs-help" class="sr-only">Tab menu. Up and Down arrows, or J and K, move. Enter switches to the highlighted tab or opens the highlighted bookmark or history page. X or Delete closes the highlighted tab; bookmark and history results cannot be closed. M selects multiple tabs. Escape returns to search.</p>
     <p id="select-help" class="sr-only">Select multiple mode. Up and Down arrows, or J and K, move. Space or Enter toggles selection of the highlighted tab. A, or Control A, selects all listed tabs. X or Delete closes the selected tabs. M or Done returns to the tab menu. Escape clears the selection and returns to the tab menu.</p>
     <div id="announcement" class="sr-only" role="status" aria-live="polite"></div>
   </main>

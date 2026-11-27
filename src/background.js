@@ -2,7 +2,8 @@
 import './polyfill.js';
 import { findDuplicates, planMerge, planSort, findBlankTabs, computeFrecency, validateDuplicateSettings } from './core.js';
 
-import { createSearchService } from './search-service.js';
+import { BOOKMARKS_NEW_OPENS, createSearchService } from './search-service.js';
+import { normalizeDefaultSources } from './search-sources-core.js';
 import { createSearchLauncher } from './search-launcher.js';
 import { createStaleService, OPEN_FAILED } from './stale-service.js';
 import { createDuplicateService } from './duplicate-service.js';
@@ -12,7 +13,7 @@ import { createDuplicateService } from './duplicate-service.js';
 const dupes = createDuplicateService(browser, { notify: message => notify(message) });
 dupes.install();
 
-const search = createSearchService(browser, { beforeOpen: url => dupes.allow(url) });
+const search = createSearchService(browser, { beforeOpen: (url, incognito) => dupes.allow(url, incognito) });
 search.installFocusTracking();
 const launcher = createSearchLauncher(browser, search);
 launcher.installCleanup();
@@ -27,6 +28,8 @@ function openSearch(tab) {
 
 const DEFAULTS = {
   searchScope: 'all',
+  // R15: the sources a new search starts with. Contents is never a default.
+  searchSources: { tabs: true, bookmarks: false, history: false },
   staleThresholdMs: 7 * 24 * 60 * 60 * 1000,
   autoCloseStaleEnabled: false,
   ignoreFragments: false,
@@ -55,7 +58,9 @@ async function getSettings() {
 function saveSettings(settings, windowId) {
   const error = settings && typeof settings === 'object' ? validateDuplicateSettings(settings) : null;
   if (error) return Promise.reject(new Error(error));
-  return stale.saveSettings(settings, { windowId, generalKeys: Object.keys(DEFAULTS) });
+  const patch = settings && typeof settings === 'object' && 'searchSources' in settings
+    ? { ...settings, searchSources: normalizeDefaultSources(settings.searchSources) } : settings;
+  return stale.saveSettings(patch, { windowId, generalKeys: Object.keys(DEFAULTS) });
 }
 
 async function notify(message) {
@@ -262,7 +267,15 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 // Register context menus on install
-browser.runtime.onInstalled.addListener(() => {
+browser.runtime.onInstalled.addListener(details => {
+  // R15: an update shows a "New" mark on Search's Bookmarks button for a few opens; a fresh install doesn't.
+  if (details?.reason === 'update') {
+    browser.storage.local.get({ searchBookmarksNew: null }).then(({ searchBookmarksNew }) => {
+      if (searchBookmarksNew === null) return browser.storage.local.set({ searchBookmarksNew: BOOKMARKS_NEW_OPENS });
+    }).catch(() => {});
+  } else if (details?.reason === 'install') {
+    browser.storage.local.set({ searchBookmarksNew: 0 }).catch(() => {});
+  }
   const menus = browser.contextMenus;
   const tabContext = browser.runtime.getURL('').startsWith('moz-extension:') ? ['tab'] : ['action'];
 

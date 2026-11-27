@@ -17,9 +17,142 @@ export function normalizeQuery(query) {
   return query.trim();
 }
 
-/** Only an explicit `true` turns a source on. */
+export const BOOKMARK_LIMIT = 50;
+export const SOURCE_NAMES = Object.freeze(['tabs', 'bookmarks', 'history', 'content']);
+
+/** Open tabs stay on unless explicitly `false`; every other source needs an explicit `true`. */
 export function normalizeSources(sources) {
-  return { history: sources?.history === true, content: sources?.content === true };
+  return {
+    tabs: sources?.tabs !== false, bookmarks: sources?.bookmarks === true,
+    history: sources?.history === true, content: sources?.content === true,
+  };
+}
+
+// --- Saved default sources (R15) ---------------------------------------------
+// Stored as tabs/bookmarks/history only: Contents is never a saved default.
+
+/** The stored default, with Tabs alone when nothing valid is stored. */
+export function normalizeDefaultSources(saved) {
+  const value = saved && typeof saved === 'object' ? saved : {};
+  const out = { tabs: value.tabs === true, bookmarks: value.bookmarks === true, history: value.history === true };
+  if (!out.tabs && !out.bookmarks && !out.history) out.tabs = true;
+  return out;
+}
+
+/** The sources a new search starts with: the default minus what this window can't use. */
+export function startingSources(saved, { incognito = false, bookmarkPermission = false } = {}) {
+  const out = { ...normalizeDefaultSources(saved), content: false };
+  if (!bookmarkPermission) out.bookmarks = false;
+  if (incognito) out.history = false;
+  if (!out.tabs && !out.bookmarks && !out.history) out.tabs = true;
+  return out;
+}
+
+/** Whether Save as default would change anything. Contents never counts. */
+export function differsFromDefault(current, saved) {
+  const base = normalizeDefaultSources(saved);
+  return ['tabs', 'bookmarks', 'history'].some(name => Boolean(current?.[name]) !== base[name]);
+}
+
+// --- Scope words (R15) ---------------------------------------------------------
+
+export const SCOPE_WORDS = Object.freeze([
+  { word: 'tabs', short: 't', scope: 'tabs', label: 'Only open tabs' },
+  { word: 'bookmarks', short: 'b', scope: 'bookmarks', label: 'Only bookmarks' },
+  { word: 'history', short: 'h', scope: 'history', label: 'Only history' },
+  { word: 'contents', short: 'c', scope: 'content', label: 'Only page contents' },
+  { word: 'all', short: 'a', scope: 'all', label: 'All sources' },
+]);
+
+/**
+ * The scope word that the whole query is, or undefined. ASCII `@` only: a
+ * full-width ＠ stays literal text. The caller converts only on a typed space.
+ */
+export function scopeWord(text) {
+  const match = /^@([a-z]+)$/i.exec(String(text ?? ''));
+  if (!match) return undefined;
+  const name = match[1].toLowerCase();
+  return SCOPE_WORDS.find(entry => entry.word === name || entry.short === name);
+}
+
+/** Scope words the query could still become while it is a bare `@` prefix; else []. */
+export function scopeSuggestions(text) {
+  const match = /^@([a-z]*)$/i.exec(String(text ?? ''));
+  if (!match) return [];
+  const typed = match[1].toLowerCase();
+  return SCOPE_WORDS.filter(entry => entry.word.startsWith(typed) || entry.short === typed);
+}
+
+/** The sources a scope word selects. `all` includes Contents. */
+export function scopeSources(scope) {
+  if (scope === 'all') return { tabs: true, bookmarks: true, history: true, content: true };
+  return { tabs: scope === 'tabs', bookmarks: scope === 'bookmarks', history: scope === 'history', content: scope === 'content' };
+}
+
+// --- Bookmarks (R15) -------------------------------------------------------------
+
+/**
+ * A flat list of web bookmarks from bookmarks.getTree(): folders, separators,
+ * bookmarklets, place: queries and non-web URLs are dropped. Each URL appears
+ * once, with the first folder path found and how many other folders hold it.
+ * Paths use the browser's own folder names; the unnamed root is skipped.
+ */
+export function buildBookmarkIndex(tree) {
+  const byUrl = new Map();
+  const walk = (node, path) => {
+    if (!node || typeof node !== 'object') return;
+    if (typeof node.url === 'string') {
+      if (!isSafeWebUrl(node.url)) return;
+      const seen = byUrl.get(node.url);
+      if (seen) { seen.folders++; return; }
+      byUrl.set(node.url, {
+        id: String(node.id), title: typeof node.title === 'string' ? node.title : '', url: node.url,
+        path: path.join(' › '), folders: 0, dateAdded: Number.isFinite(node.dateAdded) ? node.dateAdded : 0,
+      });
+      return;
+    }
+    if (!Array.isArray(node.children)) return;
+    const next = node.parentId !== undefined && node.title ? [...path, node.title] : path;
+    for (const child of node.children) walk(child, next);
+  };
+  for (const root of Array.isArray(tree) ? tree : [tree]) walk(root, []);
+  return [...byUrl.values()];
+}
+
+/**
+ * Bookmarks matching the query with the tab ranking rules, newest first on
+ * ties. `results` is capped; `urls` holds every match, for counts and dedup.
+ */
+export function searchBookmarkIndex(index, query, limit = BOOKMARK_LIMIT) {
+  if (!String(query ?? '').trim() || !Array.isArray(index)) return { results: [], urls: [] };
+  const matched = rankTabs(index.map((entry, id) => ({ id, title: entry.title, url: entry.url, lastAccessed: entry.dateAdded })), query);
+  const entries = matched.map(({ tab }) => index[tab.id]);
+  return { results: entries.slice(0, limit), urls: entries.map(entry => entry.url) };
+}
+
+/**
+ * How many rows each off source would add on its own, after removing repeats:
+ * open-tab URLs (only while Tabs is on, since an open page then shows as its
+ * tab) and, for History, bookmark URLs only while Bookmarks is on. History's
+ * `withBookmarks` is what it adds when Bookmarks is included with it, as
+ * "Include them" does. Null means "not counted"; `limited` means more matched
+ * than the source lists.
+ */
+export function sourceCounts({ tabsOn = true, bookmarksOn = false, openUrls = [], bookmarkUrls = null, historyUrls = null, historyLimited = false } = {}) {
+  const open = new Set(tabsOn ? openUrls : []);
+  const unique = urls => [...new Set(urls)];
+  const bookmarks = Array.isArray(bookmarkUrls) ? unique(bookmarkUrls).filter(url => !open.has(url)) : null;
+  const marked = new Set(Array.isArray(bookmarkUrls) ? bookmarkUrls : []);
+  const visits = Array.isArray(historyUrls) ? unique(historyUrls).filter(url => !open.has(url)) : null;
+  const history = visits && (bookmarksOn ? visits.filter(url => !marked.has(url)) : visits);
+  const withBookmarks = visits && visits.filter(url => !marked.has(url));
+  return {
+    bookmarks: bookmarks ? { count: Math.min(bookmarks.length, BOOKMARK_LIMIT), limited: bookmarks.length > BOOKMARK_LIMIT } : null,
+    history: history ? {
+      count: Math.min(history.length, HISTORY_LIMIT), limited: historyLimited || history.length > HISTORY_LIMIT,
+      withBookmarks: Math.min(withBookmarks.length, HISTORY_LIMIT),
+    } : null,
+  };
 }
 
 /** An absolute http(s) URL without embedded credentials, as given (not normalized). */
@@ -54,15 +187,18 @@ const tabResult = (tab, matchType) => ({ tab, matchType, kind: 'tab', key: `tab:
 
 /**
  * One result list: ranked open tabs first (in rankTabs order), then tabs found
- * only by their contents, then open tabs found only through a history visit,
- * then history pages that are not open. Each open tab appears once; a content
- * snippet attaches only when its tabId and URL both still match the tab.
- * History is deduplicated by exact URL and never shown for an open URL; hiding
- * it here is display-only. An empty query returns the recent tabs alone.
+ * only by their contents, then open tabs found only through a bookmark or a
+ * history visit, then bookmarks that are not open, then history pages that are
+ * neither open nor bookmarked. Each open tab appears once; a content snippet
+ * attaches only when its tabId and URL both still match the tab. Bookmarks and
+ * history are deduplicated by exact URL. With Tabs off, an open page found
+ * through a bookmark or history stays that row, carrying `openTabId`. An empty
+ * query returns the recent tabs alone, whatever sources are on (R11.3).
  */
-export function composeSearchResults({ tabs = [], query = '', currentTabId, history = [], content = [] } = {}) {
+export function composeSearchResults({ tabs = [], query = '', currentTabId, sources, bookmarks = [], history = [], content = [] } = {}) {
   const ranked = rankTabs(tabs, query, { currentTabId });
   if (!String(query).trim()) return ranked.map(r => tabResult(r.tab, r.matchType));
+  const tabsOn = sources?.tabs !== false;
 
   const byId = new Map(tabs.map(tab => [tab.id, tab]));
   const snippets = new Map();
@@ -73,32 +209,53 @@ export function composeSearchResults({ tabs = [], query = '', currentTabId, hist
     snippets.set(tab.id, item.snippet);
   }
 
-  const out = ranked.map(r => tabResult(r.tab, r.matchType));
+  const out = tabsOn ? ranked.map(r => tabResult(r.tab, r.matchType)) : [];
   const listed = new Set(out.map(r => r.tab.id));
   const contentOnly = [...snippets.keys()].filter(id => !listed.has(id)).map(id => byId.get(id))
     .sort((a, b) => accessed(b) - accessed(a) || a.id - b.id);
   for (const tab of contentOnly) { listed.add(tab.id); out.push(tabResult(tab, 'content')); }
   for (const result of out) if (snippets.has(result.tab.id)) result.snippet = snippets.get(result.tab.id);
 
-  // Rank history with the tab rules; numeric stand-in ids keep ties stable.
-  const visits = selectHistory(history).results;
-  const matched = rankTabs(visits.map((visit, id) => ({ id, title: visit.title, url: visit.url, lastAccessed: visit.lastVisitTime })), query);
   const openByUrl = new Map();
   for (const tab of tabs) openByUrl.set(tab.url, [...(openByUrl.get(tab.url) ?? []), tab]);
   const promoted = [];
+  const shownUrls = new Set();
+  // An open page found through another source shows as its tab while Tabs is
+  // on, or once some row already lists that tab. Every open duplicate stays
+  // listed, so each remains closable. Returns true when the page is handled.
+  const promote = (url, matchType) => {
+    const open = openByUrl.get(url);
+    if (!open || !(tabsOn || open.some(tab => listed.has(tab.id)))) return false;
+    for (const tab of open) if (!listed.has(tab.id)) { listed.add(tab.id); promoted.push(tabResult(tab, matchType)); }
+    shownUrls.add(url);
+    return true;
+  };
+  const openTabId = url => openByUrl.get(url)?.[0]?.id;
+
+  const marks = [];
+  for (const mark of Array.isArray(bookmarks) ? bookmarks : []) {
+    if (!isSafeWebUrl(mark?.url) || shownUrls.has(mark.url) || promote(mark.url, 'bookmark')) continue;
+    shownUrls.add(mark.url);
+    const key = `bookmark:${mark.url}`;
+    marks.push({
+      tab: { id: key, title: typeof mark.title === 'string' ? mark.title : '', url: mark.url, lastAccessed: 0 },
+      matchType: 'bookmark', kind: 'bookmark', key, bookmarkId: String(mark.id),
+      path: typeof mark.path === 'string' ? mark.path : '', folders: Number.isInteger(mark.folders) ? mark.folders : 0,
+      openTabId: openTabId(mark.url),
+    });
+  }
+
+  // Rank history with the tab rules; numeric stand-in ids keep ties stable.
+  const visits = selectHistory(history).results;
+  const matched = rankTabs(visits.map((visit, id) => ({ id, title: visit.title, url: visit.url, lastAccessed: visit.lastVisitTime })), query);
   const pages = [];
   for (const { tab: { id } } of matched) {
     const visit = visits[id];
-    const open = openByUrl.get(visit.url);
-    if (open) {
-      // Every open duplicate stays listed, so each remains closable.
-      for (const tab of open) if (!listed.has(tab.id)) { listed.add(tab.id); promoted.push(tabResult(tab, 'history')); }
-      continue;
-    }
+    if (shownUrls.has(visit.url) || promote(visit.url, 'history')) continue;
     const key = `history:${visit.url}`;
-    pages.push({ tab: { id: key, title: visit.title, url: visit.url, lastAccessed: visit.lastVisitTime }, matchType: 'history', kind: 'history', key });
+    pages.push({ tab: { id: key, title: visit.title, url: visit.url, lastAccessed: visit.lastVisitTime }, matchType: 'history', kind: 'history', key, openTabId: openTabId(visit.url) });
   }
-  return [...out, ...promoted, ...pages];
+  return [...out, ...promoted, ...marks, ...pages];
 }
 
 /** Why a tab cannot be content-searched right now, or undefined if it can. */

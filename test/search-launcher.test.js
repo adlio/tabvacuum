@@ -118,7 +118,7 @@ describe('overlay launch', () => {
     expect(context.windowId).toBe(10);
     expect(context.currentTabId).toBe(1);
     expect(context.tabs.map(t => t.id)).toEqual([1, 2, 4]); // No private tab 3.
-    expect(Object.keys(context).sort()).toEqual(['contentPermission', 'currentTabId', 'incognito', 'tabs', 'windowId']);
+    expect(Object.keys(context).sort()).toEqual(['bookmarkPermission', 'bookmarked', 'contentPermission', 'currentTabId', 'defaultSources', 'hints', 'incognito', 'tabs', 'windowId']);
     expect(context).toMatchObject({ incognito: false, contentPermission: false }); // No permissions API: false.
   });
 
@@ -982,7 +982,7 @@ describe('closing the tab that hosts an embedded search', () => {
     await expect(env.send({ command: 'closeSearchTabs', token, tabIds: [6] }, at(4))).rejects.toThrow('expired');
     await expect(env.send({ command: 'searchHandoffReady', token }, at(4))).rejects.toThrow('expired');
     const loaded = await env.send({ command: 'getSearchContext', token }, at(4));
-    expect(loaded.restore).toEqual({ ...STATE, checked: [], order: [], closing: [1, 2] });
+    expect(loaded.restore).toEqual({ ...STATE, sources: { tabs: true, bookmarks: false, history: true, content: true }, checked: [], order: [], closing: [1, 2] });
     expect(loaded.currentTabId).toBe(4);
     expect(loaded.tabs.map(t => t.id)).toEqual([1, 2, 4, 5, 6]);
     expect((await env.send({ command: 'getSearchContext', token }, at(4))).restore).toBeUndefined(); // Delivered once.
@@ -1470,7 +1470,7 @@ describe('closing the tab that hosts an embedded search', () => {
   it('stores only well-formed state fields', () => {
     const hostile = { query: 'x'.repeat(9000), mode: 'admin', sources: { history: 'yes', content: true, evil: true },
       highlight: { key: 1 }, checked: [1, 1, '2', 2.5, -0, 3], focus: 'page', focusTabId: '4', script: 'alert(1)' };
-    expect(handoffState(hostile, [1])).toEqual({ query: '', mode: 'tabs', sources: { history: false, content: true },
+    expect(handoffState(hostile, [1])).toEqual({ query: '', mode: 'tabs', sources: { tabs: true, bookmarks: false, history: false, content: true },
       highlight: '', checked: [], order: [], focus: 'list', focusTabId: undefined, closing: [1] });
     expect(handoffState({ mode: 'tabs', focus: 'close-tabs', order: [3, 3, 'x', 1, 2.5] }, [1])).toMatchObject({ focus: 'list', order: [3, 1] });
     expect(handoffState({ mode: 'select', focus: 'close-tabs' }, [1])).toMatchObject({ focus: 'close-tabs' });
@@ -1543,10 +1543,13 @@ describe('expanded search sources', () => {
         { tabId: 2, url: 'https://other.example/', snippet: 'in Other window' },
         { tabId: 4, url: 'https://example.org/b', snippet: 'in Background' },
       ],
+      bookmarks: [],
       coverage: {
+        bookmarks: { state: 'off' },
         history: { state: 'ready', limited: false },
         content: { state: 'ready', searched: 3, total: 3, skipped: 0, truncated: 0 },
       },
+      counts: { bookmarks: null, history: null },
       incognito: false,
     });
     expect(env.api.history.search).toHaveBeenCalledWith({ text: 'report', startTime: 0, maxResults: 101 });
@@ -1554,11 +1557,54 @@ describe('expanded search sources', () => {
     expect(env.api.storage.session.set.mock.calls.flat().some(item => JSON.stringify(item).includes('report'))).toBe(false);
   });
 
+  const withMarks = env => {
+    env.api.bookmarks = { getTree: vi.fn(async () => [{ id: '0', title: '', children: [{ id: '1', parentId: '0', title: 'Bookmarks bar', children: [
+      { id: '9', parentId: '1', title: 'Report hub', url: 'https://h.test/p?q=1#f' },
+      { id: '8', parentId: '1', title: 'Report open', url: 'https://example.org/' },
+      { id: '7', parentId: '1', title: 'Report wiki', url: 'https://wiki.test/' },
+    ] }] }]), get: vi.fn(async id => [{ id, url: 'https://wiki.test/' }]) };
+    return env;
+  };
+
+  it('lists bookmarks and counts off sources after removing repeats, in the same reply', async () => {
+    const env = withMarks(sourcesSetup());
+    const token = await open(env);
+    const counted = await env.send({ command: 'querySearchSources', token, query: 'report',
+      sources: { tabs: true }, count: { bookmarks: true, history: true } }, frame());
+    // example.org is open. h.test is bookmarked: History alone still adds it, but not with Bookmarks included.
+    expect(counted.counts).toEqual({ bookmarks: { count: 2, limited: false }, history: { count: 1, limited: false, withBookmarks: 0 } });
+    expect(counted.bookmarks).toEqual([]);
+    expect(env.scans()).toHaveLength(0);
+    const listed = await env.send({ command: 'querySearchSources', token, query: 'report',
+      sources: { tabs: true, bookmarks: true }, count: { bookmarks: true, history: true } }, frame());
+    expect(listed.bookmarks.map(item => item.id)).toEqual(['9', '8', '7']);
+    expect(listed.coverage.bookmarks).toEqual({ state: 'ready', limited: false });
+    expect(listed.counts.bookmarks).toBeNull(); // A source that is on is listed, not counted.
+  });
+
+  it('opens a bookmark result once, closing the search, private windows included', async () => {
+    const env = withMarks(sourcesSetup());
+    const token = await open(env);
+    expect(await env.send({ command: 'activateBookmarkResult', token, bookmarkId: '7' }, frame())).toEqual({ ok: true });
+    expect(env.api.tabs.create).toHaveBeenCalledWith({ url: 'https://wiki.test/', windowId: 10, active: true });
+    await expect(env.send({ command: 'activateBookmarkResult', token, bookmarkId: '7' }, frame())).rejects.toThrow();
+  });
+
+  it('cancels a running scan with its own command and saves defaults without Contents', async () => {
+    const env = sourcesSetup();
+    const token = await open(env);
+    expect(await env.send({ command: 'cancelSearchSources', token }, frame())).toEqual({ ok: true });
+    env.api.storage.local.set = vi.fn(async () => {});
+    expect(await env.send({ command: 'saveSearchDefault', token, sources: { tabs: true, history: true, content: true } }, frame()))
+      .toEqual({ ok: true, defaultSources: { tabs: true, bookmarks: false, history: true } });
+    await expect(env.send({ command: 'saveSearchDefault', token: 'x'.repeat(43), sources: {} }, frame())).rejects.toThrow();
+  });
+
   it('honors source toggles', async () => {
     const env = sourcesSetup();
     const token = await open(env);
     const reply = await env.send({ command: 'querySearchSources', token, query: 'x', sources: { history: false, content: false } }, frame());
-    expect(reply.coverage).toEqual({ history: { state: 'off', limited: false },
+    expect(reply.coverage).toEqual({ bookmarks: { state: 'off' }, history: { state: 'off', limited: false },
       content: { state: 'off', searched: 0, total: 0, skipped: 0, truncated: 0 } });
     expect(env.api.history.search).not.toHaveBeenCalled();
     expect(env.scans()).toHaveLength(0);

@@ -506,3 +506,122 @@ describe('expanded search sources', () => {
     expect(peak).toBe(4);
   });
 });
+
+describe('bookmarks source (R15)', () => {
+  const tree = () => [{ id: '0', title: '', children: [{ id: '1', parentId: '0', title: 'Bookmarks bar', children: [
+    { id: '11', parentId: '1', title: 'Example home', url: 'https://example.org', dateAdded: 1 },
+    { id: '12', parentId: '1', title: 'Example docs', url: 'https://docs.example.org/', dateAdded: 2 },
+  ] }] }];
+  function withBookmarks({ granted = true } = {}) {
+    const env = fixture();
+    let allowed = granted;
+    const listeners = {};
+    const on = name => ({ addListener: vi.fn(fn => { (listeners[name] ??= []).push(fn); }) });
+    env.api.permissions = { contains: vi.fn(async request => (request.permissions?.includes('bookmarks') ? allowed : false)), onAdded: on('added'), onRemoved: on('removed') };
+    env.api.bookmarks = { getTree: vi.fn(async () => tree()), get: vi.fn(async id => tree()[0].children[0].children.filter(node => node.id === id)),
+      onCreated: on('created'), onRemoved: on('bmRemoved'), onChanged: on('changed'), onMoved: on('moved') };
+    env.api.tabs.create = vi.fn(async () => ({}));
+    env.api.history = { search: vi.fn(async () => [{ url: 'https://docs.example.org/', lastVisitTime: 2 }, { url: 'https://h.example/', lastVisitTime: 1 }]) };
+    const beforeOpen = vi.fn(async () => {});
+    const service = createSearchService(env.api, { beforeOpen });
+    service.installFocusTracking();
+    return { ...env, service, listeners, beforeOpen, setAllowed: value => { allowed = value; } };
+  }
+
+  it('builds one in-memory index, reuses it, rebuilds after a change and drops it on revoke', async () => {
+    const env = withBookmarks();
+    expect((await env.service.searchBookmarks('example')).results.map(r => r.id)).toEqual(['12', '11']);
+    await env.service.searchBookmarks('docs');
+    expect(env.api.bookmarks.getTree).toHaveBeenCalledTimes(1);
+    env.listeners.created[0]();
+    await env.service.searchBookmarks('docs');
+    expect(env.api.bookmarks.getTree).toHaveBeenCalledTimes(2);
+    env.setAllowed(false);
+    env.listeners.removed[0]({ permissions: ['bookmarks'] });
+    expect(await env.service.searchBookmarks('docs')).toEqual({ results: [], urls: [], coverage: { state: 'permission' } });
+    // Nothing about bookmarks is ever stored.
+    expect(JSON.stringify(env.api.storage.session.set.mock.calls)).not.toContain('example');
+  });
+
+  it('marks bookmarked open tabs in the context whenever access is granted', async () => {
+    const env = withBookmarks();
+    const context = await env.service.getContext(10);
+    expect(context).toMatchObject({ bookmarkPermission: true, bookmarked: [1], defaultSources: { tabs: true, bookmarks: false, history: false } });
+    env.setAllowed(false);
+    expect(await env.service.getContext(10)).toMatchObject({ bookmarkPermission: false, bookmarked: [] });
+  });
+
+  it('opens a bookmark by id in the origin window, reusing an open copy, also in private windows', async () => {
+    const env = withBookmarks();
+    expect(await env.service.activateBookmark('12', 10)).toEqual({ ok: true });
+    expect(env.beforeOpen).toHaveBeenCalledWith('https://docs.example.org/', false);
+    expect(env.api.tabs.create).toHaveBeenCalledWith({ url: 'https://docs.example.org/', windowId: 10, active: true });
+    await env.service.activateBookmark('11', 10);
+    expect(env.api.tabs.update).toHaveBeenCalledWith(1, { active: true }); // https://example.org is open.
+    await env.service.activateBookmark('12', 30);
+    expect(env.api.tabs.create).toHaveBeenLastCalledWith({ url: 'https://docs.example.org/', windowId: 30, active: true });
+    // A private search exempts the page in the private duplicate store (R14.7).
+    expect(env.beforeOpen).toHaveBeenLastCalledWith('https://docs.example.org/', true);
+    await expect(env.service.activateBookmark('missing', 10)).rejects.toThrow('no longer available');
+    await expect(env.service.activateBookmark({}, 10)).rejects.toThrow();
+    env.setAllowed(false);
+    await expect(env.service.activateBookmark('12', 10)).rejects.toThrow('not available');
+  });
+
+  it('counts history after removing open tabs and listed bookmarks, and never in private windows', async () => {
+    const env = withBookmarks();
+    const urls = (await env.service.searchBookmarks('docs')).urls;
+    expect(await env.service.countSources('docs', 10, { tabsOn: true, bookmarks: true, history: true, bookmarkUrls: urls }))
+      .toEqual({ bookmarks: { count: 1, limited: false }, history: { count: 2, limited: false, withBookmarks: 1 } });
+    expect((await env.service.countSources('docs', 10, { tabsOn: true, bookmarksOn: true, bookmarks: false, history: true, bookmarkUrls: urls })).history)
+      .toEqual({ count: 1, limited: false, withBookmarks: 1 });
+    expect(await env.service.countSources('docs', 30, { tabsOn: true, bookmarks: false, history: true, bookmarkUrls: null }))
+      .toEqual({ bookmarks: null, history: null });
+    expect(env.api.history.search).toHaveBeenCalledTimes(2); // The two normal-window counts; never the private one.
+  });
+
+  it('records hints at most once per call and saves defaults without Contents', async () => {
+    const env = withBookmarks();
+    env.api.storage.local.get = vi.fn(async () => ({ searchTipsShown: { tabs: true }, searchBookmarksNew: 3 }));
+    env.api.storage.local.set = vi.fn(async () => {});
+    await env.service.noteHints({ opened: true });
+    await env.service.noteHints({ usedBookmarks: true, tip: 'bookmarks' });
+    await env.service.noteHints({ tip: 'tabs' });
+    await env.service.noteHints({ tip: 'evil' });
+    expect(env.api.storage.local.set.mock.calls).toEqual([
+      [{ searchBookmarksNew: 2 }], [{ searchBookmarksNew: 0, searchTipsShown: { tabs: true, bookmarks: true } }],
+    ]);
+    expect(await env.service.saveDefaultSources({ tabs: false, bookmarks: true, content: true })).toEqual({ tabs: false, bookmarks: true, history: false });
+    expect(env.api.storage.local.set).toHaveBeenLastCalledWith({ searchSources: { tabs: false, bookmarks: true, history: false } });
+  });
+});
+
+describe('bookmark index after a revoke and a new grant (R15)', () => {
+  it('listens on the new bookmarks namespace, so later changes still rebuild the index', async () => {
+    const env = fixture();
+    let allowed = true;
+    const perms = {};
+    env.api.permissions = { contains: vi.fn(async () => allowed),
+      onAdded: { addListener: fn => { perms.added = fn; } }, onRemoved: { addListener: fn => { perms.removed = fn; } } };
+    const namespace = () => {
+      const listeners = [];
+      const items = [];
+      const ev = { addListener: fn => listeners.push(fn) };
+      return { items, fire: () => listeners.forEach(fn => fn()), getTree: vi.fn(async () => [{ id: '0', title: '', children: items.map((url, i) => ({ id: String(i), parentId: '0', title: url, url })) }]),
+        onCreated: ev, onRemoved: ev, onChanged: ev, onMoved: ev };
+    };
+    const first = namespace();
+    env.api.bookmarks = first;
+    const service = createSearchService(env.api);
+    service.installFocusTracking();
+    expect((await service.searchBookmarks('a')).results).toEqual([]);
+    allowed = false; perms.removed({ permissions: ['bookmarks'] });
+    const second = namespace();
+    env.api.bookmarks = second;
+    allowed = true; perms.added({ permissions: ['bookmarks'] });
+    await service.searchBookmarks('a');
+    second.items.push('https://a.example/');
+    second.fire();
+    expect((await service.searchBookmarks('a')).results.map(r => r.url)).toEqual(['https://a.example/']);
+  });
+});

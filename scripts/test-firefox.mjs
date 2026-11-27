@@ -27,9 +27,12 @@ const SEARCH = `${EXT}/search.html`;
 // --closing-only runs setup plus the selection/closing flows (scripts/test-search-closing.mjs).
 const ACCEPTANCE_ONLY = process.argv.includes('--acceptance-only');
 const EXPANDED_ONLY = process.argv.includes('--expanded-only');
+// --sources-only runs setup plus the Search sources flows (scripts/test-search-sources.mjs).
+const SOURCES_ONLY = process.argv.includes('--sources-only');
 // --expanded-only runs setup plus the History/Contents flows (scripts/test-expanded-search.mjs).
-const CLOSING_ONLY = EXPANDED_ONLY || process.argv.includes('--closing-only');
+const CLOSING_ONLY = EXPANDED_ONLY || SOURCES_ONLY || process.argv.includes('--closing-only') || process.argv.includes('--verify-only');
 import { runExpandedSearch } from './test-expanded-search.mjs';
+import { runSourceSearch } from './test-search-sources.mjs';
 import { nativeClick } from './test-browser-fixtures.mjs';
 const { scratch, directory } = await outputDir('tabvacuum-firefox');
 // geckodriver creates its throwaway profile under TMPDIR; keep it in scratch.
@@ -108,14 +111,14 @@ try {
   const count = kind => chromeAsync('return locate(arguments[0], arguments[1]).length;', kind, SEARCH);
   // Marionette's in-frame key synthesis: trusted events in the focused frame.
   async function key(kind, name, printable = false) {
-    const code = printable ? (/[a-z]/i.test(name) ? `Key${name.toUpperCase()}` : name === '-' ? 'Minus' : name) : name;
+    const code = printable ? (/[a-z]/i.test(name) ? `Key${name.toUpperCase()}` : name === '-' ? 'Minus' : name === ' ' ? 'Space' : name === '@' ? 'Digit2' : name) : name;
     const result = await chromeAsync(`
       const [kind, url, eventData] = arguments;
       const [bc] = locate(kind, url);
       if (!bc) return 'no ' + kind;
       await actor(bc).sendQuery('MarionetteCommandsParent:_dispatchEvent', { eventName: 'synthesizeKeyDown', details: { eventData } });
       await actor(bc).sendQuery('MarionetteCommandsParent:_dispatchEvent', { eventName: 'synthesizeKeyUp', details: { eventData } }).catch(() => {});
-      return null;`, kind, SEARCH, { key: name, code, location: 0, printable });
+      return null;`, kind, SEARCH, { key: name, code, location: 0, printable, ...(name === '@' ? { shiftKey: true } : {}) });
     await sleep(printable ? 20 : 120);
     return result;
   }
@@ -580,7 +583,7 @@ try {
     await visit(`${base}/current`);
     await openOverlay();
     check(!(await rows()).includes(TITLES['/remote']), 'current-window scope excludes other window', await rows());
-    check(await inSearch('overlay', 'return [...document.querySelectorAll("select,input[type=checkbox],input[type=range]")].every(el => ["source-history", "source-content"].includes(el.id))'), 'no persistent settings controls in search (only explicit source choices)');
+    check(await inSearch('overlay', 'return [...document.querySelectorAll("select,input[type=checkbox],input[type=range]")].length === 0'), 'no persistent settings controls in search (sources are toggle buttons)');
 
     await key('overlay', 'Escape');
     await closed().catch(() => {});
@@ -940,9 +943,135 @@ try {
         };
       },
     };
-    if (!EXPANDED_ONLY) await runSearchClosing(closing);
+    // Search-sources adapter (R15): bookmarks and history are created with Places in
+    // this throwaway profile only; the browser's own permission doorhanger is
+    // answered with a real X pointer click.
+    const readBookmarkOptions = () => inOptions('const $ = id => document.getElementById(id); return { state: $("bookmark-access-state").textContent, message: $("bookmark-access-message").textContent };');
+    const bookmarkSpec = `const B = PlacesUtils.bookmarks;
+      const node = item => item.separator ? { type: B.TYPE_SEPARATOR }
+        : item.folder ? { type: B.TYPE_FOLDER, title: item.folder, children: item.children.map(node) } : { title: item.title, url: item.url };`;
+    let seeds = 0;
+    // The origin tab itself, remembered while it shows another page.
+    closing.navigateOrigin = async url => {
+      // Select the origin tab (remembered while it shows another page), then load the URL as a user would.
+      await chrome(`${FIXTURE} const [origin] = arguments;
+        const w = originWindow(origin) ?? [...Services.wm.getEnumerator('navigator:browser')].find(w => w.__tvOriginTab);
+        w.__tvOriginTab ??= findTab(origin).t;
+        w.gBrowser.selectedTab = w.__tvOriginTab; w.focus();`, ORIGIN);
+      await driver.setContext('content');
+      // Native keys find the window by title, so a blank page gets one.
+      try { await driver.get(url); if (url === 'about:blank') await driver.executeScript('document.title = "Blank origin"'); } finally { await driver.setContext('chrome'); }
+      await sleep(500);
+    };
+    closing.paste = async text => {
+      await chrome('Cc["@mozilla.org/widget/clipboardhelper;1"].getService(Ci.nsIClipboardHelper).copyString(arguments[0]);', text);
+      await closing.keys(['Control_L', 'v']);
+      await sleep(400);
+      return true;
+    };
+    closing.sources = {
+      promptInOverlay: false,
+      permitted: async () => (await extEval("return browser.permissions.contains({ permissions: ['bookmarks'] })")) === true,
+      markOptions: closing.expanded.markOptions,
+      optionsOpened: closing.expanded.optionsOpened,
+      closeOptions: closing.expanded.closeOptions,
+      async answer(decision) {
+        let target;
+        await until(async () => (target = await doorhanger(decision)), 'bookmark doorhanger', 6000).catch(() => {});
+        if (!target) return { shown: false };
+        await sleep(600);
+        nativeClick(env, target.x, target.y);
+        await sleep(800);
+        return { shown: true, method: `native X click on the doorhanger button "${target.label}"` };
+      },
+      async settings(action) {
+        await closing.expanded.settingsOpen();
+        try {
+          await until(async () => (await readBookmarkOptions()).state !== 'Checking…', 'bookmark settings ready', 5000);
+          if (action === 'revoke') {
+            await closing.focus(OPT);
+            await clickOptions('#bookmark-access-revoke');
+            await sleep(900);
+            nativeKeys(env, ['Return']);
+            await until(async () => /removed/.test((await readBookmarkOptions()).message), 'bookmarks revoked', 4000).catch(() => {});
+          } else {
+            await closing.focus(OPT);
+            await clickOptions('#bookmark-access-allow');
+            await closing.sources.answer(action === 'grant' ? 'allow' : 'deny');
+            await until(async () => (await readBookmarkOptions()).message !== 'Waiting for your browser…', 'bookmark prompt answered', 4000).catch(() => {});
+          }
+          return readBookmarkOptions();
+        } finally {
+          await closing.expanded.settingsClose();
+        }
+      },
+      seed: items => chromeAsync(`${bookmarkSpec} const [items, name] = arguments;
+        const folder = await B.insertTree({ guid: B.toolbarGuid, children: [{ type: B.TYPE_FOLDER, title: name, children: items.map(node) }] });
+        return folder[0].guid;`, items, `Seed ${++seeds}`),
+      unseed: guid => chromeAsync('await PlacesUtils.bookmarks.remove(arguments[0]); return true;', guid),
+      seedHistory: (urls, title) => chromeAsync(`const [urls, title] = arguments;
+        await PlacesUtils.history.insertMany(urls.map((url, i) => ({ url, title, visits: [{ date: new Date(Date.now() - i * 1000) }] }))); return true;`, urls, title),
+      async treeTiming(count) {
+        const guid = await chromeAsync(`const B = PlacesUtils.bookmarks; const [count] = arguments;
+          const children = Array.from({ length: count }, (_, i) => ({ title: 'Timing ' + i, url: 'https://timing.example/' + i }));
+          return (await B.insertTree({ guid: B.unfiledGuid, children: [{ type: B.TYPE_FOLDER, title: 'Timing', children }] }))[0].guid;`, count);
+        try {
+          return await extEval(`return (async () => { const { buildBookmarkIndex } = await import(browser.runtime.getURL('search-sources-core.js'));
+            const started = performance.now(); const tree = await browser.bookmarks.getTree(); const ms = Math.round(performance.now() - started);
+            const built = performance.now(); const index = buildBookmarkIndex(tree);
+            return { count: index.length, ms, buildMs: Math.round(performance.now() - built) }; })();`);
+        } finally {
+          await chromeAsync('await PlacesUtils.bookmarks.remove(arguments[0]); return true;', guid);
+        }
+      },
+      // The same store about:addons' Manage Extension Shortcuts writes.
+      remap: async shortcut => {
+        const result = await extEval(`return (async () => { try { await browser.commands.update({ name: 'search-tabs', shortcut: ${JSON.stringify(shortcut)} }); }
+          catch (e) { return { applied: false, error: String(e.message || e) }; }
+          const now = (await browser.commands.getAll()).find(c => c.name === 'search-tabs')?.shortcut;
+          return { applied: now === ${JSON.stringify(shortcut)}, now, via: 'commands.update (the store about:addons shortcuts writes)' }; })();`);
+        return result;
+      },
+      restoreShortcut: () => extEval("return browser.commands.reset('search-tabs').then(() => true);"),
+      pressRemapped: async () => {
+        const title = (await activeTitle()) || 'Mozilla Firefox';
+        await chrome('const w=Services.wm.getMostRecentWindow("navigator:browser"); w.focus(); w.gBrowser.selectedBrowser.focus();');
+        nativeKeys(env, ['Control_L', 'k'], title);
+      },
+      async privateWindow(urls, title) {
+        const p = await closing.expanded.privateWindow(urls, title);
+        p.privateTabs = () => chrome(`const out = []; for (const w of Services.wm.getEnumerator('navigator:browser')) if (PrivateBrowsingUtils.isWindowPrivate(w)) for (const t of w.gBrowser.tabs) out.push(t.linkedBrowser.currentURI.spec); return out;`);
+        return p;
+      },
+    };
+    // Independent verification hooks (scripts/test-search-sources-verify.mjs).
+    Object.assign(closing.sources, {
+      browserName: 'firefox',
+      // Runs `(src)(browser, arg)` in a fresh extension page.
+      ext: (src, arg) => extEval(`return (${src})(browser, ${JSON.stringify(arg ?? null)});`),
+      async containerTab(url, userContextId = 1) {
+        await chrome(`${FIXTURE} const [url, id, origin] = arguments; Services.prefs.setBoolPref('privacy.userContext.enabled', true);
+          const w = originWindow(origin); removalLog(origin);
+          w.gBrowser.addTab(url, { triggeringPrincipal: sp, userContextId: id, inBackground: true });`, url, userContextId, ORIGIN);
+        await loaded([url]);
+      },
+      privateUrls: () => chrome(`const out = []; for (const w of Services.wm.getEnumerator('navigator:browser')) if (PrivateBrowsingUtils.isWindowPrivate(w)) for (const t of w.gBrowser.tabs) out.push(t.linkedBrowser.currentURI.spec); return out;`),
+      tabsInfo: () => chrome(`const out = []; for (const w of Services.wm.getEnumerator('navigator:browser')) for (const t of w.gBrowser.tabs)
+        out.push({ url: t.linkedBrowser.currentURI.spec, userContextId: t.userContextId, private: PrivateBrowsingUtils.isWindowPrivate(w), selected: t.selected && w === Services.wm.getMostRecentWindow('navigator:browser') }); return out;`),
+      chromeFocus: () => chrome(`const w = Services.wm.getMostRecentWindow('navigator:browser'); const el = w.document.activeElement;
+        return { id: el?.id || null, tag: el?.localName || null, urlbarFocused: w.gURLBar?.focused === true, urlbarValue: w.gURLBar?.value ?? null,
+          searchMode: w.gURLBar?.searchMode ? JSON.stringify(w.gURLBar.searchMode) : null };`),
+    });
+    if (process.argv.includes('--verify-only')) {
+      await allowPrivate();
+      const { runVerifySearch } = await import('./test-search-sources-verify.mjs');
+      await runVerifySearch(closing);
+    } else {
+    if (!EXPANDED_ONLY && !SOURCES_ONLY) await runSearchClosing(closing);
     await allowPrivate();
-    await runExpandedSearch(closing);
+    if (!SOURCES_ONLY) await runExpandedSearch(closing);
+    await runSourceSearch(closing);
+    }
   }
 
   await writeFile(path.join(directory, 'screenshots.json'), JSON.stringify(shots, null, 2));

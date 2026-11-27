@@ -123,8 +123,9 @@ const STATE = `const $ = id => document.getElementById(id); const shown = el => 
   return { focus: document.activeElement?.id || null, mode: $('palette').dataset.mode, query: $('query').value, busy: $('results').getAttribute('aria-busy'),
     rows: [...document.querySelectorAll('.result')].map(r => ({ title: r.querySelector('.title')?.textContent, history: r.classList.contains('result-history'),
       snippet: r.querySelector('.snippet')?.textContent || null, badges: [...r.querySelectorAll('.badge')].map(b => b.textContent), checked: r.dataset.checked === 'true', active: r.dataset.active === 'true' })),
-    menu: shown($('source-menu')), history: $('source-history').checked, content: $('source-content').checked, historyDisabled: $('source-history').disabled,
-    contentDisabled: $('source-content').disabled, status: $('source-status').textContent, summary: $('source-summary').textContent,
+    history: $('source-history').getAttribute('aria-pressed') === 'true', content: $('source-content').getAttribute('aria-pressed') === 'true',
+    historyDisabled: $('source-history').dataset.state === 'locked', contentDisabled: $('source-content').dataset.state === 'locked',
+    status: $('source-status').textContent, summary: $('palette').dataset.sources,
     selection: $('selection-status').textContent, closeLabel: shown($('close-tabs')) ? $('close-tabs').textContent : null, count: $('result-count').textContent };`;
 const rectOf = id => `const r = document.getElementById(${JSON.stringify(id)}).getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 };`;
 
@@ -460,20 +461,18 @@ try {
   if (!granted) throw new Error('website access was not granted');
   await openSearch('/docs/q4-roadmap');
   const title4 = await b.title();
+  // Shift+Tab reaches the source toolbar on Tabs; Right moves along it: Bookmarks, History, Contents.
   keys(['Shift_L', 'Tab'], title4);
-  await until(async () => (await b.ui('return document.activeElement?.id')) === 'search-in', 'search-in focus');
-  keys(['Return'], title4);
-  await until(async () => (await state()).menu && !(await state()).contentDisabled, 'source menu');
-  // Space toggles the focused checkbox; Tab walks the menu in order: History, then Page contents.
-  keys(['Tab'], title4); await sleep(200);
+  await until(async () => (await b.ui('return document.activeElement?.id')) === 'source-tabs', 'source toolbar focus');
+  await until(async () => !(await state()).contentDisabled, 'contents available');
+  keys(['Right'], title4); await sleep(200);
+  keys(['Right'], title4); await sleep(200);
   keys(['space'], title4); await sleep(200);
-  keys(['Tab'], title4); await sleep(200);
+  keys(['Right'], title4); await sleep(200);
   keys(['space'], title4);
   await need(async () => { const s = await state(); return s.history && s.content; }, 'both sources on');
-  // Close the menu (Escape steps back once) and return to the query.
-  keys(['Escape'], title4);
-  await until(async () => !(await state()).menu, 'menu closed');
-  if ((await b.ui('return document.activeElement?.id')) !== 'query') keys(['Tab'], title4);
+  // Tab from the toolbar returns to the query.
+  keys(['Tab'], title4);
   await until(async () => (await b.ui('return document.activeElement?.id')) === 'query', 'query focus');
   typeText('budget', title4);
   await need(async () => { const s = await state(); return s.query === 'budget' && s.busy === 'false' && s.rows.some(r => r.history) && s.rows.some(r => r.snippet); }, 'history and contents results', 15000);
@@ -484,7 +483,7 @@ try {
   await need(async () => (await state()).rows[firstHistory]?.active, 'history row highlighted');
   const s4 = await state();
   report.push({ shot: 4, summary: s4.summary, status: s4.status, rows: s4.rows.map(r => `${r.history ? 'H ' : ''}${r.title}${r.snippet ? ` -- "${r.snippet}"` : ''}`) });
-  await shot('04-history-and-page-contents', 'Search in History and Page contents: past pages and text matches with snippets');
+  await shot('04-history-and-page-contents', 'History and Contents turned on in the source row: past pages and text matches with snippets');
   await closeSearch();
 
   // 5. Cleanup/merge menu in the alternate (dark) theme.

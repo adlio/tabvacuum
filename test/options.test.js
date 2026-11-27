@@ -66,6 +66,28 @@ describe('settings: stale tabs', () => {
     expect(ui.$('stale-rule-label').textContent).toBe('Close tabs not activated for');
   });
 
+  it('shows and saves Search by default, keeping one source on, with a reset', async () => {
+    const ui = setup();
+    await ui.ready;
+    expect(ui.$('search-default-tabs').checked).toBe(true);
+    ui.$('search-default-history').checked = true;
+    ui.$('search-default-history').dispatch('change');
+    ui.$('search-default-tabs').checked = false;
+    ui.$('search-default-tabs').dispatch('change');
+    ui.$('search-default-history').checked = false;
+    ui.$('search-default-history').dispatch('change');
+    expect(ui.$('search-default-tabs').checked).toBe(true); // The last one cannot go off.
+    ui.$('search-default-bookmarks').checked = true;
+    ui.$('search-default-bookmarks').dispatch('change');
+    ui.$('search-default-reset').dispatch('click');
+    await settle();
+    expect(ui.sent('saveSettings').map(({ settings }) => settings.searchSources)).toEqual([
+      { tabs: true, bookmarks: false, history: true }, { tabs: false, bookmarks: false, history: true },
+      { tabs: true, bookmarks: false, history: false }, { tabs: true, bookmarks: true, history: false },
+      { tabs: true, bookmarks: false, history: false },
+    ]);
+  });
+
   it('generic auto-save never carries the stale rule or the automation preference', async () => {
     const ui = setup();
     await ui.ready;
@@ -77,6 +99,7 @@ describe('settings: stale tabs', () => {
       searchScope: 'all', ignoreFragments: true, ignoreQueryParams: true, skipPinned: true, skipAudible: false,
       blankNewTab: true, blankWelcome: true, blankSearchEngines: false, blankCustomUrls: ['https://a.example/'],
       preventDuplicates: false, preventDuplicatesMode: 'switch', preventDuplicatesNever: [],
+      searchSources: { tabs: true, bookmarks: false, history: false },
     });
     expect(settings).not.toHaveProperty('staleThresholdMs');
     expect(settings).not.toHaveProperty('autoCloseStaleEnabled');
