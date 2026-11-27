@@ -56,7 +56,7 @@ Chrome allows at most four suggested shortcuts per extension. **Close Stale Tabs
 **Firefox**: remap in `about:addons` → gear icon → "Manage Extension Shortcuts".
 **Chrome**: remap in `chrome://extensions/shortcuts`.
 
-The Search shortcut can be changed the same way. For example, to open Search with Cmd+K (Ctrl+K on Windows and Linux), set **Search tabs** to that key on the shortcuts page above.
+The Search shortcut can be changed on the browser's shortcuts page, the same way. In Chrome you can set **Search tabs** to Cmd+K or Ctrl+K. Firefox accepts that key but keeps it for its own search bar, so Search won't open with it there; pick another key in Firefox.
 
 ### Action feedback
 
@@ -135,7 +135,7 @@ Closures follow the explicit Close action. The current/active tab may be closed,
 
 ### Search sources (0.10.0)
 
-Search looks in four sources: **Tabs**, **Bookmarks**, **History** and **Contents** (the text of loaded pages). A row of buttons under the query shows which ones are on. Click a button to turn that source on or off for this search; at least one stays on. From the keyboard, press Shift+Tab from the query to reach the row, move with the arrow keys, and press Space to toggle. The query is kept when sources change.
+Search looks in four sources: **Tabs**, **Bookmarks**, **History** and **Contents** (the text of loaded pages). A row of buttons under the query shows which ones are on. Click a button to turn that source on or off for this search; at least one stays on. From the keyboard, press Shift+Tab from the query to reach the row, move with the arrow keys, and press Space or Enter to toggle. The query is kept when sources change.
 
 **Scope words** change sources without leaving the query:
 
@@ -147,15 +147,15 @@ Search looks in four sources: **Tabs**, **Bookmarks**, **History** and **Content
 | `@contents` or `@c` | page contents only |
 | `@all` or `@a` | every source, page contents included |
 
-After the word and a space, it becomes a chip in the query box, such as "Only bookmarks ×". Backspace in an empty query removes the chip. Typing `@` opens a list of the scope words; pick one with the arrow keys and Enter. A source that still needs access shows its enable action instead of being searched.
+Type the word as the whole query, then a space, and it becomes a chip beside the query box, such as "Only bookmarks ×". Pasted text never converts, and queries such as `@types` stay text. Backspace right after the conversion puts the typed word back as text; otherwise Backspace in an empty query removes the chip. Typing `@` opens a list of the scope words; pick one with the arrow keys and Enter. A source that still needs access shows its enable action instead of being searched.
 
-**Default sources.** Search starts with Tabs only, including after upgrading. A button click or scope word lasts for that search; the next time Search opens, it is back to your default. When the sources on screen differ from your default, **Save as default** appears at the end of the row. Settings has a **Search by default** choice to view or reset it. Contents can be turned on for one search but can't be saved as the default.
+**Default sources.** Search starts with Tabs only, including after upgrading. In a private window, History is left out, and Bookmarks is left out until access is granted. A button click or scope word lasts for that search; the next time Search opens, it is back to your default. When the sources on screen differ from your default, **Save as default** appears at the end of the row. Settings has a **Search by default** choice to view or reset it. Contents can be turned on for one search but can't be saved as the default.
 
-**Counts.** A source button that's off shows a dimmed count of the extra results it would add, such as "Bookmarks 3". When nothing matches, the list says what would match ("No open tabs match. 3 bookmarks and 12 history pages do.") and Enter adds those sources for this search. Bookmarks are counted only after bookmark access is granted, history is never counted in private windows, and Contents is never counted automatically.
+**Counts.** A source button that's off shows how many rows turning it on would add, after repeats are removed, such as "Bookmarks 3". Bookmarks reads "50+" and History "100+" when more match than they list. When nothing matches, the list says what would match ("No open tabs match. 3 bookmarks and 12 history pages do.") and offers **Include them**; Enter does the same, and adds those sources for this search only. Bookmarks are counted only after bookmark access is granted, history is never counted in private windows, and Contents is never counted automatically.
 
 Results are grouped in this order: Open tabs, Bookmarks, History. Each row shows its source. An open tab that is also bookmarked appears once, as the tab, with a ★; a bookmark that is also in history appears once, as the bookmark.
 
-- **Bookmarks** are matched on title and URL using the browser's bookmark search, up to 50 results, each with its folder path (for example "Bookmarks Bar › Work"). Folders, separators, `javascript:` bookmarklets and non-HTTP(S) entries are skipped. The first time you turn Bookmarks on, the browser asks for bookmark access; Settings can remove it. Enter opens the bookmark in a new tab, or switches to it if the same page is already open. Bookmark rows have no × or checkbox, and Search never edits or deletes bookmarks. Bookmarks are available in private windows.
+- **Bookmarks** are matched on title and URL with the same fuzzy ranking as tabs, up to 50 results, each with its folder path in the browser's own folder names (for example "Bookmarks bar › Work" in Chrome). A bookmark saved in several folders appears once. Folders, separators, `javascript:` bookmarklets and non-HTTP(S) entries are skipped. The first time you turn Bookmarks on, Search shows **Allow bookmarks**, and the browser asks for access. In Firefox, Search over a web page can't show that prompt, so it offers **Enable in Settings** instead: allow bookmark access there, then return to Search and Bookmarks turns on. Search only reads bookmarks, although the browser's prompt also mentions changing them. Settings can remove bookmark access. Enter opens the bookmark in a new tab, or switches to it if the same page is already open. Bookmark rows have no × or checkbox, and Search never edits or deletes bookmarks. Bookmarks are available in private windows.
 
 - **History** searches visited page titles and URLs using the browser's native matching across its full stored history, not just the last day. It retrieves up to the latest 100 matching unique pages, then ranks them below open tabs. Exact URLs are deduplicated without stripping query parameters or fragments. An already-open exact URL appears as the open tab rather than another history row; multiple real open tabs remain separate. History entries have no × or checkbox and can never be closed/deleted by search. Enter opens the page in a new tab, or focuses an eligible exact-URL tab if one is now open. History is unavailable in private search.
 - **Page contents** searches rendered text in loaded website tabs only. First choose **Enable in Settings**, then **Allow website access** and approve the browser prompt. Then turn on Contents in Search (or type `@c`); granting access alone does not start a scan. Settings also provides Remove website access. The browser retains this optional permission.

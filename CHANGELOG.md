@@ -10,49 +10,63 @@ and the auto-generated GitHub release notes for each tag.
 
 ## [Unreleased]
 
-## [0.10.0] - Unreleased
+## [0.10.0] - 2026-11-27
 
 ### Added
-- **Bookmarks** in Search. Bookmarks are matched on title and URL, and each
-  result shows its folder, such as "Bookmarks Bar › Work". The first time you
-  turn Bookmarks on, the browser asks for bookmark access; you can remove that
-  access again in Settings ([#24]).
+- **Bookmarks** in Search ([#24], [#25]). Bookmarks are matched on title and
+  URL with the same fuzzy ranking as tabs, up to 50 results, and each result
+  shows its folder, such as "Bookmarks bar › Work". A bookmark saved in several
+  folders appears once. The first time you turn Bookmarks on, Search asks for
+  bookmark access. In Firefox, Search over a web page can't show the browser's
+  prompt, so it offers **Enable in Settings** instead: allow access there, and
+  Bookmarks turns on when you return to Search. Settings can remove that access
+  again.
 - **Source buttons** under the search box: **Tabs · Bookmarks · History ·
   Contents**. They are always visible and show which sources are being searched.
-  Click one to turn it on or off for this search. From the keyboard, press
-  Shift+Tab from the query, move with the arrow keys and press Space. They
-  replace the **Search in** menu.
+  Click one to turn it on or off for this search; at least one stays on. From the
+  keyboard, press Shift+Tab from the query, move with the arrow keys and press
+  Space or Enter. They replace the **Search in** menu.
 - **Scope words.** Type `@tabs`, `@bookmarks`, `@history` or `@contents` (or
-  `@t`, `@b`, `@h`, `@c`) to search only that source, or `@all` (`@a`) to search
-  every source, page contents included. The word becomes a chip such as "Only
-  bookmarks ×"; Backspace in an empty query removes it. Typing `@` lists the
-  scope words.
+  `@t`, `@b`, `@h`, `@c`) as the whole query, then a space, to search only that
+  source, or `@all` (`@a`) to search every source, page contents included. The
+  word becomes a chip such as "Only bookmarks ×". Backspace right after it puts
+  the typed word back as text; otherwise Backspace in an empty query removes the
+  chip. Pasted text never converts, and queries such as `@types` stay text.
+  Typing `@` lists the scope words.
 - **A saved default.** Search still starts with Tabs only. When the sources on
   screen differ from your default, **Save as default** keeps them for next time,
-  and Settings has a **Search by default** choice to view or reset it. Page
-  contents can be searched on request but not saved as the default.
+  and Settings has a **Search by default** choice to view or reset it. Contents
+  can be turned on for one search but can't be saved as the default.
 - **Counts for sources that are off.** A source button that's off shows how many
-  more results it would add, such as "Bookmarks 3". When nothing matches, Search
-  says what would ("No open tabs match. 3 bookmarks and 12 history pages do.")
-  and Enter adds those sources for this search. Bookmarks are counted only after
-  you've granted access, history is never counted in private windows, and page
-  contents are never counted automatically.
-- Results are grouped as Open tabs, Bookmarks, History, with a source label on
-  every row. An open tab that is also bookmarked appears once, marked ★.
+  rows turning it on would add, such as "Bookmarks 3", or "50+" for Bookmarks
+  and "100+" for History when more match. When nothing matches, Search says what
+  would ("No open tabs match. 3 bookmarks and 12 history pages do.") and offers
+  **Include them**; Enter does the same, for this search only. Bookmarks are
+  counted only after you've granted access, history is never counted in private
+  windows, and page contents are never counted.
+- Results are grouped as Open tabs, Bookmarks, History. An open tab that is also
+  bookmarked appears once, marked ★. With Tabs off, an open page found as a
+  bookmark is marked "Open", and Enter switches to it.
 - Hints for the new controls: the placeholder reads "Search tabs · type @ for
-  more", the key-hint footer shows `@` Sources, and each source button shows a
-  one-time tip the first time you use it.
+  more", the key-hint footer shows `@` Sources, each source button shows a
+  one-time tip the first time you use it, and Bookmarks carries a "New" mark for
+  a few launches after this update.
 
 ### Changed
-- History stays on each time Search opens if you save it as part of your
-  default; before, it turned off every time. After upgrading, Search starts with
-  Tabs only, as before.
+- Sources you save as your default, such as History, stay on each time Search
+  opens; before, extra sources turned off every time. After upgrading, Search
+  starts with Tabs only, as before.
+
+### Fixed
+- Duplicate-tab prevention now keeps a page that Search opens from a private
+  window, as it already did in normal windows.
 
 ### Safety
 - Bookmark access is an optional permission, so updating doesn't disable the
-  extension or ask for anything up front. Search never edits or deletes
-  bookmarks, and bookmark rows can't be closed or selected.
-- Queries and counts stay on your device.
+  extension or ask for anything up front. Search only reads bookmarks: it never
+  edits or deletes them, and bookmark rows can't be closed or selected.
+- Queries, counts and bookmarks stay on your device and are not stored by
+  Search.
 
 ## [0.9.0] - 2026-11-26
 
@@ -62,7 +76,7 @@ and the auto-generated GitHub release notes for each tag.
   **Switch to the open tab** (the default, so nothing changes if you already use
   it) or **Ask first** ([#20], [#22]).
 - In Ask first mode, a new tab that would have been switched instead shows
-  "Already open: <title>" with two buttons. **Switch** has focus, so Enter takes
+  "Already open: `<title>`" with two buttons. **Switch** has focus, so Enter takes
   you to the open copy and closes the new tab. **Keep both** loads the page in
   the new tab and leaves both open.
 - A duplicate that opens in the background gets its prompt there, and focus stays
@@ -195,7 +209,8 @@ and the auto-generated GitHub release notes for each tag.
   sort-tabs actions; frecency sort; ES-module background script; and the
   packaging scripts for Firefox and Chrome builds.
 
-[Unreleased]: https://github.com/adlio/tabvacuum/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/adlio/tabvacuum/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/adlio/tabvacuum/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/adlio/tabvacuum/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/adlio/tabvacuum/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/adlio/tabvacuum/compare/v0.6.0...v0.7.0
@@ -210,6 +225,7 @@ and the auto-generated GitHub release notes for each tag.
 [0.3.1]: https://github.com/adlio/tabvacuum/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/adlio/tabvacuum/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/adlio/tabvacuum/releases/tag/v0.2.0
+[#25]: https://github.com/adlio/tabvacuum/pull/25
 [#24]: https://github.com/adlio/tabvacuum/issues/24
 [#22]: https://github.com/adlio/tabvacuum/pull/22
 [#21]: https://github.com/adlio/tabvacuum/pull/21

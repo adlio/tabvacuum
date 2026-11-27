@@ -5,7 +5,7 @@ Short description (Chrome; also used by both manifests)
 Find tabs fast, sort them your way, and clear duplicates, stale tabs and blank pages. Built for keyboard control.
 
 Summary (Firefox)
-Find, sort and clean up your tabs with Aaron's Tab Vacuum (ATV). Search across windows, close a selected set, merge windows, or search history and loaded page text.
+Find, sort and clean up your tabs with Aaron's Tab Vacuum (ATV). Search across windows, close a selected set, merge windows, or search bookmarks, history and loaded page text.
 
 Promotional descriptor (both stores)
 Tab search, sorting & cleanup.
@@ -34,11 +34,13 @@ Age tracking: on Firefox a tab's age counts from when you last viewed it; on Chr
 
 Choose how duplicate URLs are matched and which pinned/audio protections manual cleanup uses in Settings. Explicit toolbar actions show progress and report results through a system notification, subject to your browser and operating-system settings.
 
-LOOK BEYOND OPEN-TAB TITLES
-Use Search in to add browsing history or text from loaded web pages. History opens a visited page without deleting its history entry. Page-content search shows matching snippets and requires optional website access that you grant in Settings. Both sources start off each time search opens. Sleeping and restricted pages are skipped; history search is unavailable in private windows.
+SEARCH BOOKMARKS, HISTORY AND PAGE TEXT
+Buttons under the search box show which sources are on: Tabs, Bookmarks, History and Contents (text from loaded web pages). Click one to turn it on or off, or type @b, @h, @c or @t and a space to search only that source; @all searches every source. A source that's off shows how many more results it would find, such as "Bookmarks 3", "50+" or "100+", and when nothing matches, Search offers to include those sources. Search starts with Tabs only; Save as default keeps your choice for next time, and Settings can reset it. Contents is turned on one search at a time and can't be saved as the default.
+
+Bookmarks need optional bookmark access, requested the first time you turn Bookmarks on; in Firefox you allow it in Settings. Search only reads bookmarks, although the browser's prompt also mentions changing them. Page-content search shows matching snippets and needs optional website access that you grant in Settings. History opens a visited page without deleting its history entry. Sleeping and restricted pages are skipped; history search is unavailable in private windows.
 
 LOCAL PROCESSING
-ATV processes tab information, history matches and page text locally. It does not send your browsing data to the developer or an analytics service. No account is required, and there is no background page-content index.
+ATV processes tab information, bookmarks, history matches and page text locally. It does not send your browsing data to the developer or an analytics service. No account is required. ATV never stores a copy of your bookmarks, and there is no background page-content index.
 
 OPEN SEARCH FROM YOUR KEYBOARD
 Mac: Command + Shift + period (.)
@@ -51,10 +53,13 @@ Closing line (Firefox only)
 To change a shortcut, open Firefox's Add-ons Manager, choose the gear menu, then Manage Extension Shortcuts.
 
 Closing line (Chrome only)
-To change a shortcut, open Chrome's Extensions page and choose Keyboard shortcuts.
+To change a shortcut, open Chrome's Extensions page and choose Keyboard shortcuts. You can set Search tabs to Cmd+K or Ctrl+K there.
 
 Support link (both stores)
 https://github.com/adlio/tabvacuum/issues
+
+Release notes (0.10.0)
+Search can now find bookmarks. Buttons under the search box turn Tabs, Bookmarks, History and Contents on or off, and @ words such as @b and @all switch sources from the keyboard. Sources that are off show how many more results they would find, and Save as default keeps your choice. Search still starts with Tabs only after upgrading. Bookmarks use a new optional bookmarks permission, asked for only when you first turn Bookmarks on; Search only reads bookmarks and keeps them on your device.
 
 Release notes (0.5.3)
 Refreshed the Little Vacuum icon and store artwork. Search, sorting and cleanup work as before. Your settings and assigned shortcuts stay in place. No new permissions are required.
