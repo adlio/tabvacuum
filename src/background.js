@@ -2,7 +2,7 @@
 import './polyfill.js';
 import { findDuplicates, planMerge, planSort, findBlankTabs, computeFrecency, validateDuplicateSettings } from './core.js';
 
-import { BOOKMARKS_NEW_OPENS, createSearchService } from './search-service.js';
+import { createSearchService } from './search-service.js';
 import { normalizeDefaultSources } from './search-sources-core.js';
 import { createSearchLauncher } from './search-launcher.js';
 import { createStaleService, OPEN_FAILED } from './stale-service.js';
@@ -268,14 +268,8 @@ browser.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
 // Register context menus on install
 browser.runtime.onInstalled.addListener(details => {
-  // R15: an update shows a "New" mark on Search's Bookmarks button for a few opens; a fresh install doesn't.
-  if (details?.reason === 'update') {
-    browser.storage.local.get({ searchBookmarksNew: null }).then(({ searchBookmarksNew }) => {
-      if (searchBookmarksNew === null) return browser.storage.local.set({ searchBookmarksNew: BOOKMARKS_NEW_OPENS });
-    }).catch(() => {});
-  } else if (details?.reason === 'install') {
-    browser.storage.local.set({ searchBookmarksNew: 0 }).catch(() => {});
-  }
+  // 0.10.0 stored a counter for a "New" mark on Search's Bookmarks button; the mark is gone.
+  if (details?.reason === 'update') browser.storage.local.remove('searchBookmarksNew').catch(() => {});
   const menus = browser.contextMenus;
   const tabContext = browser.runtime.getURL('').startsWith('moz-extension:') ? ['tab'] : ['action'];
 

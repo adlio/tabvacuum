@@ -1778,6 +1778,26 @@ describe('expanded search sources', () => {
     expect(env.api.tabs.create).not.toHaveBeenCalled();
   });
 
+  it('never holds other search commands behind an options page that does not settle (Firefox)', async () => {
+    const env = sourcesSetup();
+    const token = await open(env);
+    env.api.runtime.openOptionsPage = vi.fn(() => new Promise(() => {}));
+    vi.useFakeTimers();
+    try {
+      const opened = env.send({ command: 'openSearchPermissions', token }, frame());
+      // A refresh sent while Settings is still opening is answered at once.
+      const context = env.send({ command: 'getSearchContext', token }, frame());
+      await vi.advanceTimersByTimeAsync(0);
+      expect(await context).toMatchObject({ tabs: expect.any(Array) });
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(await opened).toEqual({ ok: true });
+    } finally {
+      vi.useRealTimers();
+    }
+    env.api.runtime.openOptionsPage = vi.fn(async () => { throw new Error('No options page'); });
+    await expect(env.send({ command: 'openSearchPermissions', token }, frame())).rejects.toThrow('No options page');
+  });
+
   it('opens the options page for an authorized frame only, keeping the search open', async () => {
     const env = sourcesSetup();
     const token = await open(env);

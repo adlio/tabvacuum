@@ -1248,7 +1248,7 @@ describe('mixed-source search (0.5.0)', () => {
     expect(ui.$('source-content').getAttribute('aria-pressed')).toBe('false');
     expect(ui.$('source-access').hidden).toBe(false);
     expect(ui.$('enable-content').hidden).toBe(false);
-    expect(ui.$('content-access-note').textContent).toContain('Opens Settings in a new tab.');
+    expect(ui.$('content-access-note')).toBeUndefined(); // No caption: the button is the whole action.
     ui.$('enable-content').dispatch('click'); await settle();
     expect(commands(ui.sendMessage).filter(msg => msg.command === 'openSearchPermissions')).toEqual([{ command: 'openSearchPermissions', token: 'good' }]);
     // Access arriving while Search is open turns on the source the user asked for.
@@ -1399,7 +1399,7 @@ describe('source toolbar (R15)', () => {
   });
 
   it('shows a one-time tip on the first press of each source and records it', async () => {
-    const ui = await ready({ initial: context({ hints: { tipsShown: ['tabs'], bookmarksNew: false } }) });
+    const ui = await ready({ initial: context({ hints: { tipsShown: ['tabs'] } }) });
     ui.$('source-history').dispatch('click');
     expect(ui.$('tip').hidden).toBe(false);
     expect(ui.$('tip').textContent).toBe('Tip: type @h to search only history');
@@ -1410,14 +1410,13 @@ describe('source toolbar (R15)', () => {
     expect(commands(ui.sendMessage).filter(msg => msg.command === 'noteSearchHints').map(msg => msg.hints)).toEqual([{ tip: 'history' }]);
   });
 
-  it('shows the Bookmarks New mark after an update, counts the launch, and ends it on first use', async () => {
+  it('has no Bookmarks "New" mark, even when an older context still says so, and records only tips', async () => {
     const ui = await ready({ initial: context({ bookmarkPermission: true, hints: { tipsShown: [], bookmarksNew: true } }) });
     await settle();
-    expect(ui.$('bookmarks-new').hidden).toBe(false);
+    expect(ui.$('bookmarks-new')).toBeUndefined();
+    expect(ui.$('source-bookmarks').textContent).not.toContain('New');
     ui.$('source-bookmarks').dispatch('click'); await settle();
-    expect(ui.$('bookmarks-new').hidden).toBe(true);
-    expect(commands(ui.sendMessage).filter(msg => msg.command === 'noteSearchHints').map(msg => msg.hints))
-      .toEqual([{ opened: true }, { usedBookmarks: true }, { tip: 'bookmarks' }]);
+    expect(commands(ui.sendMessage).filter(msg => msg.command === 'noteSearchHints').map(msg => msg.hints)).toEqual([{ tip: 'bookmarks' }]);
   });
 
   it('never truncates a long query: tabs still match, sources wait with a notice', async () => {
@@ -1550,7 +1549,7 @@ describe('bookmarks, scope words and counts (R15)', () => {
     ui.$('source-bookmarks').dispatch('click');
     expect(ui.$('source-access').hidden).toBe(false);
     expect(ui.$('enable-bookmarks').textContent).toBe('Allow bookmarks');
-    expect(ui.$('bookmarks-access-note').textContent).toBe("Search only reads bookmarks; the browser's prompt also mentions changing them.");
+    expect(ui.$('bookmarks-access-note')).toBeUndefined(); // No caption under the source row.
     ui.$('enable-bookmarks').dispatch('click');
     // Called synchronously, before any message, so the browser sees the user's action.
     expect(permissions.request).toHaveBeenCalledWith({ permissions: ['bookmarks'] });
@@ -1560,11 +1559,10 @@ describe('bookmarks, scope words and counts (R15)', () => {
     expect(ui.$('source-access').hidden).toBe(true);
   });
 
-  it('falls back to Settings where the frame has no permissions API, and says Search closes', async () => {
+  it('falls back to Settings where the frame has no permissions API', async () => {
     const ui = await ready();
     ui.$('source-bookmarks').dispatch('click');
     expect(ui.$('enable-bookmarks').textContent).toBe('Enable in Settings');
-    expect(ui.$('bookmarks-access-note').textContent).toContain('Opens Settings in a new tab.');
     ui.$('enable-bookmarks').dispatch('click'); await settle();
     expect(commands(ui.sendMessage).at(-1)).toEqual({ command: 'openSearchPermissions', token: 'good' });
   });
@@ -1625,6 +1623,105 @@ describe('bookmarks, scope words and counts (R15)', () => {
     ui.key('Escape');
     expect(ui.$('scope-list').hidden).toBe(true);
     expect(ui.parent.postMessage).not.toHaveBeenCalled(); // Escape closed the list only.
+  });
+
+  it('Tab picks the highlighted @ word as Enter does; Shift+Tab and a closed list keep their meaning', async () => {
+    const ui = await ready({ initial: granted(), sources: reply() });
+    ui.type('@book');
+    expect(ui.$('scope-list').hidden).toBe(false);
+    expect(ui.key('Tab').defaultPrevented).toBe(true);
+    expect(ui.$('scope-chip-label').textContent).toBe('Only bookmarks');
+    expect(ui.$('query').value).toBe('');
+    expect(ui.focused()).toBe('query');
+    expect(ui.mode()).toBe('search');
+    ui.key('Backspace');
+    ui.type('@');
+    ui.key('ArrowDown'); ui.key('ArrowDown');
+    ui.key('Tab');
+    expect(ui.$('scope-chip-label').textContent).toBe('Only history');
+    ui.key('Backspace');
+    // Shift+Tab closes the list and moves focus, as before.
+    ui.type('@b');
+    ui.key('Tab', { shiftKey: true });
+    expect(ui.$('scope-chip').hidden).toBe(true);
+    expect(ui.$('scope-list').hidden).toBe(true);
+    expect(ui.focused()).not.toBe('query');
+    // With the list closed, Tab enters the tab menu.
+    ui.$('query').focus();
+    ui.type('plan');
+    ui.key('Tab');
+    expect(ui.mode()).toBe('tabs');
+    expect(ui.$('scope-chip').hidden).toBe(true);
+  });
+
+  it('converts only exact words and short forms on a space: @bo, @types and addresses stay text', async () => {
+    const ui = await ready({ initial: granted() });
+    for (const text of ['@bo', '@book', '@types', 'me@b.example', 'me@b']) {
+      typeSpace(ui, text);
+      expect(ui.$('scope-chip').hidden).toBe(true);
+    }
+    typeSpace(ui, '@bookmarks');
+    expect(ui.$('scope-chip-label').textContent).toBe('Only bookmarks');
+  });
+
+  it('a chip for a source without access shows only its access action, then searches once granted', async () => {
+    let resolve;
+    const permissions = { request: vi.fn(() => new Promise(r => { resolve = r; })) };
+    const ui = await ready({ permissions, sources: reply({ counts: { history: { count: 97, limited: true } } }) });
+    typeSpace(ui, '@bookmarks');
+    ui.type('plan'); vi.advanceTimersByTime(1000); await settle();
+    expect(ui.$('scope-chip-label').textContent).toBe('Only bookmarks');
+    // No other source's rows or counts, and Tabs is not on.
+    expect(ui.rows()).toHaveLength(0);
+    expect(['tabs', 'bookmarks', 'history', 'content'].map(name => ui.$(`source-${name}`).getAttribute('aria-pressed'))).toEqual(['false', 'false', 'false', 'false']);
+    expect(ui.$('source-tabs').dataset.state).toBe('off');
+    expect(ui.$('source-history-badge').textContent).toBe('');
+    expect(ui.$('source-tabs-badge').textContent).toBe('');
+    expect(sourceCalls(ui)).toHaveLength(0);
+    expect(ui.$('list-heading').hidden).toBe(true);
+    expect(ui.$('message').hidden).toBe(true);
+    expect(ui.$('include-line').hidden).toBe(true);
+    expect(ui.$('save-default').hidden).toBe(true);
+    expect(ui.$('source-access').hidden).toBe(false);
+    expect(ui.$('enable-bookmarks').textContent).toBe('Allow bookmarks');
+    expect(ui.$('query').placeholder).toBe('Search bookmarks · type @ for more');
+    vi.advanceTimersByTime(200);
+    expect(ui.$('announcement').textContent).toBe('Bookmark access needed.');
+    // Enter in the query never opens a tab that is not listed.
+    ui.key('Enter'); await settle();
+    expect(commands(ui.sendMessage).some(msg => msg.command === 'activateSearchTab')).toBe(false);
+    ui.$('enable-bookmarks').dispatch('click');
+    ui.contexts.good = granted();
+    resolve(true); await settle();
+    vi.advanceTimersByTime(250); await settle();
+    expect(sourceCalls(ui).at(-1)).toMatchObject({ query: 'plan', sources: { tabs: false, bookmarks: true, history: false, content: false } });
+    expect(ids(ui)).toEqual(marks.map(item => item.url)); // Bookmarks only: no open tab rows.
+    expect(ui.$('source-bookmarks').getAttribute('aria-pressed')).toBe('true');
+    expect(ui.$('source-tabs').getAttribute('aria-pressed')).toBe('false');
+    expect(ui.$('source-access').hidden).toBe(true);
+    expect(ui.$('list-heading').hidden).toBe(false);
+    // Removing the chip returns to what the row showed before.
+    ui.type('');
+    ui.key('Backspace');
+    expect(ui.$('source-tabs').getAttribute('aria-pressed')).toBe('true');
+  });
+
+  it('a locked Contents or private-window History chip shows its action or status and no tabs', async () => {
+    const ui = await ready();
+    typeSpace(ui, '@c');
+    ui.type('plan');
+    expect(ui.rows()).toHaveLength(0);
+    expect(ui.$('content-access').hidden).toBe(false);
+    expect(ui.$('source-tabs').getAttribute('aria-pressed')).toBe('false');
+    ui.$('scope-chip-remove').dispatch('click');
+    expect(ui.$('source-tabs').getAttribute('aria-pressed')).toBe('true');
+    expect(ui.$('content-access').hidden).toBe(true);
+    const priv = await ready({ initial: context({ incognito: true }) });
+    typeSpace(priv, '@h');
+    priv.type('plan');
+    expect(priv.rows()).toHaveLength(0);
+    expect(priv.$('history-private-note').hidden).toBe(false);
+    expect(priv.$('source-tabs').getAttribute('aria-pressed')).toBe('false');
   });
 
   it('@all turns on every source for this search, showing enable actions for the rest', async () => {

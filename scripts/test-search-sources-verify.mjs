@@ -312,7 +312,11 @@ async function scopeEdges(ctx) {
   check(!s.list.length && await ctx.visible(), 'scope: Escape closes the @ list first and Search stays open', brief(s));
   s = await typeKeys('@');
   s = await press(['Tab']);
-  check(!s.list.length && s.focus !== 'query', 'scope: Tab closes the @ list and moves focus', brief(s));
+  check(s.chip === 'Only open tabs' && !s.list.length && s.focus === 'query', 'scope: Tab picks the highlighted @ word and keeps focus in the query', brief(s));
+  await press(['BackSpace']); await a.type(''); await press(['BackSpace']);
+  s = await typeKeys('@');
+  s = await press(['Shift_L', 'Tab']);
+  check(!s.chip && !s.list.length && s.focus !== 'query', 'scope: Shift+Tab closes the @ list and moves focus', brief(s));
   await dismiss();
 }
 
@@ -431,10 +435,10 @@ async function a11yFlow(ctx) {
   await dismiss();
 }
 
-// --- 7. One-time tips and the New mark ------------------------------------------------
+// --- 7. One-time tips; no New mark ----------------------------------------------------
 async function tipsFlow(ctx) {
   const { a, y, check, open, dismiss, toSource, press } = ctx;
-  await storage(y, { searchTipsShown: {}, searchBookmarksNew: 0 });
+  await storage(y, { searchTipsShown: {} });
   let { s } = await open();
   // History on (its tip), Tabs off then on (its tip), History off again.
   const pressTips = async () => {
@@ -453,19 +457,10 @@ async function tipsFlow(ctx) {
   check(first.history === 'Tip: type @h to search only history' && first.tabs === 'Tip: type @t to search only open tabs',
     'tips: first press of History and of Tabs each show their tip', first);
   check(!second.history && !second.tabs, 'tips: neither repeats on a later launch', second);
-  // New mark: shows for the stored number of launches.
-  await storage(y, { searchBookmarksNew: 2 });
-  const marks = [];
-  for (let i = 0; i < 3; i++) { ({ s } = await open()); marks.push(s.newMark); await dismiss(); }
-  check(JSON.stringify(marks) === '[true,true,false]', 'new mark: shows for 2 launches when 2 are left, then clears', marks);
+  // A counter left by 0.10.0 shows nothing: the mark is gone.
   await storage(y, { searchBookmarksNew: 5 });
   ({ s } = await open());
-  const shown = s.newMark;
-  await grant(y);
-  await ctx.setSource('bookmarks', true);
-  await dismiss();
-  ({ s } = await open());
-  check(shown && !s.newMark, 'new mark: the first use of Bookmarks clears it before its launches run out', { shown, after: s.newMark });
+  check(!s.newMark, 'new mark: a leftover 0.10.0 counter shows no "New" mark on Bookmarks', { newMark: s.newMark });
   await dismiss();
 }
 
@@ -536,8 +531,12 @@ async function revokeThenUse(ctx) {
     'revoke: with Bookmarks saved as default and access removed, Search opens with Tabs only, Bookmarks locked, no ★', brief(s));
   s = await typeKeys('@b ');
   info('"@b " with no bookmark access', brief(s));
-  check(['tabs', 'bookmarks', 'history', 'content'].some(n => s[n].on) || s.access, 'revoke: "@b " without access leaves Search usable (a source on or the access panel shown)', brief(s));
-  await press(['BackSpace']); await a.type(''); await press(['BackSpace']);
+  await ctx.append('current');
+  s = await settle(st => st.query === 'current' && st.busy === 'false', 4000);
+  check(s.chip === 'Only bookmarks' && ['tabs', 'bookmarks', 'history', 'content'].every(n => !s[n].on) && !s.rows.length && s.access && s.enable && !s.heading && !s.captions.length,
+    'revoke: "@b " without access shows only the access action: no tab rows, no source On', brief(s));
+  await a.type('');
+  await press(['BackSpace']);
   await a.type('current');
   s = await settle(st => st.rows.length > 0, 4000);
   check(s.rows.length > 0 && s.rows[0].kind === 'tab', 'revoke: tab search still works after the revoke', brief(s));
@@ -669,7 +668,12 @@ async function privateFlow(ctx) {
     await sleep(300);
     s = await t.state();
     info('"@h " in a private window', brief(s));
-    check(!s.history.on && ['tabs', 'bookmarks', 'content'].some(n => s[n].on), 'private: "@h " in a private window never turns History on and keeps a source on', brief(s));
+    for (const k of ['p', 'r']) await p2.keys([k]);
+    await sleep(300);
+    s = await t.state();
+    check(s.chip === 'Only history' && ['tabs', 'bookmarks', 'history', 'content'].every(n => !s[n].on) && !s.rows.length && s.privateNote && !s.heading,
+      'private: "@h " in a private window turns nothing on, lists no tabs, and shows only the private-window status', brief(s));
+    await p2.type(''); await sleep(200);
     await p2.keys(['BackSpace']); await sleep(200);
     await p2.type(''); await p2.keys(['BackSpace']); await sleep(200);
     // ★ on a private tab whose URL is bookmarked.

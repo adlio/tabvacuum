@@ -9,8 +9,6 @@ import {
 
 export const CONTENT_ORIGINS = Object.freeze(['http://*/*', 'https://*/*']);
 export const BOOKMARK_PERMISSION = Object.freeze({ permissions: ['bookmarks'] });
-// Search hints (R15): the "New" mark on Bookmarks shows for this many opens after an update.
-export const BOOKMARKS_NEW_OPENS = 5;
 const HINT_TIPS = new Set(['tabs', 'bookmarks', 'history', 'content']);
 const HISTORY_RECHECK_LIMIT = 1000;
 const BOOKMARK_EVENTS = ['onCreated', 'onRemoved', 'onChanged', 'onMoved', 'onChildrenReordered', 'onImportEnded'];
@@ -179,7 +177,7 @@ export function createSearchService(api, { contentTimeoutMs = CONTENT_TIMEOUT_MS
     const [times, contentPermission, index, stored] = await Promise.all([
       api.storage.session.get(tabs.map(tab => focusKey(tab.id))), hasContentPermission(),
       bookmarks().catch(() => null),
-      api.storage.local.get({ searchSources: null, searchTipsShown: {}, searchBookmarksNew: 0 }),
+      api.storage.local.get({ searchSources: null, searchTipsShown: {} }),
     ]);
     // ★ marks open tabs whose exact URL is bookmarked, whenever access is granted.
     const marked = new Set(index ? index.map(entry => entry.url) : []);
@@ -195,21 +193,14 @@ export function createSearchService(api, { contentTimeoutMs = CONTENT_TIMEOUT_MS
       defaultSources: normalizeDefaultSources(stored.searchSources),
       hints: {
         tipsShown: [...HINT_TIPS].filter(name => tips[name] === true),
-        bookmarksNew: Number.isInteger(stored.searchBookmarksNew) && stored.searchBookmarksNew > 0,
       },
     };
   }
 
-  /**
-   * Records what Search has shown (R15): the launch (counts down the "New"
-   * mark), a first use of Bookmarks (ends it), and one-time tips.
-   */
-  async function noteHints({ opened = false, usedBookmarks = false, tip } = {}) {
-    const stored = await api.storage.local.get({ searchTipsShown: {}, searchBookmarksNew: 0 });
+  /** Records which one-time tips Search has shown (R15). */
+  async function noteHints({ tip } = {}) {
+    const stored = await api.storage.local.get({ searchTipsShown: {} });
     const update = {};
-    const left = Number.isInteger(stored.searchBookmarksNew) ? stored.searchBookmarksNew : 0;
-    if (usedBookmarks && left > 0) update.searchBookmarksNew = 0;
-    else if (opened && left > 0) update.searchBookmarksNew = left - 1;
     if (HINT_TIPS.has(tip)) {
       const tips = stored.searchTipsShown && typeof stored.searchTipsShown === 'object' ? stored.searchTipsShown : {};
       if (tips[tip] !== true) update.searchTipsShown = { ...tips, [tip]: true };

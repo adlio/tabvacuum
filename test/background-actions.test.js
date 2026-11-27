@@ -97,6 +97,7 @@ function fakeBrowser() {
       local: {
         get: vi.fn(async keys => read(local, keys)),
         set: vi.fn(async items => { local = { ...local, ...copy(items) }; }),
+        remove: vi.fn(async keys => { for (const k of [keys].flat()) delete local[k]; }),
       },
       session: {
         get: vi.fn(async keys => copy(read(session, keys))),
@@ -523,5 +524,18 @@ describe('stale tabs', () => {
   it('labels the context-menu item as opening the controls', () => {
     listeners.installed({ reason: 'update' });
     expect(api.contextMenus.create).toHaveBeenCalledWith(expect.objectContaining({ id: 'tv-stale', title: 'Review Stale Tabs…' }));
+  });
+
+  it('removes the retired Bookmarks "New" counter on update and stores nothing on install', async () => {
+    await api.storage.local.set({ searchBookmarksNew: 4 });
+    api.storage.local.set.mockClear();
+    listeners.installed({ reason: 'update' });
+    await Promise.resolve();
+    expect(api.storage.local.remove).toHaveBeenCalledWith('searchBookmarksNew');
+    expect(await api.storage.local.get({ searchBookmarksNew: null })).toEqual({ searchBookmarksNew: null });
+    api.storage.local.remove.mockClear();
+    listeners.installed({ reason: 'install' });
+    expect(api.storage.local.remove).not.toHaveBeenCalled();
+    expect(api.storage.local.set).not.toHaveBeenCalledWith(expect.objectContaining({ searchBookmarksNew: expect.anything() }));
   });
 });

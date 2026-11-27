@@ -199,15 +199,13 @@ footer kbd { margin-right: 2px; }
   background: var(--hover); color: var(--foreground); font-size: 11px; font-variant-numeric: tabular-nums;
 }
 .source-count:empty { display: none; }
-.source-new {
-  padding: 0 5px; border-radius: 999px; background: var(--accent); color: var(--background);
-  font-size: 10px; font-weight: 700; letter-spacing: 0.02em;
-}
 .source-save { margin-left: auto; border-style: dashed; color: var(--foreground); }
 .source-access {
   flex: none; display: flex; flex-direction: column; gap: 6px;
   padding: 6px 20px 0;
 }
+/* A locked scope chip: the access action is the main content. */
+.palette[data-locked="true"] .source-access { padding-top: 20px; }
 .access-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; }
 .source-note { color: var(--muted-foreground); font-size: 11px; line-height: 16px; }
 .scope-chip {
