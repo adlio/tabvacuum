@@ -148,3 +148,8 @@
 
 - [x] **T78 (kirocrew-worker)** — Probed tab creation events in real Firefox 161 and Chromium 145 (`scripts/probe-duplicate-tabs.mjs`; results table in docs/design.md), then built Switch mode: `judgeNewTab` and helpers in core.js, `duplicate-service.js`, background wiring, Search's keep hook, Settings under Duplicate Detection (off by default), first-switch notice, PRD R14. No new permissions. Real-browser acceptance against the scenario list is a separate task.
 - [x] **T79 (kirocrew-worker)** — Ask first mode for duplicate-tab prevention: When it happens setting (Switch default), `ask.html` prompt with Switch / Keep both, PRD R14.11, design notes, unit tests and harness rows A1-A10. No new permissions.
+
+## Search sources (R15, issue #24)
+
+- [x] **T80 (kirocrew-worker)** — Bookmarks as a fourth Search source, the always-visible source toolbar with saved defaults, `@` scope words with a chip and list, off-source counts with the empty-list Include action, ★ on bookmarked tabs, one-time tips and the Bookmarks "New" mark; optional `bookmarks` permission requested in place where the frame allows it, Settings otherwise; Settings gains Search by default and bookmark access. PRD R12 edits and R15, design notes, unit tests, `scripts/test-search-sources.mjs` for both harnesses, and `scripts/capture-store.mjs` updated for the toolbar. Permission probe: `scripts/probe-bookmark-permission.mjs`.
+

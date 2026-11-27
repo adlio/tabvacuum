@@ -17,6 +17,14 @@
         <option value="current">Current window only</option>
       </select>
       <p>Search titles and URLs as you type. Empty searches show the 10 most recent tabs, with the current tab last.</p>
+      <fieldset id="search-default" class="search-default">
+        <legend>Search by default</legend>
+        <label><input type="checkbox" id="search-default-tabs"> Tabs</label>
+        <label><input type="checkbox" id="search-default-bookmarks"> Bookmarks</label>
+        <label><input type="checkbox" id="search-default-history"> History</label>
+        <button type="button" id="search-default-reset">Reset to Tabs only</button>
+        <p>The sources each new search starts with. Contents is always turned on for one search at a time. Bookmarks needs bookmark access below.</p>
+      </fieldset>
     </fieldset>
     <fieldset id="stale-fieldset">
       <legend>Stale Tabs</legend>
@@ -102,12 +110,21 @@
 
   <section id="content-permissions" aria-labelledby="content-permissions-heading">
     <h2 id="content-permissions-heading">Page-content search</h2>
-    <p>Optional website access lets ATV read text from loaded tabs only when you enable Contents in the Search in menu. Queries and page text are not saved or sent off your device. Sleeping tabs are never loaded.</p>
-    <p>Your browser keeps this permission across restarts. History and Contents start off each time you open the search palette.</p>
+    <p>Optional website access lets ATV read text from loaded tabs only when you turn on Contents in Search. Queries and page text are not saved or sent off your device. Sleeping tabs are never loaded.</p>
+    <p>Your browser keeps this permission across restarts. Contents starts off each time you open Search.</p>
     <p>Website access: <strong id="content-access-state">Checking…</strong></p>
     <button type="button" id="content-access-allow">Allow website access</button>
     <button type="button" id="content-access-revoke">Remove website access</button>
     <p id="content-access-message" role="status" aria-live="polite"></p>
+  </section>
+
+  <section id="bookmark-permissions" aria-labelledby="bookmark-permissions-heading">
+    <h2 id="bookmark-permissions-heading">Bookmark search</h2>
+    <p>Optional bookmark access lets Search list your bookmarks. Search only reads bookmarks; your browser's prompt also mentions changing them, because browsers offer no read-only bookmark access. Bookmarks and queries are not saved or sent off your device.</p>
+    <p>Bookmark access: <strong id="bookmark-access-state">Checking…</strong></p>
+    <button type="button" id="bookmark-access-allow">Allow bookmark access</button>
+    <button type="button" id="bookmark-access-revoke">Remove bookmark access</button>
+    <p id="bookmark-access-message" role="status" aria-live="polite"></p>
   </section>
   <script src="browser-polyfill.js"></script>
   <script type="module" src="options.js"></script>

@@ -12,7 +12,7 @@
     "128": "icons/icon-128.png"
   },
   "permissions": ["tabs", "history", "notifications", "storage", "contextMenus", "activeTab", "scripting", "alarms", "browserSettings"],
-  "optional_permissions": ["http://*/*", "https://*/*"],
+  "optional_permissions": ["bookmarks", "http://*/*", "https://*/*"],
   "web_accessible_resources": [
     { "resources": ["search.html"], "matches": ["http://*/*", "https://*/*"] }
   ],

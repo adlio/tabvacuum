@@ -39,9 +39,12 @@ for (const browser of ['firefox', 'chrome']) {
 
     it('keeps website access optional in the browser-appropriate field', () => {
       const field = browser === 'chrome' ? 'optional_host_permissions' : 'optional_permissions';
-      const other = browser === 'chrome' ? 'optional_permissions' : 'optional_host_permissions';
-      expect([...manifest[field]].sort()).toEqual([...ORIGINS].sort());
-      expect(manifest[other]).toBeUndefined();
+      // Bookmarks (R15) is an optional API permission in both browsers; Firefox lists it beside the origins.
+      const origins = manifest[field].filter(item => item !== 'bookmarks');
+      expect([...origins].sort()).toEqual([...ORIGINS].sort());
+      if (browser === 'chrome') expect(manifest.optional_permissions).toEqual(['bookmarks']);
+      else { expect(manifest.optional_permissions).toContain('bookmarks'); expect(manifest.optional_host_permissions).toBeUndefined(); }
+      expect(manifest.permissions).not.toContain('bookmarks');
       expect(manifest.web_accessible_resources).toEqual([{ resources: ['search.html'], matches: ORIGINS }]);
     });
 

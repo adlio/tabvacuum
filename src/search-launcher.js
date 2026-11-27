@@ -674,6 +674,38 @@ export function createSearchLauncher(api, search, {
     return { ok: true };
   }
 
+  // Bookmark result: opened (or its open tab focused) only if the bookmark still exists. Works in private windows.
+  async function activateBookmarkResult(message, sender) {
+    const { token, session, sessions } = await authorize(message, sender);
+    const origin = await originOf(session);
+    await search.activateBookmark(message.bookmarkId, origin.windowId);
+    delete sessions[token];
+    await save(sessions);
+    await closeUi(session);
+    return { ok: true };
+  }
+
+  // Save as default (R15). Contents is never stored.
+  async function saveSearchDefault(message, sender) {
+    await authorize(message, sender);
+    return { ok: true, defaultSources: await search.saveDefaultSources(message.sources) };
+  }
+
+  // One-time tips and the Bookmarks "New" mark (R15).
+  async function noteSearchHints(message, sender) {
+    await authorize(message, sender);
+    const hints = message.hints && typeof message.hints === 'object' ? message.hints : {};
+    return search.noteHints({ opened: hints.opened === true, usedBookmarks: hints.usedBookmarks === true,
+      tip: typeof hints.tip === 'string' ? hints.tip : undefined });
+  }
+
+  // Stops this search's source scan; carries no query.
+  async function cancelSearchSources(message, sender) {
+    const { session } = await authorize(message, sender);
+    sourceQueries.get(session.id)?.abort(superseded());
+    return { ok: true };
+  }
+
   // Shows the options page, where the user can grant access. Grants nothing itself.
   async function openSearchPermissions(message, sender) {
     await authorize(message, sender);
@@ -690,6 +722,9 @@ export function createSearchLauncher(api, search, {
   async function querySearchSources(message, sender) {
     const query = normalizeQuery(message.query);
     const sources = normalizeSources(message.sources);
+    // Off sources to count (R15). Counts and results stay in memory, in this reply only.
+    const count = { bookmarks: message.count?.bookmarks === true && !sources.bookmarks,
+      history: message.count?.history === true && !sources.history };
     const snapshot = await serial(async () => {
       const { session } = await authorize(message, sender);
       const origin = await originOf(session);
@@ -702,13 +737,22 @@ export function createSearchLauncher(api, search, {
     const { controller } = snapshot;
     const { signal } = controller;
     try {
-      const off = { history: { state: 'off', limited: false },
+      const off = { history: { state: 'off', limited: false }, bookmarks: { state: 'off' },
         content: { state: 'off', searched: 0, total: 0, skipped: 0, truncated: 0 } };
-      const [history, scanned] = await Promise.all([
+      const wantBookmarks = sources.bookmarks || count.bookmarks || count.history;
+      const [history, scanned, marks] = await Promise.all([
         sources.history ? search.searchHistory(query, snapshot.windowId) : { results: [], coverage: off.history },
         sources.content ? search.searchContent(query, snapshot.windowId, { signal })
           : { results: [], coverage: off.content },
+        wantBookmarks && query ? search.searchBookmarks(query) : { results: [], urls: [], coverage: off.bookmarks },
       ]);
+      const granted = marks.coverage.state === 'ready';
+      const counts = query && (count.bookmarks || count.history) ? await search.countSources(query, snapshot.windowId, {
+        tabsOn: sources.tabs, bookmarksOn: sources.bookmarks, bookmarks: count.bookmarks && granted, history: count.history,
+        // History never repeats a listed bookmark row: its count subtracts bookmarks only while
+        // Bookmarks is on, and withBookmarks gives the count for including both together.
+        bookmarkUrls: granted ? marks.urls : null,
+      }) : { bookmarks: null, history: null };
       let content = scanned;
       if (signal.aborted) throw signal.reason;
       await serial(async () => {
@@ -722,9 +766,9 @@ export function createSearchLauncher(api, search, {
       }
       if (signal.aborted) throw signal.reason;
       return {
-        history: history.results, content: content.results,
-        coverage: { history: history.coverage, content: content.coverage },
-        incognito: snapshot.incognito,
+        bookmarks: sources.bookmarks ? marks.results : [], history: history.results, content: content.results,
+        coverage: { bookmarks: sources.bookmarks ? marks.coverage : off.bookmarks, history: history.coverage, content: content.coverage },
+        counts, incognito: snapshot.incognito,
       };
     } finally {
       if (sourceQueries.get(snapshot.id) === controller) sourceQueries.delete(snapshot.id);
@@ -734,6 +778,7 @@ export function createSearchLauncher(api, search, {
   const handlers = {
     getSearchContext, activateSearchTab, dismissSearch, closeSearchTabs,
     activateHistoryResult, openSearchPermissions, querySearchSources, searchHandoffReady,
+    activateBookmarkResult, saveSearchDefault, noteSearchHints, cancelSearchSources,
   };
   // Handlers that serialize their own critical sections.
   const unqueued = new Set(['querySearchSources', 'closeSearchTabs', 'searchHandoffReady']);

@@ -8,7 +8,7 @@ import { El, mountFixture } from './mocks/dom.js';
 const html = readFileSync(new URL('../src/search.html', import.meta.url), 'utf8');
 const js = readFileSync(new URL('../src/search.js', import.meta.url), 'utf8');
 
-function setup({ top = false, search = '', noTabsApi = false, platform = 'Linux x86_64', platformInfo, closeResponse, initial, sources, bundle = true, handoff } = {}) {
+function setup({ top = false, search = '', noTabsApi = false, platform = 'Linux x86_64', platformInfo, closeResponse, initial, sources, bundle = true, handoff, permissions } = {}) {
   const { document, byId } = mountFixture(html);
   const parent = { postMessage: vi.fn() };
   const window = Object.assign(new El('#window'), { location: { search }, navigator: { platform }, close: vi.fn(), postMessage: vi.fn(), setTimeout: (...args) => setTimeout(...args) });
@@ -21,7 +21,8 @@ function setup({ top = false, search = '', noTabsApi = false, platform = 'Linux 
   const sendMessage = vi.fn(async msg => {
     if (msg.command === 'getSearchContext') return contexts[msg.token] ?? { error: 'Invalid search session' };
     if (msg.command === 'querySearchSources') return sources ? sources(msg) : { error: 'unexpected' };
-    if (['activateHistoryResult', 'openSearchPermissions'].includes(msg.command)) return msg.token === 'good' ? { ok: true } : { error: 'no' };
+    if (['activateHistoryResult', 'activateBookmarkResult', 'openSearchPermissions', 'cancelSearchSources', 'noteSearchHints'].includes(msg.command)) return msg.token === 'good' ? { ok: true } : { error: 'no' };
+    if (msg.command === 'saveSearchDefault') return { ok: true, defaultSources: { tabs: msg.sources.tabs === true, bookmarks: msg.sources.bookmarks === true, history: msg.sources.history === true } };
     if (msg.command === 'activateSearchTab' || msg.command === 'dismissSearch') return msg.token === 'good' ? { ok: true } : { error: 'no' };
     if (msg.command === 'closeSearchTabs') {
       if (msg.token !== 'good') return { error: 'Invalid search session' };
@@ -36,7 +37,7 @@ function setup({ top = false, search = '', noTabsApi = false, platform = 'Linux 
   });
   const runtime = { sendMessage };
   if (platformInfo) runtime.getPlatformInfo = platformInfo;
-  const browser = { runtime, tabs: noTabsApi ? undefined : tabEvents };
+  const browser = { runtime, tabs: noTabsApi ? undefined : tabEvents, permissions };
   startSearch({ document, window, browser });
   const $ = id => byId.get(id);
   const init = (token, source = parent) => window.dispatch('message', { source, data: { type: 'tabvacuum:init', token } });
@@ -53,12 +54,9 @@ function setup({ top = false, search = '', noTabsApi = false, platform = 'Linux 
   const rows = () => $('results').children.flatMap(group => group.children.filter(child => child.getAttribute('role') === 'row'));
   const option = i => rows()[i].children[0];
   const rowX = i => rows()[i].children[1].children[0];
-  // Sources are chosen through the Search in menu: open it, toggle, close it again.
+  // Sources are toolbar toggle buttons: press one when its state differs.
   const toggleSource = (id, on) => {
-    $('search-in').dispatch('click');
-    $(id).checked = on;
-    $(id).dispatch('change');
-    $('search-in').dispatch('click');
+    if (($(id).getAttribute('aria-pressed') === 'true') !== on) $(id).dispatch('click');
   };
   const focused = () => document.activeElement?.id;
   const type = text => { $('query').value = text; $('query').dispatch('input'); };
@@ -514,7 +512,7 @@ describe('select multiple mode', () => {
     ui.key('x');
     await settle();
     expect(closes(ui)).toEqual([{ command: 'closeSearchTabs', token: 'good', tabIds: [2, 1], state: {
-      query: '', mode: 'select', sources: { history: false, content: false }, highlight: 'tab:3', checked: [2, 1], order: [2, 3, 1], focus: 'list',
+      query: '', mode: 'select', sources: { tabs: true, bookmarks: false, history: false, content: false }, highlight: 'tab:3', checked: [2, 1], order: [2, 3, 1], focus: 'list',
     } }]);
     expect(ids(ui)).toEqual([3]);
     expect(ui.mode()).toBe('select');
@@ -579,7 +577,7 @@ describe('select multiple mode', () => {
 
   it('Select multiple is inert with no tabs', async () => {
     const ui = await ready({ initial: context({ tabs: [] }) });
-    expect(ui.$('select-toggle').getAttribute('aria-disabled')).toBe('true');
+    expect(ui.$('select-toggle').hidden).toBe(true); // Nothing to select (R15).
     ui.$('select-toggle').dispatch('click');
     expect(ui.mode()).toBe('search');
   });
@@ -709,19 +707,28 @@ describe('focus and mode transitions', () => {
       expect(ui.key('Tab', { shiftKey }).defaultPrevented).toBe(true);
       return ui.focused();
     });
-    expect(walk(5)).toEqual(['results', 'row-close-0', 'select-toggle', 'search-in', 'query']);
-    expect(walk(4, true)).toEqual(['search-in', 'select-toggle', 'row-close-0', 'results']);
+    expect(walk(5)).toEqual(['results', 'row-close-0', 'select-toggle', 'source-tabs', 'query']);
+    expect(walk(4, true)).toEqual(['source-tabs', 'select-toggle', 'row-close-0', 'results']);
     ui.keys('m', 'j');
-    expect(walk(6)).toEqual(['row-close-1', 'select-toggle', 'close-tabs', 'search-in', 'query', 'results']);
+    expect(walk(6)).toEqual(['row-close-1', 'select-toggle', 'close-tabs', 'source-tabs', 'query', 'results']);
     expect(ui.mode()).toBe('tabs'); // Passing through the query cleared select mode.
     expect(commands(ui.sendMessage)).toHaveLength(1);
+  });
+
+  it('Escape from a focused Close button steps back one mode only', async () => {
+    const ui = await ready();
+    ui.keys('Tab', 'm', ' ');
+    ui.$('close-tabs').focus();
+    ui.key('Escape');
+    expect(ui.mode()).toBe('tabs'); // Hiding Close must not send focus to the query (which means search mode).
+    expect(ui.focused()).toBe('results');
   });
 
   it('Tab without rows skips the list and row X', async () => {
     const ui = await ready({ initial: context({ tabs: [] }) });
     const order = [];
     for (let i = 0; i < 3; i++) { ui.key('Tab'); order.push(ui.focused()); }
-    expect(order).toEqual(['select-toggle', 'search-in', 'query']);
+    expect(order).toEqual(['source-tabs', 'query', 'source-tabs']);
     expect(ui.mode()).toBe('search');
   });
 
@@ -841,15 +848,18 @@ describe('search UI markup and source policy', () => {
     attributes('query', { role: 'combobox', 'aria-controls': 'results', 'aria-describedby': 'query-help', 'aria-haspopup': 'grid' });
     attributes('results', { role: 'grid', 'aria-describedby': 'tabs-help' });
     attributes('selection-status', { role: 'status', 'aria-live': 'polite' });
-    for (const id of ['select-toggle', 'close-tabs', 'search-in']) {
+    for (const id of ['select-toggle', 'close-tabs', 'source-tabs', 'source-bookmarks', 'source-history', 'source-content', 'save-default']) {
       expect($(id).tagName).toBe('BUTTON');
       attributes(id, { type: 'button' });
     }
     expect($('close-tabs').hidden).toBe(true);
     expect($('help').tagName).toBe('FOOTER');
     attributes('help', { 'aria-hidden': 'true' });
-    attributes('search-in', { 'aria-expanded': 'false', 'aria-controls': 'source-menu' });
-    expect($('source-menu').hidden).toBe(true);
+    attributes('sources', { role: 'toolbar', 'aria-label': 'Search sources' });
+    attributes('source-tabs', { 'aria-pressed': 'false', 'aria-describedby': 'source-tabs-count' });
+    attributes('scope-list', { role: 'listbox' });
+    expect($('scope-list').hidden).toBe(true);
+    expect($('query').getAttribute('placeholder')).toBe('Search tabs · type @ for more');
   });
   // Source lint complements runtime token/sender and data-free dismissal tests;
   // it is not proof of browser isolation or safe rendering by itself.
@@ -995,8 +1005,14 @@ describe('release input regressions', () => {
     expect(ui.key('a', modifiers).defaultPrevented).toBe(false);
   });
 });
+// A source request that lists results (an extra source on), as opposed to a counts-only one.
+const listing = msg => msg.command === 'querySearchSources' && (msg.sources.bookmarks || msg.sources.history || msg.sources.content);
+const cancels = ui => commands(ui.sendMessage).filter(msg => msg.command === 'cancelSearchSources');
+const ask = (query, on = {}) => ({ command: 'querySearchSources', token: 'good', query,
+  sources: { tabs: true, bookmarks: false, history: false, content: false, ...on },
+  count: { bookmarks: false, history: !on.history } });
 describe('mixed-source search (0.5.0)', () => {
-  const sourceCalls = ui => commands(ui.sendMessage).filter(msg => msg.command === 'querySearchSources');
+  const sourceCalls = ui => commands(ui.sendMessage).filter(listing);
   const hist = (url, title = 'Old page') => ({ url, title, lastVisitTime: 5 });
   const reply = ({ history = [], content = [], content: _c, ...rest } = {}) => msg => ({
     history: msg.sources.history ? history : [],
@@ -1019,14 +1035,16 @@ describe('mixed-source search (0.5.0)', () => {
 
   it('starts with only open tabs, sends nothing until an extra is chosen, then debounces', async () => {
     const ui = await ready({ sources: reply({ history: archive }) });
-    expect(ui.$('source-history').checked).toBe(false);
-    expect(ui.$('source-content').checked).toBe(false);
+    expect(ui.$('source-history').getAttribute('aria-pressed')).toBe('false');
+    expect(ui.$('source-content').getAttribute('aria-pressed')).toBe('false');
     expect(ui.$('palette').dataset.sources).toBe('tabs');
     ui.type('road'); vi.advanceTimersByTime(1000); await settle();
+    // Tabs alone sends only a counts request for the settled query (R15).
     expect(sourceCalls(ui)).toHaveLength(0);
+    expect(commands(ui.sendMessage).filter(msg => msg.command === 'querySearchSources')).toEqual([ask('road')]);
     ui.toggleSource('source-history', true);
     vi.advanceTimersByTime(0); await settle();
-    expect(sourceCalls(ui)).toEqual([{ command: 'querySearchSources', token: 'good', query: 'road', sources: { history: true, content: false } }]);
+    expect(sourceCalls(ui)).toEqual([ask('road', { history: true })]);
     expect(ui.$('palette').dataset.sources).toBe('tabs history');
     ui.type('roa'); ui.type('road map');
     expect(ids(ui)).toEqual([3]); // Open-tab matches never wait for sources.
@@ -1085,8 +1103,9 @@ describe('mixed-source search (0.5.0)', () => {
     ui.type('e'); vi.advanceTimersByTime(250); await settle();
     ui.type('ex'); vi.advanceTimersByTime(250); await settle();
     // The superseded scan is told to stop while the next query waits out its debounce.
-    expect(pending.map(p => p.msg.query)).toEqual(['e', '', 'ex']);
-    const [first, , second] = pending;
+    expect(pending.map(p => p.msg.query)).toEqual(['e', 'ex']);
+    expect(cancels(ui)).toHaveLength(1);
+    const [first, second] = pending;
     first.resolve(reply({ history: [hist('https://stale.example')] })(first.msg)); await settle();
     expect(ids(ui)).not.toContain('https://stale.example');
     ui.key('ArrowDown');
@@ -1101,7 +1120,6 @@ describe('mixed-source search (0.5.0)', () => {
     const sources = msg => new Promise(resolve => pending.push({ msg, resolve }));
     return { pending, options: { sources, ...options } };
   };
-  const cancel = { command: 'querySearchSources', token: 'good', query: '', sources: { history: false, content: false } };
   // Content matches carry the URL the tab had when it was read.
   const urls = new Map([...context().tabs, ...amazon().tabs].map(tab => [tab.id, tab.url]));
   const planContent = tabIds => tabIds.map(tabId => ({ tabId, url: urls.get(tabId), snippet: `plan amazon ${tabId}` }));
@@ -1160,29 +1178,34 @@ describe('mixed-source search (0.5.0)', () => {
     release({ ok: true, closedIds: [13], skipped: [], failedIds: [] }); await settle();
     expect(ids(ui)).toEqual([12, 14, 15, 16]);
     vi.advanceTimersByTime(0); await settle();
-    expect(pending.at(-1).msg).toEqual({ command: 'querySearchSources', token: 'good', query: 'amazon', sources: { history: false, content: true } });
+    expect(pending.at(-1).msg).toEqual(ask('amazon', { content: true }));
     pending.at(-1).resolve(reply({ content: planContent([30]) })(pending.at(-1).msg)); await settle();
     expect(ids(ui).at(-1)).toBe(30);
   });
 
-  it('cancels an in-flight scan once per request with an empty query, never the long text', async () => {
-    const { pending, options } = held();
+  it('cancels an in-flight scan once per request with its own command, never the long text', async () => {
+    const { pending, options } = held({ initial: context({ incognito: true, contentPermission: false }) });
     const ui = await ready(options);
     ui.type('road'); vi.advanceTimersByTime(1000); await settle();
     ui.type(''); ui.type('roadmap'); await settle();
-    expect(sourceCalls(ui)).toHaveLength(0); // Tabs only: no source calls, no cancels.
-    ui.toggleSource('source-history', true); vi.advanceTimersByTime(0); await settle();
+    // Private window, no bookmark access: nothing to count, so nothing is sent.
+    expect(commands(ui.sendMessage).filter(msg => msg.command === 'querySearchSources')).toHaveLength(0);
+    ui.contexts.good = context({ contentPermission: true, incognito: true });
+    ui.window.dispatch('focus'); await settle();
+    ui.toggleSource('source-content', true); vi.advanceTimersByTime(0); await settle();
     const long = 'roadmap '.repeat(40).trim();
     ui.type(long); ui.type(`${long} x`); await settle();
-    expect(sourceCalls(ui)).toEqual([{ ...cancel, query: 'roadmap', sources: { history: true, content: false } }, cancel]);
+    expect(sourceCalls(ui)).toEqual([{ ...ask('roadmap', { content: true }), count: { bookmarks: false, history: false } }]);
+    expect(cancels(ui)).toEqual([{ command: 'cancelSearchSources', token: 'good' }]);
     ui.type('road'); vi.advanceTimersByTime(250); await settle();
     ui.type(''); ui.type(''); await settle();
     ui.type('roa'); vi.advanceTimersByTime(250); await settle();
-    ui.toggleSource('source-history', false); await settle();
-    expect(sourceCalls(ui).map(msg => msg.query)).toEqual(['roadmap', '', 'road', '', 'roa', '']);
+    ui.toggleSource('source-content', false); await settle();
+    expect(sourceCalls(ui).map(msg => msg.query)).toEqual(['roadmap', 'road', 'roa']);
+    expect(cancels(ui)).toHaveLength(3);
     expect(sourceCalls(ui).every(msg => msg.query.length <= 256)).toBe(true);
     // Every reply, cancels included, now arrives; none is shown.
-    for (const { msg, resolve } of pending) resolve(reply({ history: [hist(`https://late.example/${msg.query}`, 'road late')] })({ ...msg, sources: { history: true, content: false } }));
+    for (const { msg, resolve } of pending) resolve(reply({ content: planContent([1]) })(msg));
     await settle();
     expect(ids(ui)).toEqual([3]);
     expect(ui.$('source-status').textContent).toBe('');
@@ -1195,10 +1218,8 @@ describe('mixed-source search (0.5.0)', () => {
     ui.type('plan'); vi.advanceTimersByTime(250); await settle();
     expect(ids(ui)).toEqual([3]);
     expect(ui.$('results').textContent).not.toContain('plan 1');
-    expect(ui.$('source-content').checked).toBe(false);
-    expect(ui.$('source-content').disabled).toBe(true);
-    expect(ui.$('content-access-note').hidden).toBe(false);
-    expect(ui.$('enable-content').hidden).toBe(false);
+    expect(ui.$('source-content').getAttribute('aria-pressed')).toBe('false');
+    expect(ui.$('source-content').dataset.state).toBe('locked');
     vi.advanceTimersByTime(1000); await settle();
     expect(sourceCalls(ui)).toHaveLength(1);
   });
@@ -1219,20 +1240,26 @@ describe('mixed-source search (0.5.0)', () => {
     expect(ui.$('source-status').textContent).toBe('');
   });
 
-  it('asks for website access only through Settings and still needs an explicit Contents choice', async () => {
+  it('asks for website access only through Settings, after the user asks for Contents', async () => {
     const ui = await ready();
-    expect(ui.$('source-content').disabled).toBe(true);
+    expect(ui.$('source-content').dataset.state).toBe('locked');
+    expect(ui.$('source-access').hidden).toBe(true);
+    ui.$('source-content').dispatch('click');
+    expect(ui.$('source-content').getAttribute('aria-pressed')).toBe('false');
+    expect(ui.$('source-access').hidden).toBe(false);
     expect(ui.$('enable-content').hidden).toBe(false);
-    expect(ui.$('content-access-note').hidden).toBe(false);
+    expect(ui.$('content-access-note').textContent).toContain('Opens Settings in a new tab.');
     ui.$('enable-content').dispatch('click'); await settle();
-    expect(commands(ui.sendMessage).at(-1)).toEqual({ command: 'openSearchPermissions', token: 'good' });
+    expect(commands(ui.sendMessage).filter(msg => msg.command === 'openSearchPermissions')).toEqual([{ command: 'openSearchPermissions', token: 'good' }]);
+    // Access arriving while Search is open turns on the source the user asked for.
     ui.contexts.good = context({ contentPermission: true });
     ui.window.dispatch('focus'); await settle();
-    expect(ui.$('source-content').disabled).toBe(false);
-    expect(ui.$('source-content').checked).toBe(false);
-    expect(ui.$('enable-content').hidden).toBe(true);
+    expect(ui.$('source-content').getAttribute('aria-pressed')).toBe('true');
+    expect(ui.$('source-access').hidden).toBe(true);
     expect(sourceCalls(ui)).toHaveLength(0);
-    expect(js).not.toMatch(/permissions\s*\.\s*request|localStorage|storage\.(local|sync|session)/);
+    // Website access is never requested here; only bookmarks are (R15).
+    expect(js).not.toMatch(/localStorage|storage\.(local|sync|session)/);
+    expect(js.match(/\.request\(([^)]*)\)/g)).toEqual(['.request(BOOKMARK_PERMISSION)']);
   });
 
   it('adds snippets to content matches, reports coverage, and never resurrects a closed tab', async () => {
@@ -1258,13 +1285,14 @@ describe('mixed-source search (0.5.0)', () => {
 
   it('keeps history off in private windows and reports unavailable sources', async () => {
     const ui = await ready({ initial: context({ incognito: true, contentPermission: true }), sources: () => Promise.reject(new Error('down')) });
-    expect(ui.$('source-history').disabled).toBe(true);
-    expect(ui.$('history-private-note').hidden).toBe(false);
+    expect(ui.$('source-history').dataset.state).toBe('locked');
+    expect(ui.$('history-private-note').hidden).toBe(true);
     ui.toggleSource('source-history', true);
-    expect(ui.$('source-history').checked).toBe(false);
+    expect(ui.$('source-history').getAttribute('aria-pressed')).toBe('false');
+    expect(ui.$('history-private-note').hidden).toBe(false);
     ui.toggleSource('source-content', true);
     ui.type('plan'); vi.advanceTimersByTime(250); await settle();
-    expect(sourceCalls(ui).map(msg => msg.sources)).toEqual([{ history: false, content: true }]);
+    expect(sourceCalls(ui).map(msg => msg.sources)).toEqual([{ tabs: true, bookmarks: false, history: false, content: true }]);
     expect(ui.$('source-status').textContent).toBe('Contents: unavailable');
     expect(ids(ui)).toEqual([3]);
   });
@@ -1287,8 +1315,8 @@ describe('mixed-source search (0.5.0)', () => {
   });
 });
 
-describe('Search in menu', () => {
-  const sourceCalls = ui => commands(ui.sendMessage).filter(msg => msg.command === 'querySearchSources');
+describe('source toolbar (R15)', () => {
+  const sourceCalls = ui => commands(ui.sendMessage).filter(listing);
   const reply = ({ history = [] } = {}) => msg => ({
     history: msg.sources.history ? history : [],
     content: [],
@@ -1298,74 +1326,98 @@ describe('Search in menu', () => {
     },
   });
   const archive = [{ url: 'https://old.example/r', title: 'Roadmap archive', lastVisitTime: 5 }];
-  const open = ui => ui.$('search-in').dispatch('click');
-  const menuShown = ui => !ui.$('source-menu').hidden && ui.$('search-in').getAttribute('aria-expanded') === 'true';
+  const pressed = (ui, name) => ui.$(`source-${name}`).getAttribute('aria-pressed');
 
-  it('is one closed trigger on launch, with notes only inside the menu', async () => {
+  it('shows every source as a pressed-state button in one toolbar, Tabs alone on at launch', async () => {
     const ui = await ready({ initial: context({ incognito: true }) });
-    expect(menuShown(ui)).toBe(false);
-    expect(ui.$('source-summary').textContent).toBe('');
+    expect(ui.$('sources').getAttribute('role')).toBe('toolbar');
+    expect(['tabs', 'bookmarks', 'history', 'content'].map(name => pressed(ui, name))).toEqual(['true', 'false', 'false', 'false']);
+    expect(['tabs', 'bookmarks', 'history', 'content'].map(name => ui.$(`source-${name}`).tabIndex)).toEqual([0, -1, -1, -1]);
+    expect(ui.$('source-history-count').textContent).toBe('Not searched in private windows');
+    expect(ui.$('source-bookmarks-count').textContent).toBe('Needs bookmark access');
+    expect(ui.$('save-default').hidden).toBe(true);
+    expect(ui.$('scope-chip').hidden).toBe(true);
+    expect(ui.$('source-access').hidden).toBe(true);
+    expect(ui.$('query').placeholder).toBe('Search tabs · type @ for more');
     expect(ui.$('source-status').textContent).toBe('');
-    expect(ui.$('source-menu').contains(ui.$('history-private-note'))).toBe(true);
-    expect(ui.$('source-menu').contains(ui.$('content-access-note'))).toBe(true);
-    expect(ui.$('source-menu').contains(ui.$('enable-content'))).toBe(true);
-    expect(ui.$('source-history').getAttribute('aria-describedby')).toBe('history-private-note');
-    const spoken = [ui.$('announcement').textContent, ui.$('source-status').textContent];
-    open(ui);
-    expect(menuShown(ui)).toBe(true);
-    expect([ui.$('announcement').textContent, ui.$('source-status').textContent]).toEqual(spoken); // Opening announces nothing.
-    expect(sourceCalls(ui)).toHaveLength(0);
+    expect(commands(ui.sendMessage).filter(msg => msg.command === 'querySearchSources')).toHaveLength(0);
   });
 
-  it('toggles sources in place, keeps the query, and summarizes them on the closed trigger', async () => {
+  it('toggles sources in place, keeps the query, and always keeps one on', async () => {
     const ui = await ready({ initial: context({ contentPermission: true }), sources: reply({ history: archive }) });
     ui.type('road');
-    open(ui);
-    ui.$('source-history').checked = true; ui.$('source-history').dispatch('change');
-    expect(menuShown(ui)).toBe(true);
+    ui.$('source-history').dispatch('click');
+    expect(pressed(ui, 'history')).toBe('true');
     expect(ui.$('query').value).toBe('road');
-    expect(ui.$('source-summary').textContent).toBe('+ History');
-    ui.$('source-content').checked = true; ui.$('source-content').dispatch('change');
-    expect(ui.$('source-summary').textContent).toBe('+ History · Contents');
-    ui.$('source-history').checked = false; ui.$('source-history').dispatch('change');
-    expect(ui.$('source-summary').textContent).toBe('+ Contents');
-    expect(ui.$('source-history').getAttribute('aria-describedby')).toBeNull();
-    ui.$('search-in').dispatch('click');
-    expect(menuShown(ui)).toBe(false);
-    expect(ui.$('query').value).toBe('road');
+    expect(ui.$('query').placeholder).toBe('Search tabs and history · type @ for more');
+    ui.$('source-tabs').dispatch('click');
+    ui.$('source-history').dispatch('click');
+    expect(pressed(ui, 'history')).toBe('true'); // The last source on stays on.
+    expect(ui.$('announcement').textContent).toBe('At least one source stays on.');
+    expect(pressed(ui, 'tabs')).toBe('false');
   });
 
-  it('keeps Tab inside the open menu, and Escape closes it first without changing mode', async () => {
+  it('offers Save as default only when the row differs, never storing Contents', async () => {
+    const ui = await ready({ initial: context({ contentPermission: true, defaultSources: { tabs: true, history: false } }) });
+    ui.$('source-content').dispatch('click');
+    expect(pressed(ui, 'content')).toBe('true');
+    expect(ui.$('save-default').hidden).toBe(true); // Only Contents differs.
+    ui.$('source-history').dispatch('click');
+    expect(ui.$('save-default').hidden).toBe(false);
+    ui.$('save-default').dispatch('click'); await settle();
+    expect(commands(ui.sendMessage).filter(msg => msg.command === 'saveSearchDefault'))
+      .toEqual([{ command: 'saveSearchDefault', token: 'good', sources: { tabs: true, bookmarks: false, history: true } }]);
+    expect(ui.$('save-default').hidden).toBe(true);
+  });
+
+  it('starts from the saved default, minus what this window cannot use', async () => {
+    const ui = await ready({ initial: context({ incognito: true, bookmarkPermission: true, defaultSources: { tabs: false, bookmarks: true, history: true } }) });
+    expect(['tabs', 'bookmarks', 'history', 'content'].map(name => pressed(ui, name))).toEqual(['false', 'true', 'false', 'false']);
+    const none = await ready({ initial: context({ incognito: true, defaultSources: { tabs: false, history: true } }) });
+    expect(pressed(none, 'tabs')).toBe('true'); // History is unavailable here, so Tabs.
+  });
+
+  it('is one Tab stop reached by Shift+Tab from the query, with arrow keys inside', async () => {
     const ui = await ready();
-    ui.keys('Tab', 'Tab', 'Tab', 'Tab');
-    expect(ui.focused()).toBe('search-in');
-    expect(ui.mode()).toBe('tabs');
-    open(ui);
-    const walk = Array.from({ length: 3 }, () => { ui.key('Tab'); return ui.focused(); });
-    expect(walk).toEqual(['source-history', 'enable-content', 'search-in']); // Contents is disabled here.
     ui.key('Tab', { shiftKey: true });
-    expect(ui.focused()).toBe('enable-content');
-    ui.$('source-history').focus();
-    for (const name of ['m', 'x', 'a', ' ', 'Enter']) expect(ui.key(name).defaultPrevented).toBe(false); // Native checkbox keys.
-    expect(ui.mode()).toBe('tabs');
-    ui.key('Escape');
-    expect(menuShown(ui)).toBe(false);
-    expect(ui.focused()).toBe('search-in');
-    expect(ui.mode()).toBe('tabs');
-    expect(ui.parent.postMessage).not.toHaveBeenCalled();
+    expect(ui.focused()).toBe('source-tabs');
+    expect(ui.key('ArrowRight').defaultPrevented).toBe(true);
+    expect(ui.focused()).toBe('source-bookmarks');
+    ui.key('End');
+    expect(ui.focused()).toBe('source-content');
+    ui.key('ArrowRight');
+    expect(ui.focused()).toBe('source-tabs');
+    ui.key('ArrowLeft');
+    expect(ui.focused()).toBe('source-content');
+    expect(ui.$('source-content').tabIndex).toBe(0);
+    for (const name of [' ', 'Enter', 'm', 'x']) expect(ui.key(name).defaultPrevented).toBe(false); // Native button keys.
     ui.key('Tab');
     expect(ui.focused()).toBe('query');
-    await flush();
-    expect(closes(ui)).toEqual([]);
+    ui.key('Tab', { shiftKey: true });
+    expect(ui.focused()).toBe('source-content'); // The roving stop is remembered.
+    expect(ui.mode()).toBe('search');
   });
 
-  it('closes on an outside press inside the palette, but not on presses within the menu', async () => {
-    const ui = await ready();
-    open(ui);
-    ui.$('palette').dispatch('mousedown', { target: ui.$('source-history') });
-    expect(menuShown(ui)).toBe(true);
-    ui.$('palette').dispatch('mousedown', { target: ui.option(0) });
-    expect(menuShown(ui)).toBe(false);
+  it('shows a one-time tip on the first press of each source and records it', async () => {
+    const ui = await ready({ initial: context({ hints: { tipsShown: ['tabs'], bookmarksNew: false } }) });
+    ui.$('source-history').dispatch('click');
+    expect(ui.$('tip').hidden).toBe(false);
+    expect(ui.$('tip').textContent).toBe('Tip: type @h to search only history');
+    expect(ui.$('announcement').textContent).toBe('Tip: type @h to search only history');
+    ui.$('source-history').dispatch('click');
+    ui.$('source-tabs').dispatch('click');
+    await settle();
+    expect(commands(ui.sendMessage).filter(msg => msg.command === 'noteSearchHints').map(msg => msg.hints)).toEqual([{ tip: 'history' }]);
+  });
+
+  it('shows the Bookmarks New mark after an update, counts the launch, and ends it on first use', async () => {
+    const ui = await ready({ initial: context({ bookmarkPermission: true, hints: { tipsShown: [], bookmarksNew: true } }) });
+    await settle();
+    expect(ui.$('bookmarks-new').hidden).toBe(false);
+    ui.$('source-bookmarks').dispatch('click'); await settle();
+    expect(ui.$('bookmarks-new').hidden).toBe(true);
+    expect(commands(ui.sendMessage).filter(msg => msg.command === 'noteSearchHints').map(msg => msg.hints))
+      .toEqual([{ opened: true }, { usedBookmarks: true }, { tip: 'bookmarks' }]);
   });
 
   it('never truncates a long query: tabs still match, sources wait with a notice', async () => {
@@ -1378,24 +1430,20 @@ describe('Search in menu', () => {
     ui.type(long); vi.advanceTimersByTime(1000); await settle();
     expect(sourceCalls(ui)).toHaveLength(1);
     expect(ids(ui)).toEqual([3]);
-    expect(ui.$('source-status').textContent).toBe('History and contents support queries up to 256 characters');
+    expect(ui.$('source-status').textContent).toBe('Bookmarks, history and contents support queries up to 256 characters');
     expect(ui.$('source-status').dataset.busy).toBe('false');
   });
 
-  it('drops a revoked source, returns focus to the trigger, and keeps the query', async () => {
+  it('drops a revoked source and keeps the query', async () => {
     const ui = await ready({ initial: context({ contentPermission: true }), sources: reply() });
     ui.type('plan');
-    open(ui);
-    ui.$('source-content').checked = true; ui.$('source-content').dispatch('change');
+    ui.$('source-content').dispatch('click');
     ui.$('source-content').focus();
     ui.contexts.good = context({ contentPermission: false });
     ui.tabEvents.onRemoved.fn(); await settle();
-    expect(ui.$('source-content').checked).toBe(false);
-    expect(ui.$('source-content').disabled).toBe(true);
-    expect(ui.focused()).toBe('search-in');
-    expect(ui.$('source-summary').textContent).toBe('');
+    expect(pressed(ui, 'content')).toBe('false');
+    expect(ui.$('source-content').dataset.state).toBe('locked');
     expect(ui.$('source-status').textContent).toBe('');
-    expect(ui.$('enable-content').hidden).toBe(false);
     expect(ui.$('query').value).toBe('plan');
   });
 
@@ -1427,6 +1475,270 @@ describe('Search in menu', () => {
     expect(ids(ui)).toEqual([3]);
     ui.key('m');
     expect(activeId(ui)).toBe('https://old.example/r');
+  });
+});
+
+describe('bookmarks, scope words and counts (R15)', () => {
+  const sourceCalls = ui => commands(ui.sendMessage).filter(msg => msg.command === 'querySearchSources');
+  const mark = (id, url, title, path = 'Bookmarks bar › Work', folders = 0) => ({ id, url, title, path, folders });
+  const marks = [mark('b1', 'https://docs.example/plan', 'Plan bookmark'), mark('b2', 'https://wiki.example/road', 'Road wiki', 'Other bookmarks', 1)];
+  // A backend reply: listed sources get rows; off sources get counts.
+  const reply = ({ bookmarks = marks, history = [], counts = {} } = {}) => msg => ({
+    bookmarks: msg.sources.bookmarks ? bookmarks : [],
+    history: msg.sources.history ? history : [],
+    content: [],
+    coverage: {
+      bookmarks: msg.sources.bookmarks ? { state: 'ready', limited: false } : { state: 'off' },
+      history: msg.sources.history ? { state: 'ready', limited: false } : { state: 'off' },
+      content: { state: 'off' },
+    },
+    counts: { bookmarks: msg.count.bookmarks && counts.bookmarks !== undefined ? (typeof counts.bookmarks === 'number' ? { count: counts.bookmarks, limited: false } : counts.bookmarks) : null,
+      history: msg.count.history ? counts.history ?? null : null },
+  });
+  const granted = (over = {}) => context({ bookmarkPermission: true, bookmarked: [3], ...over });
+  // A typed space at the end of the query, as the browser reports it.
+  const typeSpace = (ui, text) => { ui.$('query').value = `${text} `; ui.$('query').dispatch('input', { inputType: 'insertText', data: ' ' }); };
+  const paste = (ui, text) => { ui.$('query').value = text; ui.$('query').dispatch('input', { inputType: 'insertFromPaste', data: null }); };
+
+  it('lists bookmarks after open tabs with their folder path, and opens them by id', async () => {
+    const ui = await ready({ initial: granted(), sources: reply() });
+    ui.toggleSource('source-bookmarks', true);
+    ui.type('road'); vi.advanceTimersByTime(250); await settle();
+    // docs.example/plan is open as tab 3, so it shows once, as the tab, with ★.
+    expect(ids(ui)).toEqual([3, 'https://wiki.example/road']);
+    expect(ui.$('results').children.map(g => g.getAttribute('aria-label'))).toEqual(['Open tabs', 'Bookmarks']);
+    expect(ui.rows()[0].textContent).toContain('★');
+    expect(ui.rows()[0].textContent).toContain('Bookmarked');
+    expect(ui.rows()[1].textContent).toBe('WRoad wikiBookmarkhttps://wiki.example/roadOther bookmarks · +1 folder');
+    expect(ui.rows()[1].children[1].children).toHaveLength(0); // No close button.
+    expect(ui.$('result-count').textContent).toBe('1 tab · 1 bookmark');
+    ui.key('ArrowDown');
+    expect(ui.$('enter-search').textContent).toBe('Open page');
+    ui.key('Enter'); await settle();
+    expect(commands(ui.sendMessage).at(-1)).toEqual({ command: 'activateBookmarkResult', token: 'good', bookmarkId: 'b2' });
+  });
+
+  it('marks open tabs that are bookmarked even with the Bookmarks source off', async () => {
+    const ui = await ready({ initial: granted() });
+    expect(ui.rows().map(row => row.textContent.includes('★'))).toEqual([false, true, false]); // Recent order: 2, 3, 1.
+  });
+
+  it('with Tabs off shows an open bookmarked page as a bookmark marked Open, and hides tab-only controls', async () => {
+    const ui = await ready({ initial: granted(), sources: reply() });
+    ui.toggleSource('source-bookmarks', true);
+    ui.toggleSource('source-tabs', false);
+    // An empty query still shows recent tabs (R11.3).
+    expect(ids(ui)).toEqual([2, 3, 1]);
+    ui.type('plan'); vi.advanceTimersByTime(250); await settle();
+    expect(ids(ui)).toEqual(['https://docs.example/plan', 'https://wiki.example/road']);
+    expect(ui.rows()[0].textContent).toContain('Open');
+    expect(ui.$('enter-search').textContent).toBe('Switch');
+    expect(ui.$('select-toggle').hidden).toBe(true);
+    ui.key('Tab');
+    expect(ui.mode()).toBe('tabs');
+    expect(ui.$('hint-close-tab').hidden).toBe(true);
+    expect(ui.$('hint-select-tabs').hidden).toBe(true);
+    ui.keys('x', 'm'); await settle();
+    expect(closes(ui)).toHaveLength(0);
+    expect(ui.mode()).toBe('tabs');
+  });
+
+  it('asks for bookmark access inside the click, then turns Bookmarks on when granted', async () => {
+    let resolve;
+    const permissions = { request: vi.fn(() => new Promise(r => { resolve = r; })) };
+    const ui = await ready({ permissions, sources: reply() });
+    ui.$('source-bookmarks').dispatch('click');
+    expect(ui.$('source-access').hidden).toBe(false);
+    expect(ui.$('enable-bookmarks').textContent).toBe('Allow bookmarks');
+    expect(ui.$('bookmarks-access-note').textContent).toBe("Search only reads bookmarks; the browser's prompt also mentions changing them.");
+    ui.$('enable-bookmarks').dispatch('click');
+    // Called synchronously, before any message, so the browser sees the user's action.
+    expect(permissions.request).toHaveBeenCalledWith({ permissions: ['bookmarks'] });
+    ui.contexts.good = granted();
+    resolve(true); await settle();
+    expect(ui.$('source-bookmarks').getAttribute('aria-pressed')).toBe('true');
+    expect(ui.$('source-access').hidden).toBe(true);
+  });
+
+  it('falls back to Settings where the frame has no permissions API, and says Search closes', async () => {
+    const ui = await ready();
+    ui.$('source-bookmarks').dispatch('click');
+    expect(ui.$('enable-bookmarks').textContent).toBe('Enable in Settings');
+    expect(ui.$('bookmarks-access-note').textContent).toContain('Opens Settings in a new tab.');
+    ui.$('enable-bookmarks').dispatch('click'); await settle();
+    expect(commands(ui.sendMessage).at(-1)).toEqual({ command: 'openSearchPermissions', token: 'good' });
+  });
+
+  it('turns a typed scope word into a chip on the space, and Backspace restores the literal text', async () => {
+    const ui = await ready({ initial: granted(), sources: reply() });
+    ui.type('@b');
+    expect(ui.$('scope-list').hidden).toBe(false);
+    typeSpace(ui, '@b');
+    expect(ui.$('query').value).toBe('');
+    expect(ui.$('scope-chip').hidden).toBe(false);
+    expect(ui.$('scope-chip-label').textContent).toBe('Only bookmarks');
+    expect(ui.$('scope-chip-remove').getAttribute('aria-label')).toBe('Remove filter: only bookmarks');
+    expect(['tabs', 'bookmarks'].map(name => ui.$(`source-${name}`).getAttribute('aria-pressed'))).toEqual(['false', 'true']);
+    ui.type('road'); vi.advanceTimersByTime(250); await settle();
+    expect(sourceCalls(ui).at(-1).query).toBe('road'); // The chip is never query text.
+    ui.type('');
+    ui.key('Backspace');
+    expect(ui.$('scope-chip').hidden).toBe(true);
+    expect(ui.$('source-tabs').getAttribute('aria-pressed')).toBe('true');
+    // Right after a conversion, Backspace puts the typed text back to search for.
+    typeSpace(ui, '@b');
+    expect(ui.key('Backspace').defaultPrevented).toBe(true);
+    expect(ui.$('query').value).toBe('@b ');
+    expect(ui.$('scope-chip').hidden).toBe(true);
+    typeSpace(ui, '@b');
+    expect(ui.$('scope-chip').hidden).toBe(true); // Now literal: searched as text.
+  });
+
+  it('never converts on paste, mid-query, for other @ words, or for a full-width ＠', async () => {
+    const ui = await ready({ initial: granted() });
+    paste(ui, '@b ');
+    typeSpace(ui, 'notes @b');
+    typeSpace(ui, '@types');
+    typeSpace(ui, '＠b');
+    expect(ui.$('scope-chip').hidden).toBe(true);
+    expect(ui.$('source-tabs').getAttribute('aria-pressed')).toBe('true');
+    ui.type('@types/node');
+    expect(ui.$('scope-list').hidden).toBe(true);
+  });
+
+  it('ranks and counts nothing on a bare @ prefix, and picks from the @ list with the keyboard', async () => {
+    const ui = await ready({ initial: granted(), sources: reply() });
+    ui.type('@h'); vi.advanceTimersByTime(1000); await settle();
+    expect(ids(ui)).toEqual([2, 3, 1]); // Recent tabs: '@h' is not ranked.
+    expect(sourceCalls(ui)).toHaveLength(0);
+    expect(ui.$('query').getAttribute('aria-controls')).toBe('scope-list');
+    expect(ui.$('query').getAttribute('aria-haspopup')).toBe('listbox');
+    ui.type('@');
+    expect(ui.$('scope-list').children.map(option => option.dataset.scope)).toEqual(['tabs', 'bookmarks', 'history', 'contents', 'all']);
+    ui.key('ArrowDown');
+    expect(ui.$('query').getAttribute('aria-activedescendant')).toBe('scope-option-1');
+    ui.key('Enter');
+    expect(ui.$('scope-chip-label').textContent).toBe('Only bookmarks');
+    expect(ui.$('query').getAttribute('aria-controls')).toBe('results');
+    ui.key('Backspace');
+    ui.type('@');
+    ui.key('Escape');
+    expect(ui.$('scope-list').hidden).toBe(true);
+    expect(ui.parent.postMessage).not.toHaveBeenCalled(); // Escape closed the list only.
+  });
+
+  it('@all turns on every source for this search, showing enable actions for the rest', async () => {
+    const ui = await ready({ initial: granted(), sources: reply() });
+    typeSpace(ui, '@all');
+    expect(ui.$('scope-chip-label').textContent).toBe('All sources');
+    expect(['tabs', 'bookmarks', 'history', 'content'].map(name => ui.$(`source-${name}`).getAttribute('aria-pressed'))).toEqual(['true', 'true', 'true', 'false']);
+    expect(ui.$('content-access').hidden).toBe(false);
+    expect(ui.$('save-default').hidden).toBe(false);
+  });
+
+  it('shows off-source counts after removing repeats, without re-rendering the list', async () => {
+    const pending = [];
+    const ui = await ready({ initial: granted(), sources: msg => new Promise(resolve => pending.push({ msg, resolve })) });
+    ui.type('road'); vi.advanceTimersByTime(250); await settle();
+    expect(pending[0].msg.count).toEqual({ bookmarks: true, history: true });
+    const before = ui.rows();
+    ui.keys('ArrowDown');
+    ui.type('roadm'); vi.advanceTimersByTime(250); await settle();
+    // The stale reply for 'road' lands after 'roadm' was asked: ignored.
+    pending[0].resolve(reply({ counts: { bookmarks: 9, history: { count: 9, limited: false } } })(pending[0].msg)); await settle();
+    expect(ui.$('source-bookmarks-badge').textContent).toBe('');
+    pending[1].resolve(reply({ counts: { bookmarks: 2, history: { count: 100, limited: true } } })(pending[1].msg)); await settle();
+    expect(ui.$('source-bookmarks-badge').textContent).toBe('2');
+    expect(ui.$('source-history-badge').textContent).toBe('100+');
+    expect(ui.$('source-bookmarks-count').textContent).toBe('2 more matches');
+    expect(ui.$('source-content-count').textContent).toBe('Needs website access');
+    expect(ui.rows()[0]).toBe(before[0]); // Same row nodes: counts only repaint the buttons.
+  });
+
+  it('reads 50+ when more bookmarks match, on the button and in the empty-list sentence', async () => {
+    const ui = await ready({ initial: granted(), sources: reply({ counts: { bookmarks: { count: 50, limited: true } } }) });
+    ui.type('zzz'); vi.advanceTimersByTime(250); await settle();
+    expect(ui.$('source-bookmarks-badge').textContent).toBe('50+');
+    expect(ui.$('source-bookmarks-count').textContent).toBe('50+ more matches');
+    expect(ui.$('message').textContent).toBe('No open tabs match. 50+ bookmarks do.');
+  });
+
+  it('counts History on its own on its button, but without bookmarked pages in the Include sentence', async () => {
+    const ui = await ready({ initial: granted(), sources: reply({ counts: { bookmarks: 2, history: { count: 3, limited: false, withBookmarks: 1 } } }) });
+    ui.type('zzz'); vi.advanceTimersByTime(250); await settle();
+    expect(ui.$('source-history-badge').textContent).toBe('3'); // Rows History alone would add.
+    expect(ui.$('message').textContent).toBe('No open tabs match. 2 bookmarks and 1 history page do.');
+  });
+
+  it('shows why a bookmark could not open, and keeps the message through list refreshes', async () => {
+    const ui = await ready({ initial: granted(), sources: reply() });
+    ui.toggleSource('source-bookmarks', true);
+    ui.type('road'); vi.advanceTimersByTime(250); await settle();
+    ui.key('ArrowDown');
+    const real = ui.sendMessage.getMockImplementation();
+    ui.sendMessage.mockImplementation(async msg => (msg.command === 'activateBookmarkResult' ? { error: 'That bookmark is no longer available.' } : real(msg)));
+    ui.key('Enter'); await settle();
+    expect(ui.$('message').textContent).toBe('That bookmark is no longer available. Choose another result.');
+    expect(ui.$('message').dataset.state).toBe('error');
+    // A tab event refreshes the list; the message stays until the next query.
+    ui.contexts.good = granted({ tabs: [...context().tabs, { id: 9, windowId: 10, title: 'New', url: 'https://new.example', lastAccessed: 1 }] });
+    ui.tabEvents.onCreated.fn(); await settle();
+    expect(ui.$('message').hidden).toBe(false);
+    expect(ui.$('message').textContent).toBe('That bookmark is no longer available. Choose another result.');
+    ui.type('roa');
+    expect(ui.$('message').hidden).toBe(true);
+  });
+
+  it('clears a bookmark failure on a source action, and Enter only presses an Include offer that shows', async () => {
+    const ui = await ready({ initial: granted(), sources: reply({ bookmarks: [marks[1]], counts: { bookmarks: 1 } }) });
+    const real = ui.sendMessage.getMockImplementation();
+    ui.sendMessage.mockImplementation(async msg => (msg.command === 'activateBookmarkResult' ? { error: 'That bookmark is no longer available.' } : real(msg)));
+    ui.toggleSource('source-bookmarks', true);
+    ui.type('wiki'); vi.advanceTimersByTime(250); await settle();
+    expect(ids(ui)).toEqual(['https://wiki.example/road']);
+    ui.key('Enter'); await settle();
+    expect(ui.$('message').textContent).toBe('That bookmark is no longer available. Choose another result.');
+    // Turning Bookmarks off is an action on the list: the old failure goes, and the offer shows instead.
+    ui.$('source-bookmarks').dispatch('click');
+    expect(ui.$('message').textContent).not.toContain('no longer available');
+    vi.advanceTimersByTime(0); await settle();
+    expect(ui.$('message').textContent).toBe('No open tabs match. 1 bookmark does.');
+    expect(ui.$('include-line').hidden).toBe(false);
+    expect(ui.$('announcement').textContent).toBe('No open tabs match. 1 bookmark does.');
+  });
+
+  it('never presses a hidden Include offer, and never announces one', async () => {
+    const ui = await ready({ initial: granted(), sources: reply({ counts: { bookmarks: 1 } }) });
+    ui.type('zzz'); vi.advanceTimersByTime(250); await settle();
+    expect(ui.$('include-line').hidden).toBe(false);
+    // Whatever hides the offer line (an error or notice in its place), Enter and the button do nothing.
+    ui.$('include-line').hidden = true;
+    ui.key('Enter');
+    expect(ui.$('source-bookmarks').getAttribute('aria-pressed')).toBe('false');
+    ui.$('include-sources').dispatch('click');
+    expect(ui.$('source-bookmarks').getAttribute('aria-pressed')).toBe('false');
+  });
+
+  it('offers to include matching sources when nothing matches, on a button or one fresh Enter', async () => {
+    const ui = await ready({ initial: granted(), sources: reply({ counts: { bookmarks: 3, history: { count: 12, limited: false } }, bookmarks: [mark('b9', 'https://zz.example', 'zzz one')] }) });
+    ui.type('zzz'); vi.advanceTimersByTime(250); await settle();
+    expect(ui.rows()).toHaveLength(0);
+    expect(ui.$('message').textContent).toBe('No open tabs match. 3 bookmarks and 12 history pages do.');
+    expect(ui.$('include-line').hidden).toBe(false);
+    expect(ui.$('include-sources').textContent).toBe('Include them');
+    expect(ui.$('announcement').textContent).toBe('No open tabs match. 3 bookmarks and 12 history pages do.');
+    ui.key('Enter', { repeat: true });
+    expect(ui.$('source-bookmarks').getAttribute('aria-pressed')).toBe('false');
+    ui.key('Enter');
+    expect(['bookmarks', 'history'].map(name => ui.$(`source-${name}`).getAttribute('aria-pressed'))).toEqual(['true', 'true']);
+    vi.advanceTimersByTime(0); await settle();
+    expect(ids(ui)).toEqual(['https://zz.example']);
+    // No row is armed: Enter does nothing until the user moves.
+    expect(ui.rows().some(row => row.getAttribute('data-active') === 'true')).toBe(false);
+    ui.key('Enter'); await settle();
+    expect(commands(ui.sendMessage).filter(msg => msg.command === 'activateBookmarkResult')).toHaveLength(0);
+    ui.key('ArrowDown');
+    expect(activeId(ui)).toBe('https://zz.example');
   });
 });
 
@@ -1516,7 +1828,7 @@ describe('closing the tab that hosts search (0.5.2)', () => {
     ui.keys('j', 'x', 'k', 'x'); // Closes the host (1); the rest is queued.
     await settle();
     expect(closes(ui)[1]).toEqual({ command: 'closeSearchTabs', token: 'good', tabIds: [1], state: {
-      query: '', mode: 'tabs', sources: { history: false, content: false }, highlight: 'tab:1', checked: [], order: [3, 1], focus: 'list',
+      query: '', mode: 'tabs', sources: { tabs: true, bookmarks: false, history: false, content: false }, highlight: 'tab:1', checked: [], order: [3, 1], focus: 'list',
     } });
     expect(closes(ui)).toHaveLength(2);
     expect(ui.$('message').textContent).toBe('Search moved to another tab.');
@@ -1590,13 +1902,13 @@ describe('closing the tab that hosts search (0.5.2)', () => {
 
   it('turns on only the sources this window allows, after the close', async () => {
     const sources = vi.fn(() => ({ history: [], content: [], coverage: { history: { state: 'ready' } } }));
-    const ui = await ready({ initial: { ...amazon(), contentPermission: false, restore: handedState({ sources: { history: true, content: true } }) },
+    const ui = await ready({ initial: { ...amazon(), contentPermission: false, restore: handedState({ sources: { tabs: false, bookmarks: true, history: true, content: true } }) },
       handoff: () => ({ ok: true, closedIds: [12], skipped: [], failedIds: [], context: { ...remaining([12]), contentPermission: false } }), sources });
     await settle();
     vi.advanceTimersByTime(0); await settle();
-    expect(ui.$('source-history').checked).toBe(true);
-    expect(ui.$('source-content').checked).toBe(false);
-    expect(sources.mock.calls.map(([msg]) => msg.sources)).toEqual([{ history: true, content: false }]);
+    // Tabs off carries over; Bookmarks and Contents lack access here and drop.
+    expect(['tabs', 'bookmarks', 'history', 'content'].map(name => ui.$(`source-${name}`).getAttribute('aria-pressed'))).toEqual(['false', 'false', 'true', 'false']);
+    expect(sources.mock.calls.map(([msg]) => msg.sources)).toEqual([{ tabs: false, bookmarks: false, history: true, content: false }]);
   });
 
   it('reads the list once when the continued close cannot report back', async () => {

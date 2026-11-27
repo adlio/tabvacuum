@@ -3,11 +3,17 @@
 import { searchPageContent } from './search-content.js';
 import {
   CONTENT_CONCURRENCY, CONTENT_LIMITS, CONTENT_TAB_LIMIT, CONTENT_TIMEOUT_MS, HISTORY_LIMIT,
-  contentSkipReason, isSafeWebUrl, mapLimit, readContentResult, selectHistory, withTimeout,
+  buildBookmarkIndex, contentSkipReason, isSafeWebUrl, mapLimit, normalizeDefaultSources, readContentResult,
+  searchBookmarkIndex, selectHistory, sourceCounts, withTimeout,
 } from './search-sources-core.js';
 
 export const CONTENT_ORIGINS = Object.freeze(['http://*/*', 'https://*/*']);
+export const BOOKMARK_PERMISSION = Object.freeze({ permissions: ['bookmarks'] });
+// Search hints (R15): the "New" mark on Bookmarks shows for this many opens after an update.
+export const BOOKMARKS_NEW_OPENS = 5;
+const HINT_TIPS = new Set(['tabs', 'bookmarks', 'history', 'content']);
 const HISTORY_RECHECK_LIMIT = 1000;
+const BOOKMARK_EVENTS = ['onCreated', 'onRemoved', 'onChanged', 'onMoved', 'onChildrenReordered', 'onImportEnded'];
 
 export function createSearchService(api, { contentTimeoutMs = CONTENT_TIMEOUT_MS, beforeOpen = async () => {} } = {}) {
   const prefix = api.extension?.inIncognitoContext ? 'search.focus.private.' : 'search.focus.';
@@ -43,6 +49,113 @@ export function createSearchService(api, { contentTimeoutMs = CONTENT_TIMEOUT_MS
     api.tabs.onRemoved.addListener(tabId => {
       api.storage.session.remove(focusKey(tabId)).catch(() => {});
     });
+    installBookmarkTracking();
+  }
+
+  // --- Bookmarks (R15) ---------------------------------------------------------
+  // One in-memory index per worker lifetime, built from getTree() on first use,
+  // rebuilt after any bookmark change, dropped when access is removed. Never
+  // stored: a stopped worker simply rebuilds it on its next query.
+  let bookmarkIndex = null;
+  let bookmarkVersion = 0;
+  // The namespace object the change listeners are on. A revoke and a new grant
+  // can hand the background a fresh object without them.
+  let listenedTo = null;
+
+  function dropBookmarkIndex() {
+    bookmarkVersion++;
+    bookmarkIndex = null;
+  }
+
+  // The bookmarks namespace exists only once access is granted.
+  function listenToBookmarks() {
+    const namespace = api.bookmarks;
+    if (!namespace || listenedTo === namespace) return;
+    listenedTo = namespace;
+    dropBookmarkIndex();
+    for (const name of BOOKMARK_EVENTS) namespace[name]?.addListener?.(dropBookmarkIndex);
+  }
+
+  function installBookmarkTracking() {
+    listenToBookmarks();
+    api.permissions?.onAdded?.addListener?.(added => {
+      if (added?.permissions?.includes('bookmarks')) { dropBookmarkIndex(); listenToBookmarks(); }
+    });
+    api.permissions?.onRemoved?.addListener?.(removed => {
+      if (removed?.permissions?.includes('bookmarks')) { dropBookmarkIndex(); listenedTo = null; }
+    });
+  }
+
+  async function hasBookmarkPermission() {
+    try {
+      return (await api.permissions?.contains?.(BOOKMARK_PERMISSION)) === true && Boolean(api.bookmarks?.getTree);
+    } catch {
+      return false;
+    }
+  }
+
+  /** The current index, or null without access. */
+  async function bookmarks() {
+    if (!await hasBookmarkPermission()) { dropBookmarkIndex(); return null; }
+    listenToBookmarks();
+    if (!bookmarkIndex) {
+      const version = bookmarkVersion;
+      const building = api.bookmarks.getTree().then(buildBookmarkIndex);
+      bookmarkIndex = building;
+      building.catch(() => { if (bookmarkIndex === building) bookmarkIndex = null; });
+      const index = await building;
+      // A change during the build makes it stale: rebuild next time.
+      if (version !== bookmarkVersion && bookmarkIndex === building) bookmarkIndex = null;
+      return index;
+    }
+    return bookmarkIndex;
+  }
+
+  /** Ranked bookmark matches. Works in private windows: bookmarks are shared. */
+  async function searchBookmarks(query) {
+    let index;
+    try { index = await bookmarks(); } catch { return { results: [], urls: [], coverage: { state: 'error' } }; }
+    if (!index) return { results: [], urls: [], coverage: { state: 'permission' } };
+    const { results, urls } = searchBookmarkIndex(index, query);
+    return { results, urls, coverage: { state: 'ready', limited: urls.length > results.length } };
+  }
+
+  /** Opens a bookmark only if it still exists with a web URL; an open copy in scope is focused instead. */
+  async function activateBookmark(bookmarkId, windowId) {
+    if (typeof bookmarkId !== 'string' || !bookmarkId || bookmarkId.length > 256) throw new Error('Choose a bookmark from the results.');
+    if (!await hasBookmarkPermission()) throw new Error('Bookmarks are not available. Allow bookmark access and try again.');
+    const [node] = await api.bookmarks.get(bookmarkId).catch(() => []);
+    if (!node || !isSafeWebUrl(node.url)) throw new Error('That bookmark is no longer available.');
+    const scope = await loadScope(windowId);
+    const open = scope.tabs.find(tab => tab.url === node.url && !isSearchPage(tab.pendingUrl));
+    if (open) return activate(open.id, windowId);
+    // Duplicate-tab prevention must keep a tab Search chose to open (R14.7),
+    // in the store for this window's privacy mode: a private tab is judged by the private one.
+    try { await beforeOpen(node.url, scope.incognito); } catch { /* never blocks opening */ }
+    // The default container, as for history results.
+    await api.tabs.create({ url: node.url, windowId, active: true });
+    await api.windows.update(windowId, { focused: true });
+    return { ok: true };
+  }
+
+  /** Off-source counts for a query, after removing repeats (R15). */
+  async function countSources(query, windowId, { tabsOn, bookmarksOn = false, bookmarks: countBookmarks, history: countHistory, bookmarkUrls }) {
+    const { tabs, incognito } = await loadScope(windowId);
+    let historyUrls = null;
+    let historyLimited = false;
+    if (countHistory && !incognito && query) {
+      try {
+        const items = await api.history.search({ text: query, startTime: 0, maxResults: HISTORY_LIMIT + 1 });
+        const selected = selectHistory(items);
+        historyUrls = selected.results.map(item => item.url);
+        historyLimited = selected.limited;
+      } catch { historyUrls = null; }
+    }
+    const counts = sourceCounts({
+      tabsOn, bookmarksOn, openUrls: tabs.map(tab => tab.url),
+      bookmarkUrls: bookmarkUrls ?? (countHistory ? [] : null), historyUrls, historyLimited,
+    });
+    return { bookmarks: countBookmarks ? counts.bookmarks : null, history: counts.history };
   }
 
   // Tabs visible to a search from windowId: same privacy mode, optional
@@ -63,17 +176,53 @@ export function createSearchService(api, { contentTimeoutMs = CONTENT_TIMEOUT_MS
     const current = currentTabId === undefined
       ? tabs.find(tab => tab.windowId === windowId && tab.active)
       : tabs.find(tab => tab.id === currentTabId);
-    const [times, contentPermission] = await Promise.all([
+    const [times, contentPermission, index, stored] = await Promise.all([
       api.storage.session.get(tabs.map(tab => focusKey(tab.id))), hasContentPermission(),
+      bookmarks().catch(() => null),
+      api.storage.local.get({ searchSources: null, searchTipsShown: {}, searchBookmarksNew: 0 }),
     ]);
+    // ★ marks open tabs whose exact URL is bookmarked, whenever access is granted.
+    const marked = new Set(index ? index.map(entry => entry.url) : []);
+    const tips = stored.searchTipsShown && typeof stored.searchTipsShown === 'object' ? stored.searchTipsShown : {};
     return {
       windowId, currentTabId: current?.id,
       tabs: tabs.map(tab => ({
         id: tab.id, windowId: tab.windowId, title: tab.title || '', url: tab.url || '',
         lastAccessed: times[focusKey(tab.id)] ?? tab.lastAccessed ?? 0,
       })),
-      incognito, contentPermission,
+      incognito, contentPermission, bookmarkPermission: Boolean(index),
+      bookmarked: tabs.filter(tab => marked.has(tab.url)).map(tab => tab.id),
+      defaultSources: normalizeDefaultSources(stored.searchSources),
+      hints: {
+        tipsShown: [...HINT_TIPS].filter(name => tips[name] === true),
+        bookmarksNew: Number.isInteger(stored.searchBookmarksNew) && stored.searchBookmarksNew > 0,
+      },
     };
+  }
+
+  /**
+   * Records what Search has shown (R15): the launch (counts down the "New"
+   * mark), a first use of Bookmarks (ends it), and one-time tips.
+   */
+  async function noteHints({ opened = false, usedBookmarks = false, tip } = {}) {
+    const stored = await api.storage.local.get({ searchTipsShown: {}, searchBookmarksNew: 0 });
+    const update = {};
+    const left = Number.isInteger(stored.searchBookmarksNew) ? stored.searchBookmarksNew : 0;
+    if (usedBookmarks && left > 0) update.searchBookmarksNew = 0;
+    else if (opened && left > 0) update.searchBookmarksNew = left - 1;
+    if (HINT_TIPS.has(tip)) {
+      const tips = stored.searchTipsShown && typeof stored.searchTipsShown === 'object' ? stored.searchTipsShown : {};
+      if (tips[tip] !== true) update.searchTipsShown = { ...tips, [tip]: true };
+    }
+    if (Object.keys(update).length) await api.storage.local.set(update);
+    return { ok: true };
+  }
+
+  /** Saves the default sources from Search. Contents is never stored. */
+  async function saveDefaultSources(sources) {
+    const value = normalizeDefaultSources({ tabs: sources?.tabs === true, bookmarks: sources?.bookmarks === true, history: sources?.history === true });
+    await api.storage.local.set({ searchSources: value });
+    return value;
   }
 
   /** The optional all-sites host permission; false when absent or unknown. */
@@ -117,7 +266,7 @@ export function createSearchService(api, { contentTimeoutMs = CONTENT_TIMEOUT_MS
     const open = scope.tabs.find(tab => tab.url === url && !isSearchPage(tab.pendingUrl));
     if (open) return activate(open.id, windowId);
     // Duplicate-tab prevention must keep a tab Search chose to open (R14).
-    try { await beforeOpen(url); } catch { /* never blocks opening */ }
+    try { await beforeOpen(url, scope.incognito); } catch { /* never blocks opening */ }
     await api.tabs.create({ url, windowId, active: true });
     await api.windows.update(windowId, { focused: true });
     return { ok: true };
@@ -303,6 +452,7 @@ export function createSearchService(api, { contentTimeoutMs = CONTENT_TIMEOUT_MS
   return {
     getContext, activate, closeSelected, installFocusTracking, isSearchPage,
     searchHistory, activateHistory, searchContent, hasContentPermission,
+    searchBookmarks, activateBookmark, hasBookmarkPermission, countSources, noteHints, saveDefaultSources,
     closeSkipReason, canHostSearch, handoffTargets,
   };
 }

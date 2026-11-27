@@ -1,25 +1,56 @@
-// Settings control for the optional website-access permission used by
-// page-content search. It only asks for access when the user clicks the
-// Allow button, and never reads page content itself.
+// Settings controls for the optional permissions Search uses: website access
+// for page-content search, and bookmark access (R15). Each asks for access only
+// when the user clicks its Allow button, and never reads pages or bookmarks itself.
 
 export const CONTENT_ORIGINS = Object.freeze(['http://*/*', 'https://*/*']);
 
-const IDS = {
-  root: 'content-permissions',
-  state: 'content-access-state',
-  allow: 'content-access-allow',
-  revoke: 'content-access-revoke',
-  message: 'content-access-message',
+const CONTENT = {
+  ids: {
+    root: 'content-permissions',
+    state: 'content-access-state',
+    allow: 'content-access-allow',
+    revoke: 'content-access-revoke',
+    message: 'content-access-message',
+  },
+  request: () => ({ origins: [...CONTENT_ORIGINS] }),
+  text: {
+    name: 'website access',
+    allowed: 'Website access allowed. Turn on page-content search in Search to use it.',
+    denied: 'Website access was not allowed.',
+    failed: 'Could not request website access.',
+    confirm: 'Remove website access? Page-content search will stop reading website tabs.',
+    removed: 'Website access removed.',
+    notRemoved: 'Website access was not removed.',
+    removeFailed: 'Could not remove website access.',
+  },
 };
 
-const request = () => ({ origins: [...CONTENT_ORIGINS] });
+const BOOKMARKS = {
+  ids: {
+    root: 'bookmark-permissions',
+    state: 'bookmark-access-state',
+    allow: 'bookmark-access-allow',
+    revoke: 'bookmark-access-revoke',
+    message: 'bookmark-access-message',
+  },
+  request: () => ({ permissions: ['bookmarks'] }),
+  text: {
+    allowed: 'Bookmark access allowed. Turn on Bookmarks in Search to use it.',
+    denied: 'Bookmark access was not allowed.',
+    failed: 'Could not request bookmark access.',
+    confirm: 'Remove bookmark access? Search will stop listing bookmarks.',
+    removed: 'Bookmark access removed.',
+    notRemoved: 'Bookmark access was not removed.',
+    removeFailed: 'Could not remove bookmark access.',
+  },
+};
 
-export function startContentPermissions({ document, browser }) {
-  const root = document.getElementById(IDS.root);
-  const state = document.getElementById(IDS.state);
-  const allow = document.getElementById(IDS.allow);
-  const revoke = document.getElementById(IDS.revoke);
-  const message = document.getElementById(IDS.message);
+function startPermissionControl({ document, browser }, { ids, request, text }) {
+  const root = document.getElementById(ids.root);
+  const state = document.getElementById(ids.state);
+  const allow = document.getElementById(ids.allow);
+  const revoke = document.getElementById(ids.revoke);
+  const message = document.getElementById(ids.message);
   if (!root || !state || !allow || !revoke || !message) return null;
   // Starting twice would register duplicate click and permission listeners.
   if (root.dataset.started === 'true') return null;
@@ -34,7 +65,7 @@ export function startContentPermissions({ document, browser }) {
   }
 
   let checkId = 0;
-  const say = text => { message.textContent = text; };
+  const say = value => { message.textContent = value; };
 
   async function refresh() {
     const id = ++checkId;
@@ -57,29 +88,24 @@ export function startContentPermissions({ document, browser }) {
     try {
       pending = permissions.request(request());
     } catch {
-      say('Could not request website access.');
+      say(text.failed);
       return Promise.resolve();
     }
     say('Waiting for your browser…');
     return Promise.resolve(pending).then(
-      granted => say(granted
-        ? 'Website access allowed. Turn on page-content search in Search to use it.'
-        : 'Website access was not allowed.'),
-      () => say('Could not request website access.'),
+      granted => say(granted ? text.allowed : text.denied),
+      () => say(text.failed),
     ).then(refresh);
   }
 
   async function onRevokeClick() {
     const confirm = document.defaultView?.confirm;
-    if (typeof confirm === 'function' &&
-        !confirm.call(document.defaultView, 'Remove website access? Page-content search will stop reading website tabs.')) {
-      return;
-    }
+    if (typeof confirm === 'function' && !confirm.call(document.defaultView, text.confirm)) return;
     try {
       const removed = await permissions.remove(request());
-      say(removed ? 'Website access removed.' : 'Website access was not removed.');
+      say(removed ? text.removed : text.notRemoved);
     } catch {
-      say('Could not remove website access.');
+      say(text.removeFailed);
     }
     await refresh();
   }
@@ -93,7 +119,15 @@ export function startContentPermissions({ document, browser }) {
   return { refresh, ready, onAllowClick, onRevokeClick };
 }
 
-if (typeof document !== 'undefined' && typeof globalThis.browser !== 'undefined' &&
-    document.getElementById(IDS.root)) {
-  startContentPermissions({ document, browser: globalThis.browser });
+export function startContentPermissions(env) {
+  return startPermissionControl(env, CONTENT);
+}
+
+export function startBookmarkPermissions(env) {
+  return startPermissionControl(env, BOOKMARKS);
+}
+
+if (typeof document !== 'undefined' && typeof globalThis.browser !== 'undefined') {
+  if (document.getElementById(CONTENT.ids.root)) startContentPermissions({ document, browser: globalThis.browser });
+  if (document.getElementById(BOOKMARKS.ids.root)) startBookmarkPermissions({ document, browser: globalThis.browser });
 }

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { startContentPermissions, CONTENT_ORIGINS } from '../src/content-permissions.js';
+import { startContentPermissions, startBookmarkPermissions, CONTENT_ORIGINS } from '../src/content-permissions.js';
 
 const ORIGINS = { origins: ['http://*/*', 'https://*/*'] };
 const IDS = ['content-permissions', 'content-access-state', 'content-access-allow',
@@ -148,5 +148,29 @@ describe('content permission settings', () => {
     expect(html.indexOf('id="content-permissions"')).toBeGreaterThan(html.indexOf('</form>'));
     expect(html).toContain('<html lang="en">');
     for (const id of IDS) expect(html).toContain(`id="${id}"`);
+  });
+});
+
+describe('bookmark permission settings (R15)', () => {
+  it('requests and removes only the bookmarks permission, from the click itself', async () => {
+    const ids = ['bookmark-permissions', 'bookmark-access-state', 'bookmark-access-allow', 'bookmark-access-revoke', 'bookmark-access-message'];
+    const els = Object.fromEntries(ids.map(id => [id, element()]));
+    const document = { getElementById: id => els[id] ?? null, defaultView: { confirm: vi.fn(() => true) } };
+    let granted = false;
+    const browser = { permissions: {
+      contains: vi.fn(async () => granted), request: vi.fn(async () => { granted = true; return true; }),
+      remove: vi.fn(async () => { granted = false; return true; }), onAdded: { addListener: vi.fn() }, onRemoved: { addListener: vi.fn() },
+    } };
+    const controller = startBookmarkPermissions({ document, browser });
+    await controller.ready;
+    expect(els['bookmark-access-state'].textContent).toBe('Not allowed');
+    const pending = els['bookmark-access-allow'].handlers.click[0]();
+    expect(browser.permissions.request).toHaveBeenCalledWith({ permissions: ['bookmarks'] }); // Before any await.
+    await pending;
+    expect(els['bookmark-access-message'].textContent).toBe('Bookmark access allowed. Turn on Bookmarks in Search to use it.');
+    expect(els['bookmark-access-state'].textContent).toBe('Allowed');
+    await els['bookmark-access-revoke'].handlers.click[0]();
+    expect(browser.permissions.remove).toHaveBeenCalledWith({ permissions: ['bookmarks'] });
+    expect(els['bookmark-access-message'].textContent).toBe('Bookmark access removed.');
   });
 });

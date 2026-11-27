@@ -1,4 +1,7 @@
-import { composeSearchResults } from './search-sources-core.js';
+import {
+  SOURCE_NAMES, composeSearchResults, differsFromDefault, normalizeSources, scopeSources, scopeSuggestions, scopeWord, startingSources,
+} from './search-sources-core.js';
+import { rankTabs } from './search-core.js';
 
 const INIT_TYPE = 'tabvacuum:init';
 const MAX_TOKEN_LENGTH = 512;
@@ -18,9 +21,15 @@ const isContext = value => Boolean(value) && typeof value === 'object' && !value
 const plural = (count, word) => `${count} ${count === 1 ? word : `${word}s`}`;
 const idList = value => Array.isArray(value) ? value.filter(Number.isInteger) : [];
 const tabLabel = tab => tab.title || tab.url || 'Untitled tab';
-const isTab = result => result?.kind !== 'history' && Boolean(result);
+const isTab = result => Boolean(result) && (result.kind ?? 'tab') === 'tab';
 const whole = value => Number.isInteger(value) && value >= 0 ? value : 0;
-const noExtras = () => ({ query: '', history: [], content: [], coverage: {} });
+const noExtras = () => ({ query: '', bookmarks: [], history: [], content: [], coverage: {}, counts: { bookmarks: null, history: null } });
+const SOURCE_LABELS = { tabs: 'Tabs', bookmarks: 'Bookmarks', history: 'History', content: 'Contents' };
+const TIPS = {
+  tabs: 'Tip: type @t to search only open tabs', bookmarks: 'Tip: type @b to search only bookmarks',
+  history: 'Tip: type @h to search only history', content: 'Tip: type @c to search only page contents',
+};
+const BOOKMARK_PERMISSION = { permissions: ['bookmarks'] };
 
 function initial(tab) {
   let host = '';
@@ -41,6 +50,19 @@ function acceptSources(response, wanted, query) {
   const ok = Boolean(response) && typeof response === 'object' && !response.error;
   const coverage = ok && response.coverage && typeof response.coverage === 'object' ? response.coverage : {};
   const state = name => !wanted[name] ? { state: 'off' } : ok && coverage[name] && typeof coverage[name] === 'object' ? coverage[name] : { state: 'error' };
+  const bookmarks = wanted.bookmarks && ok && state('bookmarks').state === 'ready' && Array.isArray(response.bookmarks) ? response.bookmarks
+    .filter(item => typeof item?.url === 'string' && item.url && (typeof item.id === 'string' || Number.isInteger(item.id)))
+    .map(item => ({ id: String(item.id), url: item.url, title: typeof item.title === 'string' ? item.title : '',
+      path: typeof item.path === 'string' ? item.path : '', folders: Number.isInteger(item.folders) ? item.folders : 0 })) : [];
+  const raw = ok && response.counts && typeof response.counts === 'object' ? response.counts : {};
+  const count = value => (value && Number.isInteger(value.count) && value.count >= 0 ? value : null);
+  const marks = count(raw.bookmarks);
+  const visits = count(raw.history);
+  const counts = {
+    bookmarks: marks && { count: marks.count, limited: marks.limited === true },
+    history: visits && { count: visits.count, limited: visits.limited === true,
+      withBookmarks: Number.isInteger(visits.withBookmarks) && visits.withBookmarks >= 0 ? visits.withBookmarks : visits.count },
+  };
   const history = wanted.history && ok && Array.isArray(response.history) ? response.history
     .filter(item => typeof item?.url === 'string' && item.url)
     .map(item => ({ url: item.url, title: typeof item.title === 'string' ? item.title : '', lastVisitTime: item.lastVisitTime })) : [];
@@ -48,7 +70,15 @@ function acceptSources(response, wanted, query) {
   const content = wanted.content && ok && state('content').state !== 'permission' && Array.isArray(response.content) ? response.content
     .filter(item => Number.isInteger(item?.tabId) && typeof item.snippet === 'string')
     .map(item => ({ tabId: item.tabId, url: typeof item.url === 'string' ? item.url : '', snippet: item.snippet })) : [];
-  return { query, history, content, coverage: { history: state('history'), content: state('content') } };
+  return { query, bookmarks, history, content, counts,
+    coverage: { bookmarks: state('bookmarks'), history: state('history'), content: state('content') } };
+}
+
+function bookmarkPhrase(coverage = {}) {
+  if (coverage.state === 'permission') return 'Bookmarks: access needed';
+  if (coverage.state === 'error') return 'Bookmarks: unavailable';
+  if (coverage.state === 'ready' && coverage.limited) return 'Bookmarks: best 50 matches';
+  return '';
 }
 
 function historyPhrase(coverage = {}) {
@@ -84,15 +114,24 @@ export function startSearch({ document, window, browser }) {
   const modeIndicator = $('mode-indicator');
   const selectButton = $('select-toggle');
   const closeButton = $('close-tabs');
-  const historyToggle = $('source-history');
-  const contentToggle = $('source-content');
+  const sourceButtons = Object.fromEntries(SOURCE_NAMES.map(name => [name, $(`source-${name}`)]));
+  const saveButton = $('save-default');
+  const toolbarControls = [...Object.values(sourceButtons), saveButton];
+  const enableBookmarks = $('enable-bookmarks');
   const enableButton = $('enable-content');
+  const includeLine = $('include-line');
+  const includeButton = $('include-sources');
+  const chip = $('scope-chip');
+  const chipRemove = $('scope-chip-remove');
+  const scopeList = $('scope-list');
+  const tip = $('tip');
   const sourceStatus = $('source-status');
-  const trigger = $('search-in');
-  const menu = $('source-menu');
-  const menuControls = [historyToggle, contentToggle, enableButton];
   // Enter and Space belong to these natively.
-  const nativeControls = [selectButton, closeButton, trigger, ...menuControls];
+  const nativeControls = [selectButton, closeButton, ...toolbarControls, enableBookmarks, enableButton, includeButton, chipRemove];
+  // Firefox gives a framed extension page no permissions API, so the
+  // request can only start here where the API exists (R15).
+  const permissionsApi = browser.permissions;
+  const canRequest = typeof permissionsApi?.request === 'function';
   const embedded = window.parent !== window;
   const tried = new Set();
   // Checked tab IDs in select mode. Highlight (`selected`) is separate.
@@ -101,8 +140,27 @@ export function startSearch({ document, window, browser }) {
   // dropped. Focus/mode changes and partial failures cancel the pending sequence.
   const pendingListKeys = [];
   const MAX_PENDING_KEYS = 64;
-  // Extra sources start off on every launch and are never persisted.
-  const sources = { history: false, content: false };
+  // Starts from the saved default once the first context arrives (R15).
+  const sources = { tabs: true, bookmarks: false, history: false, content: false };
+  let sourcesChosen = false;
+  // A scope word's chip: { entry, before } where before is what the row showed.
+  let scope = null;
+  // Backspace right after a conversion puts this text back (R15).
+  let restoreLiteral = null;
+  // A scope word the user chose to search as plain text.
+  let literalPrefix = null;
+  let scopeOpen = false;
+  let scopeIndex = 0;
+  let scopeDismissed = null;
+  // Sources the user tried to turn on that still need access.
+  const needsAccess = new Set();
+  // After "Include them", no row is armed until the user moves (R15).
+  let noHighlight = false;
+  let roving = 0;
+  let hintsNoted = false;
+  let shownTips = new Set();
+  let bookmarkedIds = new Set();
+  let mixedList = false;
   let extras = noExtras();
   let sourceGeneration = 0;
   let sourceBusy = false;
@@ -110,9 +168,6 @@ export function startSearch({ document, window, browser }) {
   // A sent, unanswered request (its generation), and whether it was told to stop.
   let sourceInFlight = 0;
   let cancelSent = false;
-  let menuOpen = false;
-  // An outside press that closes the menu does only that, never a row action.
-  let swallowClick = false;
   // Leaving select mode without moving returns to the pre-select highlight.
   let selectReturn = null;
   let token;
@@ -145,17 +200,32 @@ export function startSearch({ document, window, browser }) {
   let highlightCloseReady = true;
   let composing = false;
   let notice = null;
+  let failure = null;
   let mac = guessMac(window.navigator);
   let refreshVersion = 0;
   let announceTimer;
   let initTimer;
 
   const send = payload => browser.runtime.sendMessage(payload);
-  const extrasOn = () => sources.history || sources.content;
+  const extrasOn = () => sources.bookmarks || sources.history || sources.content;
+  const allowed = name => Boolean(context) && (name === 'tabs' || (name === 'bookmarks' ? context.bookmarkPermission
+    : name === 'history' ? !context.incognito : context.contentPermission));
+  // Off sources counted per settled query: cheap ones only, never Contents.
+  const countWanted = () => ({
+    bookmarks: Boolean(context?.bookmarkPermission) && !sources.bookmarks,
+    history: Boolean(context) && !context.incognito && !sources.history,
+  });
+  const counting = () => { const c = countWanted(); return c.bookmarks || c.history; };
+  // A bare @ prefix (`@`, `@b`) is a scope word being typed: nothing is ranked or counted on it.
+  const barePrefix = () => {
+    const text = query.value.trim();
+    return text !== literalPrefix && text !== scopeDismissed && scopeSuggestions(text).length > 0;
+  };
+  const searchText = () => (barePrefix() ? '' : query.value.trim());
   // Over-long queries are never truncated and sent as if complete.
   const sourceQuery = () => {
-    const text = query.value.trim();
-    return token && extrasOn() && text.length <= MAX_SOURCE_QUERY ? text : '';
+    const text = searchText();
+    return token && (extrasOn() || counting()) && text.length <= MAX_SOURCE_QUERY ? text : '';
   };
   // Content matches depend on which pages are open, not on focus times.
   const contentKey = ctx => JSON.stringify(ctx.tabs.map(t => [t.id, t.url, t.title, t.status, t.discarded]));
@@ -168,12 +238,52 @@ export function startSearch({ document, window, browser }) {
     message.hidden = false;
   }
 
-  // Empty state, then a sticky close notice, otherwise nothing.
+  // Matches each off source would add for the current query: Tabs counted
+  // here, Bookmarks and History from the reply for this exact query only.
+  // `together` counts History as included along with Bookmarks, as the
+  // empty-list action does, so a page is never counted twice (R15.5).
+  function offCounts({ together = false } = {}) {
+    const text = searchText();
+    const out = [];
+    if (!context || !text) return out;
+    const item = (name, n, limited, word) => ({ name, n, limited, label: `${n}${limited ? '+' : ''}`,
+      text: limited ? `${n}+ ${word}s` : plural(n, word) });
+    if (!sources.tabs) {
+      const n = rankTabs(context.tabs, text).length;
+      if (n) out.push(item('tabs', n, false, 'open tab'));
+    }
+    if (extras.query !== text) return out;
+    const { bookmarks, history } = extras.counts;
+    const addsBookmarks = !sources.bookmarks && bookmarks?.count > 0;
+    if (addsBookmarks) out.push(item('bookmarks', bookmarks.count, bookmarks.limited, 'bookmark'));
+    const visits = together && addsBookmarks ? history?.withBookmarks : history?.count;
+    if (!sources.history && visits) out.push(item('history', visits, history.limited, 'history page'));
+    return out;
+  }
+
+  // "No open tabs match. 3 bookmarks and 12 history pages do."
+  function includeOffer() {
+    const found = offCounts({ together: true });
+    if (!found.length || results.length || sourceBusy) return null;
+    const names = { tabs: 'open tabs', bookmarks: 'bookmarks', history: 'history pages', content: 'page contents' };
+    const on = SOURCE_NAMES.filter(name => sources[name]).map(name => names[name]).join(' or ');
+    const list = found.map(item => item.text);
+    const joined = list.length > 1 ? `${list.slice(0, -1).join(', ')} and ${list.at(-1)}` : list[0];
+    const one = found.length === 1 && found[0].n === 1;
+    return { names: found.map(item => item.name), text: `No ${on} match. ${joined} ${one ? 'does' : 'do'}.` };
+  }
+
+  // An activation failure, then the empty state or a sticky close notice, otherwise nothing.
   function showStatus() {
-    const typed = Boolean(query.value.trim());
+    if (failure) { includeLine.hidden = true; showMessage('error', failure); return; }
+    const typed = Boolean(searchText());
+    const offer = !notice && typed ? includeOffer() : null;
+    includeLine.hidden = !offer;
+    if (offer) includeButton.textContent = 'Include them';
     if (notice) showMessage('notice', notice);
     else if (!results.length && typed && sourceBusy) showMessage('loading', 'Searching…');
-    else if (!results.length && typed && extrasOn()) showMessage('empty', 'No matches. Try different words.');
+    else if (offer) showMessage('empty', offer.text);
+    else if (!results.length && typed && (extrasOn() || !sources.tabs)) showMessage('empty', 'No matches. Try different words.');
     else if (!results.length) showMessage('empty', typed ? 'No matching tabs. Try a different title or URL.' : 'No tabs to show.');
     else message.hidden = true;
   }
@@ -191,46 +301,110 @@ export function startSearch({ document, window, browser }) {
       'Escape clears the selection and returns to the tab menu.';
   }
 
+  const extraNames = () => [sources.bookmarks && 'bookmarks', sources.history && 'history', sources.content && 'contents'].filter(Boolean);
+  const andList = list => (list.length > 1 ? `${list.slice(0, -1).join(', ')} and ${list.at(-1)}` : list[0] ?? '');
+
   function sourceText() {
     if (!context || !extrasOn()) return '';
-    const names = [sources.history && 'history', sources.content && 'contents'].filter(Boolean).join(' and ');
-    const text = query.value.trim();
+    const names = andList(extraNames());
+    const text = searchText();
     if (!text) return `Type to search ${names}`;
-    if (text.length > MAX_SOURCE_QUERY) return `History and contents support queries up to ${MAX_SOURCE_QUERY} characters`;
+    if (text.length > MAX_SOURCE_QUERY) return `Bookmarks, history and contents support queries up to ${MAX_SOURCE_QUERY} characters`;
     if (sourceBusy) return `Searching ${names}…`;
     return [
+      sources.bookmarks && bookmarkPhrase(extras.coverage.bookmarks),
       sources.history && historyPhrase(extras.coverage.history),
       sources.content && contentPhrase(extras.coverage.content),
     ].filter(Boolean).join(' · ');
   }
 
+  // The visible count on an off source's button, e.g. "3" or "100+".
+  function countLabel(name) {
+    if (sources[name] || name === 'content') return '';
+    const found = offCounts().find(item => item.name === name);
+    if (!found) return '';
+    return found.label;
+  }
+
+  // Each button's accessible description: never its name, never announced per keystroke.
+  function sourceDescription(name) {
+    if (!context) return '';
+    if (name === 'history' && context.incognito) return 'Not searched in private windows';
+    if (!allowed(name)) return name === 'bookmarks' ? 'Needs bookmark access' : 'Needs website access';
+    if (sources[name]) return 'On';
+    if (name === 'content') return 'Search page contents';
+    const count = countLabel(name);
+    return count ? `${count} more ${count === '1' ? 'match' : 'matches'}` : 'Off';
+  }
+
+  const visibleToolbar = () => toolbarControls.filter(control => !control.hidden);
+  const rovingControl = () => { const list = visibleToolbar(); return list[Math.min(roving, list.length - 1)]; };
+
   function paintSources() {
     const ready = Boolean(context);
-    historyToggle.checked = sources.history;
-    contentToggle.checked = sources.content;
-    historyToggle.disabled = !ready || context.incognito;
-    contentToggle.disabled = !ready || !context.contentPermission;
-    const needsAccess = ready && !context.contentPermission;
-    const privateWindow = ready && context.incognito;
-    enableButton.hidden = !needsAccess;
-    // Notes live only in the menu, and describe a checkbox only while shown.
-    for (const [box, note, shown] of [[historyToggle, 'history-private-note', privateWindow], [contentToggle, 'content-access-note', needsAccess]]) {
-      $(note).hidden = !shown;
-      if (shown) box.setAttribute('aria-describedby', note); else box.removeAttribute('aria-describedby');
+    for (const [name, button] of Object.entries(sourceButtons)) {
+      const on = sources[name];
+      button.setAttribute('aria-pressed', String(on));
+      button.dataset.state = on ? 'on' : ready && !allowed(name) ? 'locked' : 'off';
+      $(`source-${name}-badge`).textContent = countLabel(name);
+      $(`source-${name}-count`).textContent = sourceDescription(name);
     }
-    menu.hidden = !menuOpen;
-    trigger.setAttribute('aria-expanded', String(menuOpen));
-    const names = [sources.history && 'History', sources.content && 'Contents'].filter(Boolean);
-    $('source-summary').textContent = names.length ? `+ ${names.join(' · ')}` : '';
-    // A control that closed, hid, or disabled under focus hands it to the trigger.
+    $('bookmarks-new').hidden = !(ready && context.hints?.bookmarksNew);
+    saveButton.hidden = !ready || !differsFromDefault(sources, context.defaultSources);
+    // One tab stop in the toolbar, on the control last moved to.
+    const stop = rovingControl();
+    for (const control of toolbarControls) control.tabIndex = control === stop ? 0 : -1;
+    chip.hidden = !scope;
+    $('scope-chip-label').textContent = scope?.entry.label ?? '';
+    chipRemove.setAttribute('aria-label', scope ? `Remove filter: ${scope.entry.label.toLowerCase()}` : 'Remove filter');
+    // Enable actions show only for a source the user asked for.
+    $('bookmarks-access').hidden = !needsAccess.has('bookmarks') || !ready || context.bookmarkPermission;
+    $('content-access').hidden = !needsAccess.has('content') || !ready || context.contentPermission;
+    $('history-private-note').hidden = !needsAccess.has('history') || !ready || !context.incognito;
+    $('source-access').hidden = ['bookmarks-access', 'content-access', 'history-private-note'].every(id => $(id).hidden);
+    enableBookmarks.textContent = canRequest ? 'Allow bookmarks' : 'Enable in Settings';
+    $('bookmarks-access-note').textContent = canRequest
+      ? "Search only reads bookmarks; the browser's prompt also mentions changing them."
+      : "Search only reads bookmarks; the browser's prompt also mentions changing them. Opens Settings in a new tab.";
+    // A control that hid under focus hands it back to the query.
     const focus = document.activeElement;
-    if (menuControls.includes(focus) && (!menuOpen || focus.disabled || focus.hidden)) trigger.focus();
-    palette.dataset.sources = ['tabs', sources.history && 'history', sources.content && 'content'].filter(Boolean).join(' ');
-    query.placeholder = extrasOn()
-      ? `Search tabs, ${[sources.history && 'history', sources.content && 'contents'].filter(Boolean).join(' and ')}…`
-      : 'Search tabs…';
+    // Only the source controls; mode changes own focus for the list and header buttons.
+    if ([saveButton, enableBookmarks, enableButton, includeButton, chipRemove].includes(focus) && !isShown(focus)) query.focus();
+    palette.dataset.sources = SOURCE_NAMES.filter(name => sources[name]).join(' ');
+    const names = [sources.tabs && 'tabs', ...extraNames()].filter(Boolean);
+    query.placeholder = `Search ${andList(names)} · type @ for more`;
     sourceStatus.textContent = sourceText();
     sourceStatus.dataset.busy = String(sourceBusy);
+    paintScopeList();
+  }
+
+  // Whether a control is on screen: it and the panel holding it are shown.
+  const holders = () => new Map([[includeButton, [includeLine]], [enableBookmarks, [$('bookmarks-access'), $('source-access')]],
+    [enableButton, [$('content-access'), $('source-access')]], [chipRemove, [chip]]]);
+  const isShown = element => Boolean(element) && !element.hidden && !(holders().get(element) ?? []).some(holder => holder.hidden);
+
+  // The @ list: a second popup for the combobox, wired only while open.
+  function paintScopeList() {
+    const options = scopeOpen ? scopeSuggestions(query.value.trim()) : [];
+    scopeList.hidden = !options.length;
+    scopeIndex = Math.max(0, Math.min(scopeIndex, options.length - 1));
+    scopeList.replaceChildren(...options.map((entry, index) => {
+      const option = el('li', 'scope-option');
+      option.id = `scope-option-${index}`;
+      option.setAttribute('role', 'option');
+      option.setAttribute('aria-selected', String(index === scopeIndex));
+      option.dataset.scope = entry.word;
+      option.append(el('kbd', 'scope-word', `@${entry.word}`), el('span', 'scope-short', `@${entry.short}`), el('span', 'scope-label', entry.label));
+      return option;
+    }));
+    if (options.length) {
+      query.setAttribute('aria-controls', 'scope-list');
+      query.setAttribute('aria-haspopup', 'listbox');
+      query.setAttribute('aria-activedescendant', `scope-option-${scopeIndex}`);
+    } else {
+      query.setAttribute('aria-controls', 'results');
+      query.setAttribute('aria-haspopup', 'grid');
+    }
   }
 
   // IDs are frozen here, at the moment the user asks to close. Select mode
@@ -263,10 +437,14 @@ export function startSearch({ document, window, browser }) {
       if (active) owner.setAttribute('aria-activedescendant', active.id);
       else owner.removeAttribute('aria-activedescendant');
     }
-    const history = results[selected]?.kind === 'history';
+    const target = results[selected];
+    const page = Boolean(target) && !isTab(target);
     palette.dataset.mode = mode;
-    palette.dataset.target = history ? 'history' : 'tab';
-    for (const id of ['enter-search', 'enter-tabs']) $(id).textContent = history ? 'Open page' : 'Switch';
+    palette.dataset.target = page ? 'history' : 'tab';
+    for (const id of ['enter-search', 'enter-tabs']) $(id).textContent = page && target.openTabId === undefined ? 'Open page' : 'Switch';
+    // Without tab rows there is nothing to close or select (R15).
+    const tabRows = results.some(isTab);
+    for (const id of ['hint-close-tab', 'hint-select-tabs']) $(id).hidden = !tabRows;
     list.setAttribute('aria-multiselectable', String(selecting));
     list.setAttribute('aria-describedby', selecting ? 'select-help' : 'tabs-help');
     for (const name of Object.keys(MODE_LABELS)) $(`hints-${name}`).hidden = name !== mode;
@@ -276,7 +454,8 @@ export function startSearch({ document, window, browser }) {
       ? `${shownChecked()} of ${results.length} selected${hiddenHistory ? ' · Only open tabs can be selected' : ''}`
       : '';
     selectButton.textContent = selecting ? 'Done' : 'Select multiple';
-    selectButton.setAttribute('aria-disabled', String(!selecting && !results.some(isTab)));
+    selectButton.hidden = !selecting && !tabRows;
+    selectButton.setAttribute('aria-disabled', 'false');
     closeButton.hidden = !selecting;
     closeButton.textContent = `Close ${plural(shownChecked(), 'tab')}`;
     closeButton.setAttribute('aria-disabled', String(busy || !shownChecked()));
@@ -303,6 +482,7 @@ export function startSearch({ document, window, browser }) {
   }
 
   function select(index, scroll = true) {
+    noHighlight = false;
     selected = results.length ? Math.max(0, Math.min(index, results.length - 1)) : -1;
     paint();
     if (scroll) rowEls[selected]?.scrollIntoView({ block: 'nearest' });
@@ -319,9 +499,10 @@ export function startSearch({ document, window, browser }) {
   // Grid rows expose an option cell and an action cell. Open tabs get an
   // independently keyboard-accessible close button there; history rows keep
   // the cell empty so every row has the same two columns.
-  function row({ tab, matchType, kind, snippet }) {
-    const history = kind === 'history';
-    const wrapper = el('div', history ? 'result result-history' : 'result');
+  function row({ tab, matchType, kind, snippet, path, folders, openTabId }) {
+    // History and bookmark rows are pages: opened, never closed or selected.
+    const history = kind === 'history' || kind === 'bookmark';
+    const wrapper = el('div', kind === 'bookmark' ? 'result result-history result-bookmark' : history ? 'result result-history' : 'result');
     wrapper.setAttribute('role', 'row');
     const option = el('div', 'result-option');
     option.setAttribute('role', 'gridcell');
@@ -333,8 +514,17 @@ export function startSearch({ document, window, browser }) {
     line.append(el('span', 'title', tabLabel(tab)));
     // The URL is always shown, so only a URL-only match needs explaining.
     const badges = [];
-    if (history) badges.push(['History', 'badge badge-history']);
-    else {
+    if (kind === 'bookmark') badges.push(['Bookmark', 'badge badge-source badge-bookmark']);
+    else if (history) badges.push(['History', 'badge badge-source badge-history']);
+    if (history && openTabId !== undefined) badges.push(['Open', 'badge badge-open']);
+    if (!history) {
+      // Each row names its source once the list mixes sources (R15).
+      if (mixedList) badges.push(['Tab', 'badge badge-source badge-tab']);
+      if (bookmarkedIds.has(tab.id)) {
+        const star = el('span', 'star', '★');
+        star.setAttribute('aria-hidden', 'true');
+        line.append(star, el('span', 'sr-only', 'Bookmarked'));
+      }
       if (matchType === 'url') badges.push(['URL match', 'badge badge-match']);
       if (tab.windowId !== context.windowId) badges.push(['Other window', 'badge']);
       if (tab.id === context.currentTabId) badges.push(['Current', 'badge']);
@@ -342,6 +532,7 @@ export function startSearch({ document, window, browser }) {
     for (const [badge, className] of badges) line.append(el('span', className, badge));
     const text = el('div', 'text');
     text.append(line, el('div', 'url', tab.url || 'Address unavailable'));
+    if (kind === 'bookmark' && path) text.append(el('div', 'path', folders ? `${path} · +${plural(folders, 'folder')}` : path));
     if (!history && typeof snippet === 'string' && snippet) text.append(el('div', 'snippet', snippet));
     // Drawn first via CSS order; last in the DOM so row text stays title-first.
     const box = el('span', 'check');
@@ -369,8 +560,9 @@ export function startSearch({ document, window, browser }) {
 
   // Everything a row displays, so a changed title, URL, badge or snippet
   // rebuilds that row and nothing else.
-  const rowSignature = ({ tab, matchType, kind, snippet }) => JSON.stringify([kind, matchType, tab.title, tab.url,
-    kind === 'history' ? '' : snippet, tab.windowId !== context.windowId, tab.id === context.currentTabId]);
+  const rowSignature = ({ tab, matchType, kind, snippet, path, folders, openTabId }) => JSON.stringify([kind, matchType, tab.title, tab.url,
+    isTab({ kind }) ? snippet : '', tab.windowId !== context.windowId, tab.id === context.currentTabId,
+    isTab({ kind }) && bookmarkedIds.has(tab.id), path, folders, openTabId, isTab({ kind }) && mixedList]);
 
   function place({ wrapper, option, close }, index) {
     wrapper.setAttribute('aria-rowindex', String(index + 1));
@@ -397,17 +589,20 @@ export function startSearch({ document, window, browser }) {
     element.append(heading);
     return { element, heading };
   }
-  const groups = { tabs: group('Open tabs'), history: group('History') };
+  const groups = { tabs: group('Open tabs'), bookmarks: group('Bookmarks'), history: group('History') };
+  const groupOf = result => (isTab(result) ? 'tabs' : result.kind === 'bookmark' ? 'bookmarks' : 'history');
 
   // Open tabs always come first; content matches only for tabs still open.
   function compose() {
-    const text = query.value.trim();
+    const text = searchText();
     const fresh = extrasOn() && Boolean(text) && extras.query === text;
     const open = new Set(context.tabs.map(tab => tab.id));
     return composeSearchResults({
       tabs: context.tabs,
-      query: query.value,
+      query: text,
       currentTabId: context.currentTabId,
+      sources,
+      bookmarks: fresh && sources.bookmarks ? extras.bookmarks : [],
       history: fresh && sources.history ? extras.history : [],
       content: fresh && sources.content ? extras.content.filter(item => open.has(item.tabId)) : [],
     });
@@ -418,9 +613,9 @@ export function startSearch({ document, window, browser }) {
   function arrange(composed) {
     if (!displayOrder.size) return composed;
     const known = composed.map((result, index) => ({ result, index, at: displayOrder.get(result.key) ?? Infinity }));
-    const group = tabs => known.filter(item => isTab(item.result) === tabs)
+    const group = name => known.filter(item => groupOf(item.result) === name)
       .sort((a, b) => (a.at === b.at ? a.index - b.index : a.at - b.at)).map(item => item.result);
-    return [...group(true), ...group(false)];
+    return [...group('tabs'), ...group('bookmarks'), ...group('history')];
   }
 
   function render(preserveKey, fallbackIndex = 0) {
@@ -428,18 +623,17 @@ export function startSearch({ document, window, browser }) {
     // Rebuilding rows removes a focused row button; put focus back afterwards.
     const focusedClose = isRowClose(document.activeElement) ? document.activeElement : null;
     const focusedTabId = focusedClose ? Number(focusedClose.dataset.closeId) : undefined;
-    const typed = Boolean(query.value.trim());
+    const typed = Boolean(searchText());
     const all = arrange(compose());
     // The first source reply must still see the transferred positions of
     // content-only rows that are not in this initial title/URL list.
     if (!held) displayOrder = new Map(all.map((result, index) => [result.key, index]));
     results = mode === 'select' ? all.filter(isTab) : all;
     hiddenHistory = all.length - results.length;
+    mixedList = results.some(isTab) && results.some(result => !isTab(result));
     const shown = new Set(results.filter(isTab).map(result => result.tab.id));
     for (const id of checked) if (!shown.has(id) && !held?.checked.has(id)) checked.delete(id);
-    const { tabs, history } = groups;
-    const tabRows = [];
-    const historyRows = [];
+    const rowsBy = { tabs: [], bookmarks: [], history: [] };
     const cache = new Map();
     rowEls = [];
     rowCloses = [];
@@ -451,20 +645,27 @@ export function startSearch({ document, window, browser }) {
       cache.set(result.key, entry);
       rowEls.push(entry.wrapper);
       rowCloses.push(entry.close);
-      (isTab(result) ? tabRows : historyRows).push(entry.wrapper);
+      rowsBy[groupOf(result)].push(entry.wrapper);
     }
     rowCache = cache;
-    const historyCount = results.length - shown.size;
-    tabs.heading.hidden = !historyCount;
-    setChildren(tabs.element, [tabs.heading, ...tabRows]);
-    setChildren(history.element, [history.heading, ...historyRows]);
-    setChildren(list, [shown.size && tabs.element, historyCount && history.element].filter(Boolean));
+    const tabCount = rowsBy.tabs.length;
+    const markCount = rowsBy.bookmarks.length;
+    const historyCount = rowsBy.history.length;
+    // A heading only when there is more than one group.
+    const mixed = [tabCount, markCount, historyCount].filter(Boolean).length > 1;
+    for (const [name, { element, heading }] of Object.entries(groups)) {
+      heading.hidden = name === 'tabs' && !mixed;
+      setChildren(element, [heading, ...rowsBy[name]]);
+    }
+    setChildren(list, Object.keys(groups).filter(name => rowsBy[name].length).map(name => groups[name].element));
     list.setAttribute('aria-busy', 'false');
     $('list-label').textContent = typed ? 'Matches' : 'Recent tabs';
-    $('result-count').textContent = plural(shown.size, 'tab') + (historyCount ? ` · ${historyCount} history` : '');
+    const countText = [(tabCount || (!markCount && !historyCount)) && plural(tabCount, 'tab'),
+      markCount && plural(markCount, 'bookmark'), historyCount && `${historyCount} history`].filter(Boolean).join(' · ');
+    $('result-count').textContent = countText;
     showStatus();
     const kept = results.findIndex(result => result.key === preserveKey);
-    select(kept === -1 ? fallbackIndex : kept);
+    if (noHighlight) { selected = -1; highlightCloseReady = false; paint(); } else select(kept === -1 ? fallbackIndex : kept);
     if (focusedClose) {
       const sameIndex = results.findIndex(result => isTab(result) && result.tab.id === focusedTabId);
       // Only our own close may carry X-button focus onto a different tab.
@@ -473,7 +674,8 @@ export function startSearch({ document, window, browser }) {
     }
     clearTimeout(announceTimer);
     announceTimer = setTimeout(() => {
-      announcement.textContent = `${plural(shown.size, 'tab')}${historyCount ? ` and ${plural(historyCount, 'history result')}` : ''} found`;
+      const found = [plural(tabCount, 'tab'), markCount && plural(markCount, 'bookmark'), historyCount && plural(historyCount, 'history result')].filter(Boolean);
+      announcement.textContent = `${andList(found)} found`;
     }, 180);
   }
 
@@ -483,31 +685,34 @@ export function startSearch({ document, window, browser }) {
     clearTimeout(sourceTimer);
     const generation = ++sourceGeneration;
     const text = sourceQuery();
-    sourceBusy = Boolean(text);
+    // Counting alone shows no "Searching…": counts only repaint the buttons.
+    sourceBusy = Boolean(text) && extrasOn();
     // Stop a backend scan for an invalidated query, unless its replacement goes
     // out at once: the backend aborts older queries when a newer one arrives.
     if (!text || delay > 0) cancelSources();
     paintSources();
-    if (sourceBusy) sourceTimer = setTimeout(() => searchSources(generation, text), delay);
+    if (text) sourceTimer = setTimeout(() => searchSources(generation, text), delay);
   }
 
-  // An empty query with no sources is the backend's cheap stop signal. Sent at
-  // most once per request; its reply carries nothing and is never rendered.
+  // The backend's stop signal has its own command, since a query with every
+  // source off is now a real count request. Sent at most once per request.
   function cancelSources() {
     if (!sourceInFlight || cancelSent || !token) return;
     cancelSent = true;
     try {
-      Promise.resolve(send({ command: 'querySearchSources', token, query: '', sources: { history: false, content: false } })).catch(() => {});
+      Promise.resolve(send({ command: 'cancelSearchSources', token })).catch(() => {});
     } catch { /* Nothing to recover: the UI already ignores the old reply. */ }
   }
 
   async function searchSources(generation, text) {
-    const wanted = { history: sources.history, content: sources.content };
+    const wanted = { ...sources };
+    const count = countWanted();
+    const listing = extrasOn();
     sourceInFlight = generation;
     cancelSent = false;
     let response;
     try {
-      response = await send({ command: 'querySearchSources', token, query: text, sources: wanted });
+      response = await send({ command: 'querySearchSources', token, query: text, sources: wanted, count });
     } catch { /* Shown as unavailable. */ }
     if (sourceInFlight === generation) { sourceInFlight = 0; cancelSent = false; }
     if (generation !== sourceGeneration) return;
@@ -516,13 +721,26 @@ export function startSearch({ document, window, browser }) {
     // so a reply landing mid-close is dropped: queued keys never see it.
     if (closing) { paintSources(); return; }
     extras = acceptSources(response, wanted, text);
+    let revoked = false;
     if (wanted.content && extras.coverage.content.state === 'permission') {
       // Access was revoked: drop Contents now rather than waiting for a poll.
       dropSource('content');
       context = { ...context, contentPermission: false };
+      revoked = true;
     }
-    if (held) release(); else recompose(selectedKey());
+    if (wanted.bookmarks && extras.coverage.bookmarks.state === 'permission') {
+      dropSource('bookmarks');
+      context = { ...context, bookmarkPermission: false };
+      bookmarkedIds = new Set();
+      revoked = true;
+    }
+    if (revoked) keepOneSource();
+    // A counts-only reply never re-renders the list or arms a row (R15).
+    if (listing || revoked) { if (held) release(); else recompose(selectedKey()); } else showStatus();
     paintSources();
+    // Announce the offer only when it is what the screen shows.
+    const offer = includeOffer();
+    if (offer && !includeLine.hidden) announce(offer.text);
   }
 
   // The first History/Contents results after a handoff have settled: the
@@ -555,38 +773,159 @@ export function startSearch({ document, window, browser }) {
 
   function dropSource(name) {
     sources[name] = false;
+    if (name === 'tabs') return;
     extras[name] = [];
     extras.coverage = { ...extras.coverage, [name]: { state: 'off' } };
   }
 
-  function setSource(name, on) {
-    if (!context) return;
+  // At least one source always stays on.
+  function keepOneSource() {
+    if (!SOURCE_NAMES.some(name => sources[name])) sources.tabs = true;
+  }
+
+  // Turns one source on or off for this search. A source that needs access
+  // shows its enable action instead. Returns whether anything changed.
+  function setSource(name, on, { fromScope = false } = {}) {
+    if (!context) return false;
+    // Any action on the sources replaces an old activation failure (R15.5).
+    failure = null;
+    if (on && !allowed(name)) { needsAccess.add(name); showStatus(); paintSources(); return false; }
+    needsAccess.delete(name);
+    if (!on && sources[name] && SOURCE_NAMES.filter(other => sources[other]).length === 1) {
+      showStatus();
+      announce('At least one source stays on.');
+      return false;
+    }
+    if (sources[name] === on) { showStatus(); paintSources(); return false; }
     held = null;
-    const allowed = name === 'history' ? !context.incognito : context.contentPermission;
     const before = selectedKey();
     // Keys queued against the old list must not act on the new one.
     pendingListKeys.length = 0;
-    if (on && allowed) sources[name] = true; else dropSource(name);
+    if (on) sources[name] = true; else dropSource(name);
+    // A button press replaces the chip with the row's own state.
+    if (!fromScope) scope = null;
+    if (on && name === 'bookmarks') noteBookmarksUsed();
     recompose(before);
     scheduleSources(0);
+    return true;
+  }
+
+  function onSourceButton(name) {
+    if (!context) return;
+    setSource(name, !sources[name]);
+    showTip(name);
+  }
+
+  // A scope word or @ list choice: only that source (or every source for
+  // @all) for this search. Sources that need access show their enable action.
+  function applyScope(entry) {
+    if (!context) return;
+    failure = null;
+    const before = scope ? scope.before : { ...sources };
+    const want = scopeSources(entry.scope);
+    for (const name of SOURCE_NAMES) if (want[name] && !allowed(name)) needsAccess.add(name);
+    const next = Object.fromEntries(SOURCE_NAMES.map(name => [name, want[name] && allowed(name)]));
+    held = null;
+    pendingListKeys.length = 0;
+    // Nothing usable yet: keep searching what was on until access arrives.
+    if (SOURCE_NAMES.some(name => next[name])) {
+      for (const name of SOURCE_NAMES) if (next[name]) sources[name] = true; else dropSource(name);
+    }
+    if (next.bookmarks) noteBookmarksUsed();
+    scope = { entry, before };
+    announce(`${entry.label}. Backspace removes the filter.`);
+  }
+
+  function removeScope() {
+    if (!scope) return;
+    failure = null;
+    const { before } = scope;
+    scope = null;
+    for (const name of SOURCE_NAMES) {
+      needsAccess.delete(name);
+      if (before[name] && allowed(name)) sources[name] = true; else dropSource(name);
+    }
+    keepOneSource();
+    announce('Filter removed.');
+  }
+
+  // "Include them": adds the counted sources for this search, with no row armed.
+  // Acts only on the offer the user can see.
+  function include() {
+    const offer = includeOffer();
+    if (!offer || !context || includeLine.hidden) return;
+    failure = null;
+    held = null;
+    pendingListKeys.length = 0;
+    for (const name of offer.names) if (allowed(name)) sources[name] = true;
+    if (sources.bookmarks) noteBookmarksUsed();
+    scope = null;
+    noHighlight = true;
+    render();
+    scheduleSources(0);
+    query.focus();
+  }
+
+  function showTip(name) {
+    if (!context || shownTips.has(name) || !TIPS[name]) return;
+    shownTips.add(name);
+    tip.textContent = TIPS[name];
+    tip.hidden = false;
+    announce(TIPS[name]);
+    note({ tip: name });
+  }
+
+  function noteBookmarksUsed() {
+    if (!context?.hints?.bookmarksNew) return;
+    context = { ...context, hints: { ...context.hints, bookmarksNew: false } };
+    note({ usedBookmarks: true });
+  }
+
+  function note(hints) {
+    if (!token) return;
+    try { Promise.resolve(send({ command: 'noteSearchHints', token, hints })).catch(() => {}); } catch { /* Hints are best effort. */ }
   }
 
   function setContext(raw) {
-    const next = { ...raw, incognito: raw.incognito === true, contentPermission: raw.contentPermission === true };
+    const hints = raw.hints && typeof raw.hints === 'object' ? raw.hints : {};
+    const next = { ...raw, incognito: raw.incognito === true, contentPermission: raw.contentPermission === true,
+      bookmarkPermission: raw.bookmarkPermission === true, bookmarked: idList(raw.bookmarked),
+      defaultSources: raw.defaultSources && typeof raw.defaultSources === 'object' ? raw.defaultSources : { tabs: true },
+      // The New mark is local once shown, so a poll never brings it back.
+      hints: { tipsShown: Array.isArray(hints.tipsShown) ? hints.tipsShown : [],
+        bookmarksNew: hints.bookmarksNew === true && context?.hints?.bookmarksNew !== false } };
     // Polling must not reset manual scroll or replace rows when nothing changed.
     if (context && JSON.stringify(context) === JSON.stringify(next)) return;
     const previous = results[selected];
     const tabsChanged = !context || contentKey(context) !== contentKey(next);
+    const first = !context;
     context = next;
+    bookmarkedIds = new Set(next.bookmarked);
+    if (first) shownTips = new Set(next.hints.tipsShown);
+    if (!sourcesChosen) {
+      Object.assign(sources, startingSources(next.defaultSources, next));
+      sourcesChosen = true;
+    }
     let dropped = false;
-    for (const name of ['history', 'content']) {
-      const allowed = name === 'history' ? !context.incognito : context.contentPermission;
-      if (sources[name] && !allowed) {
+    for (const name of ['bookmarks', 'history', 'content']) {
+      if (sources[name] && !allowed(name)) {
         dropSource(name);
         dropped = true;
       }
     }
-    if (dropped) pendingListKeys.length = 0;
+    // Access granted while Search is open: the source the user asked for turns on.
+    for (const name of [...needsAccess]) {
+      if (!allowed(name) || name === 'history') continue;
+      needsAccess.delete(name);
+      const want = scope ? scopeSources(scope.entry.scope) : null;
+      if (want && !want[name]) continue;
+      // A scope that could not apply yet applies in full now.
+      if (want) for (const other of SOURCE_NAMES) if (want[other] && allowed(other)) sources[other] = true; else dropSource(other);
+      else sources[name] = true;
+      if (name === 'bookmarks') noteBookmarksUsed();
+      dropped = true;
+    }
+    if (dropped) { keepOneSource(); pendingListKeys.length = 0; }
     // A closed highlight falls to the row that took its place, not the top.
     // Only our own close may arm that replacement; an external change may not.
     if (closing) render(previous?.key, selected); else recompose(previous?.key);
@@ -623,6 +962,8 @@ export function startSearch({ document, window, browser }) {
     const { restore, ...fresh } = next;
     setContext(fresh);
     if (restore) resumeHandoff(restore);
+    // Counts down the Bookmarks "New" mark: one write per launch at most.
+    else if (!hintsNoted && context.hints.bookmarksNew) { hintsNoted = true; note({ opened: true }); }
     // Firefox exposes runtime but not tabs to embedded extension pages. Poll
     // only this authorized UI there; never relay metadata through the host.
     if (!browser.tabs?.onUpdated) {
@@ -659,37 +1000,69 @@ export function startSearch({ document, window, browser }) {
     }
   }
 
-  // Website access is granted only from Settings; recheck when the user returns.
+  // Access may be granted in Settings or a browser prompt; recheck when the user returns.
   function recheckAccess() {
-    if (token && context && !context.contentPermission && !closing) refresh();
+    if (token && context && (!context.contentPermission || !context.bookmarkPermission) && !closing) refresh();
   }
 
   async function activate() {
     const target = results[selected];
     if (!token || !target || busy) return;
-    const history = target.kind === 'history';
+    const history = !isTab(target);
     busy = true;
+    let response;
     try {
-      const response = await send(history
-        ? { command: 'activateHistoryResult', token, url: target.tab.url }
-        : { command: 'activateSearchTab', token, tabId: target.tab.id });
+      response = await send(target.kind === 'bookmark'
+        ? { command: 'activateBookmarkResult', token, bookmarkId: target.bookmarkId }
+        : history ? { command: 'activateHistoryResult', token, url: target.tab.url }
+          : { command: 'activateSearchTab', token, tabId: target.tab.id });
       if (!response?.ok) throw new Error('Activation failed');
       // The backend switches or opens the page and closes this search surface.
     } catch {
-      await refresh();
-      showMessage('error', history
+      // The background's own reason for a bookmark (e.g. deleted since it was listed).
+      const reason = target.kind === 'bookmark' && typeof response?.error === 'string' && response.error.length <= 200 ? response.error : '';
+      // Kept until the next query, source action or close, so a list refresh never hides it.
+      failure = reason ? `${reason} Choose another result.` : history
         ? 'That page could not be opened. Choose another result or reopen search.'
-        : 'That tab could not be selected. Choose another result or reopen search.');
+        : 'That tab could not be selected. Choose another result or reopen search.';
+      await refresh();
+      showStatus();
     } finally {
       busy = false;
     }
   }
 
   async function openSettings() {
-    if (!token || enableButton.hidden) return;
+    if (!token) return;
     let response;
     try { response = await send({ command: 'openSearchPermissions', token }); } catch { /* Reported below. */ }
-    if (response?.ok !== true) showMessage('error', "Could not open Settings. Open Aaron's Tab Vacuum Settings to allow website access.");
+    if (response?.ok !== true) showMessage('error', "Could not open Settings. Open Aaron's Tab Vacuum Settings to allow access.");
+  }
+
+  // Must run inside the click: the browser accepts the request only as part of
+  // the user's own action, so nothing is awaited before it (R15).
+  function requestBookmarks() {
+    if (!canRequest) { openSettings(); return; }
+    let pending;
+    try { pending = permissionsApi.request(BOOKMARK_PERMISSION); } catch {
+      showMessage('error', 'Could not ask for bookmark access. Allow it in Settings.');
+      return;
+    }
+    Promise.resolve(pending).then(granted => {
+      if (granted) refresh(); else announce('Bookmark access was not allowed.');
+    }, () => showMessage('error', 'Could not ask for bookmark access. Allow it in Settings.'));
+  }
+
+  async function saveDefault() {
+    if (!token || !context) return;
+    let response;
+    try { response = await send({ command: 'saveSearchDefault', token, sources: { tabs: sources.tabs, bookmarks: sources.bookmarks, history: sources.history } }); } catch { /* Reported below. */ }
+    if (response?.ok !== true || !response.defaultSources) { showMessage('error', 'Could not save the default sources.'); return; }
+    context = { ...context, defaultSources: response.defaultSources };
+    const focused = document.activeElement === saveButton;
+    paintSources();
+    if (focused) rovingControl()?.focus();
+    announce('Saved as default.');
   }
 
   function describeClose(tabIds, response, titles) {
@@ -725,6 +1098,7 @@ export function startSearch({ document, window, browser }) {
     awaitingClose = true;
     ++refreshVersion; // Discard any context request started before this close.
     notice = null;
+    failure = null;
     paint();
   }
 
@@ -771,8 +1145,11 @@ export function startSearch({ document, window, browser }) {
     const tabIds = idList(state.closing);
     pendingListKeys.length = 0;
     query.value = typeof state.query === 'string' ? state.query : '';
-    sources.history = state.sources?.history === true && !context.incognito;
-    sources.content = state.sources?.content === true && context.contentPermission;
+    // Sources carry over; any that lost access meanwhile drop, as on a poll.
+    const carried = normalizeSources(state.sources);
+    for (const name of SOURCE_NAMES) sources[name] = carried[name] && allowed(name);
+    keepOneSource();
+    sourcesChosen = true;
     mode = MODE_LABELS[state.mode] === undefined ? 'tabs' : state.mode;
     checked.clear();
     if (mode === 'select') for (const id of idList(state.checked)) checked.add(id);
@@ -858,23 +1235,27 @@ export function startSearch({ document, window, browser }) {
   }
 
   // Focus never leaves the dialog. Only the highlighted row's close button is
-  // a stop, so long lists don't add a stop per row. Search in comes last, so
-  // Tab from the query still enters the tab menu. An open menu keeps Tab
-  // among its own controls until it closes.
+  // a stop, so long lists don't add a stop per row. The source toolbar comes
+  // last and is one stop, so Tab from the query still enters the tab menu and
+  // Shift+Tab from the query reaches the sources (R15).
   function focusOrder() {
-    if (menuOpen) return [...menuControls.filter(control => !control.disabled && !control.hidden), trigger];
     const order = [query];
     if (results.length || mode !== 'search') order.push(list);
     if (rowCloses[selected]) order.push(rowCloses[selected]);
-    order.push(selectButton);
+    if (!selectButton.hidden) order.push(selectButton);
     if (mode === 'select') order.push(closeButton);
-    order.push(trigger);
+    for (const control of [includeButton, enableBookmarks, enableButton, chipRemove]) if (isShown(control)) order.push(control);
+    const stop = rovingControl();
+    if (stop) order.push(stop);
     return order;
   }
 
-  function setMenu(open) {
-    menuOpen = open;
-    paintSources();
+  function closeScopeList() {
+    scopeOpen = false;
+    // A dismissed prefix is plain text from now on, so it is searched.
+    scopeDismissed = query.value.trim();
+    render(selectedKey(), selected);
+    scheduleSources();
   }
 
   function moveFocus(backward) {
@@ -889,15 +1270,23 @@ export function startSearch({ document, window, browser }) {
 
   function onQueryInput() {
     if (composing) return;
+    const text = query.value.trim();
+    if (literalPrefix !== null && !text.startsWith(literalPrefix)) literalPrefix = null;
+    if (scopeDismissed !== null && text !== scopeDismissed) scopeDismissed = null;
+    const opening = !scope && scopeSuggestions(text).length > 0 && text !== literalPrefix && text !== scopeDismissed;
+    if (opening && !scopeOpen) scopeIndex = 0;
+    scopeOpen = opening;
+    noHighlight = false;
     held = null;
     displayOrder = new Map(); // A new query is ranked afresh.
     checked.clear();
     pendingListKeys.length = 0;
     highlightCloseReady = true;
     notice = null;
+    failure = null;
     // Open-tab matches show at once; extra sources follow for this query only.
     extras = noExtras();
-    sourceBusy = Boolean(sourceQuery());
+    sourceBusy = Boolean(sourceQuery()) && extrasOn();
     render();
     scheduleSources();
   }
@@ -907,7 +1296,24 @@ export function startSearch({ document, window, browser }) {
   query.addEventListener('blur', () => { composing = false; });
   query.addEventListener('compositionstart', () => { composing = true; });
   query.addEventListener('compositionend', () => { composing = false; onQueryInput(); });
-  query.addEventListener('input', onQueryInput);
+  // A scope word converts only when the whole query so far is one and the
+  // user then types a space; never on paste, drop, autocomplete or IME (R15).
+  query.addEventListener('input', event => {
+    if (composing) return;
+    const text = query.value;
+    if (event.inputType === 'insertText' && event.data === ' ' && text.endsWith(' ') && (query.selectionStart ?? text.length) === text.length) {
+      const entry = text.slice(0, -1) === literalPrefix ? undefined : scopeWord(text.slice(0, -1));
+      if (entry) {
+        query.value = '';
+        applyScope(entry);
+        restoreLiteral = text;
+        onQueryInput();
+        return;
+      }
+    }
+    restoreLiteral = null;
+    onQueryInput();
+  });
 
   function drainListKeys() {
     while (!busy && pendingListKeys.length) {
@@ -973,10 +1379,40 @@ export function startSearch({ document, window, browser }) {
     }
   }
 
+  function pickScope(index) {
+    const entry = scopeSuggestions(query.value.trim())[index];
+    if (!entry) return;
+    query.value = '';
+    restoreLiteral = null;
+    applyScope(entry);
+    onQueryInput();
+  }
+
   function onQueryKey(event, key) {
+    // Backspace in an empty query: right after a conversion it restores the
+    // typed text, searched as plain text; otherwise it removes the chip.
+    if (key === 'Backspace' && !query.value && scope && !event.repeat) {
+      event.preventDefault();
+      const literal = restoreLiteral;
+      restoreLiteral = null;
+      removeScope();
+      if (literal) { query.value = literal; literalPrefix = literal.trim(); }
+      onQueryInput();
+      return;
+    }
+    if (scopeOpen && !scopeList.hidden && (key === 'ArrowDown' || key === 'ArrowUp' || key === 'Enter')) {
+      event.preventDefault();
+      if (key === 'Enter') { if (!event.repeat) pickScope(scopeIndex); return; }
+      const count = scopeSuggestions(query.value.trim()).length;
+      scopeIndex = (scopeIndex + (key === 'ArrowDown' ? 1 : -1) + count) % count;
+      paintSources();
+      return;
+    }
     if (key !== 'ArrowDown' && key !== 'ArrowUp' && key !== 'Enter') return;
     event.preventDefault();
     if (!context || busy) return; // Loading or switching: keys are inert, not lost to the page.
+    // The empty-list action takes a fresh Enter only, never a repeat (R15).
+    if (key === 'Enter' && !results.length) { if (!event.repeat) include(); return; }
     if (key === 'Enter') activate();
     else {
       highlightCloseReady = true;
@@ -988,15 +1424,32 @@ export function startSearch({ document, window, browser }) {
     event.stopPropagation();
     const key = String(event.key ?? '');
     if (event.isComposing || composing || event.keyCode === 229) return;
-    if (key === 'Tab') { event.preventDefault(); moveFocus(event.shiftKey); return; }
+    if (key === 'Tab') {
+      event.preventDefault();
+      // Tab closes the @ list and keeps its usual meaning.
+      if (scopeOpen) closeScopeList();
+      moveFocus(event.shiftKey);
+      return;
+    }
     if (key === 'Escape') {
       event.preventDefault();
       if (event.repeat) return;
-      // The menu closes first and hands focus back to its trigger; mode stays.
-      if (menuOpen) { setMenu(false); trigger.focus(); } else back();
+      // The @ list closes first; mode stays.
+      if (scopeOpen && !scopeList.hidden) closeScopeList(); else back();
       return;
     }
     const focus = document.activeElement;
+    // The toolbar: arrow keys move along it; Space and Enter press natively.
+    if (toolbarControls.includes(focus) && ['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(key)) {
+      event.preventDefault();
+      const shown = visibleToolbar();
+      const at = shown.indexOf(focus);
+      const next = key === 'Home' ? 0 : key === 'End' ? shown.length - 1 : (at + (key === 'ArrowRight' ? 1 : -1) + shown.length) % shown.length;
+      roving = next;
+      paintSources();
+      shown[next].focus();
+      return;
+    }
     // Buttons and checkboxes handle Enter and Space natively; never act on a hidden highlight.
     if (focus && (nativeControls.includes(focus) || isRowClose(focus))) {
       if (event.repeat && (key === 'Enter' || key === ' ')) event.preventDefault();
@@ -1016,23 +1469,24 @@ export function startSearch({ document, window, browser }) {
     list.focus();
   });
   closeButton.addEventListener('click', () => { if (mode === 'select') closeTabs(closeTargets()); });
-  historyToggle.addEventListener('change', () => setSource('history', historyToggle.checked));
-  contentToggle.addEventListener('change', () => setSource('content', contentToggle.checked));
+  for (const [name, button] of Object.entries(sourceButtons)) {
+    button.addEventListener('click', () => {
+      roving = visibleToolbar().indexOf(button);
+      onSourceButton(name);
+    });
+  }
+  saveButton.addEventListener('click', saveDefault);
   enableButton.addEventListener('click', openSettings);
-  trigger.addEventListener('click', () => setMenu(!menuOpen));
-  // Pointer toggles keep focus (and typing) where it was.
-  menu.addEventListener('mousedown', event => event.preventDefault());
-  // Any other press inside the palette light-dismisses the open menu.
-  palette.addEventListener('mousedown', event => {
-    swallowClick = menuOpen && !menu.contains(event.target) && !trigger.contains(event.target);
-    if (swallowClick) setMenu(false);
-  });
-  palette.addEventListener('click', event => {
-    if (!swallowClick) return;
-    swallowClick = false;
+  enableBookmarks.addEventListener('click', requestBookmarks);
+  includeButton.addEventListener('click', () => include());
+  chipRemove.addEventListener('click', () => { restoreLiteral = null; removeScope(); onQueryInput(); query.focus(); });
+  // Pointer presses on source buttons keep focus (and typing) in the query.
+  for (const control of toolbarControls) control.addEventListener('mousedown', event => { if (document.activeElement === query) event.preventDefault(); });
+  scopeList.addEventListener('mousedown', event => {
     event.preventDefault();
-    event.stopPropagation();
-  }, true);
+    const option = event.target.closest('[data-scope]');
+    if (option) pickScope([...scopeList.children].indexOf(option));
+  });
 
   list.addEventListener('mousedown', event => event.preventDefault()); // Keep focus where it is.
   list.addEventListener('click', event => {
