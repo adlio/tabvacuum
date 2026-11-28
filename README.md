@@ -1,143 +1,74 @@
 # Aaron's Tab Vacuum
 
-<!-- badges will be added once CI and store listings are live (T48) -->
+[![CI](https://github.com/adlio/tabvacuum/actions/workflows/ci.yml/badge.svg)](https://github.com/adlio/tabvacuum/actions/workflows/ci.yml)
+[![Firefox Add-on](https://img.shields.io/amo/v/tabvacuum.svg)](https://addons.mozilla.org/en-US/firefox/addon/tabvacuum/)
 
 Aaron's Tab Vacuum (ATV) is a browser extension for power-user tab management. Find tabs fast, sort them your way, and clear duplicates, stale tabs and blank pages, with keyboard control throughout. Works in Firefox and Chrome.
 
 ## Features
 
-- **Search Tabs** — live fuzzy title/URL search with exact matches first; arrow keys highlight, Enter focuses the tab and its window, Escape dismisses. Empty queries show the 10 most recently focused tabs, forcing the current tab last before applying the limit. Typed queries give the current tab no special treatment. Search can also look in bookmarks, history and the text of open pages: pick sources with the buttons under the query, or type `@b`, `@h`, `@c` or `@all` (see [Search sources](#search-sources-0100)).
-- **Close Duplicate Tabs** — deduplicate by URL across all windows
-- **Merge All Windows** — consolidate every tab into the current window
-- **Sort Tabs** — by URL, title, last accessed, or visit count (ascending/descending)
-- **Stale Tabs** — preview tabs untouched for a configurable period, close the reviewed set, or opt into hourly automatic cleanup
-- **Close Blank Tabs** — remove new-tab pages, welcome pages, and search engine homepages
-- **Toggle Vertical Tabs** (Firefox only) — switch the tab bar between the horizontal strip and Firefox's native vertical sidebar with one keyboard shortcut
+- **Search tabs** — fuzzy search across all your open tabs by title or URL, with exact matches ranked first. Arrow keys to highlight, Enter to switch, Escape to dismiss. An empty query shows your 10 most recently used tabs. Search can also look in your bookmarks, your browsing history, or the text of pages you already have open.
+- **Close duplicate tabs** — find tabs that share a URL and close the extras, across every window.
+- **Prevent duplicate tabs** (opt-in) — stop a duplicate from opening in the first place: switch straight to the tab that's already open, or ask first.
+- **Merge all windows** — pull every tab into your current window.
+- **Sort tabs** — by URL, title, last accessed, visit count, or Frequent & recent (visit frequency combined with recency), in either direction.
+- **Close stale tabs** — review tabs you haven't touched in a while and close them, or opt in to automatic hourly cleanup.
+- **Close blank tabs** — clear out new-tab pages, welcome pages, and search engine homepages.
+- **Toggle vertical tabs** (Firefox only) — flip Firefox's tab bar between the horizontal strip and the native vertical sidebar with one keystroke.
 
-Accessible via toolbar popup, tab right-click menu, and keyboard shortcuts.
+Every action is available from the toolbar popup, the tab right-click menu, and keyboard shortcuts. Actions report what happened through a system notification, or inline in the popup if it's still open.
 
 ## Install
 
-**Firefox**: Install from [Firefox Add-ons](https://addons.mozilla.org/en-US/firefox/addon/tabvacuum/)
+**Firefox**: [Firefox Add-ons](https://addons.mozilla.org/en-US/firefox/addon/tabvacuum/)
 
-**Chrome**: Install from the [Chrome Web Store](https://chromewebstore.google.com/detail/tabvacuum/hhhpnpjhdjfhdflffpgnknlmbfogachb)
+**Chrome**: [Chrome Web Store](https://chromewebstore.google.com/detail/tabvacuum/hhhpnpjhdjfhdflffpgnknlmbfogachb)
 
-### Install from Source
-
-1. Clone this repository
-2. `npm install`
-3. `npm run build`
-
-**Firefox**:
-1. Open `about:debugging#/runtime/this-firefox`
-2. Click "Load Temporary Add-on..."
-3. Select `dist/firefox/manifest.json`
-
-**Chrome**:
-1. Open `chrome://extensions`
-2. Enable "Developer mode"
-3. Click "Load unpacked"
-4. Select the `dist/chrome/` directory
-
-## Keyboard Shortcuts
-
-| Action | Default Shortcut |
-|---|---|
-| Close Duplicates | `Alt+Shift+D` |
-| Merge Windows | `Alt+Shift+M` |
-| Sort Tabs | `Alt+Shift+S` |
-| Search Tabs | `Ctrl+Shift+.` (`Cmd+Shift+.` on macOS) |
-| Toggle Vertical Tabs (Firefox only) | `Alt+Shift+V` |
-| Close Stale Tabs | *(unassigned — set manually)* |
-| Close Blank Tabs | *(unassigned — set manually)* |
-
-Chrome allows at most four suggested shortcuts per extension. **Close Stale Tabs** and **Close Blank Tabs** ship without defaults. Existing user-assigned bindings remain managed by the browser; check the browser's shortcut settings after upgrading. Search uses the same period key across platforms: Firefox reserves Ctrl+Shift+K for its web console on Windows/Linux (the Mac console shortcut is Command+Option+K). ATV never overwrites shortcuts the browser already holds, so an existing install may keep its previous search binding until you change it in the browser's shortcut settings. You can assign shortcuts yourself:
-
-**Firefox**: remap in `about:addons` → gear icon → "Manage Extension Shortcuts".
-**Chrome**: remap in `chrome://extensions/shortcuts`.
-
-The Search shortcut can be changed on the browser's shortcuts page, the same way. In Chrome you can set **Search tabs** to Cmd+K or Ctrl+K. Firefox accepts that key but keeps it for its own search bar, so Search won't open with it there; pick another key in Firefox.
-
-### Action feedback
-
-Sort, Merge, Close Duplicates and Close Blank Tabs report their result the same way from every surface. Stale Tabs first opens review controls; its explicit **Close N tabs now** button uses the same progress and result feedback:
-
-- **Toolbar popup**: the status area shows an action label and spinner while the action runs, and the popup ignores further action clicks until it finishes. On success, or when nothing needed changing, the popup closes and a system notification reports the outcome. A genuine failure keeps the popup open with the error shown inline.
-- **Tab right-click menu and keyboard shortcuts**: a system notification reports the outcome.
-- **Nothing to do** (for example, no duplicates found) is reported as information, not an error.
-- If the notification itself cannot be shown, the action's real result still stands; an open popup shows that result inline instead of reporting a failure.
-
-Whether system notifications appear depends on your operating system's notification settings for the browser. Closing tabs from the search palette is different: the palette stays open and reports results inline.
-
-## Settings
-
-Access via the browser's extension settings page (Aaron's Tab Vacuum → Preferences/Options).
-
-- Stale tab threshold (default: 7 days)
-- URL normalization for duplicate detection (ignore fragments, ignore query params)
-- Prevent duplicate tabs (off by default): a new tab that opens a page already open switches to the open tab instead. Duplicate Tab and links to the same page are kept, and Reopen Closed Tab within a minute keeps a second copy. A never list excludes sites. With **When it happens: Ask first**, the new tab shows "Already open" with Switch and Keep both instead.
-- Protected tab behavior (skip pinned, skip audio-playing)
-
-## Stale-tab review and automatic cleanup (0.6.0 candidate)
-
-Choose **Stale Tabs** in the toolbar menu to expand its controls inline. The chevron changes direction; opening it never closes tabs or opens another window. The existing stale-tab shortcut and context-menu entry also open these controls. Change the duration (seven days by default), inspect the eligible count, use **Review tabs**, and select **Close N tabs now** only when ready. Changing days to hours preserves the duration. Escape cancels an unfinished duration edit before collapsing the controls.
-
-**Automatically close stale tabs** is off by default, including after upgrading. The toolbar row shows **Stale Tabs (Auto-Close Enabled)** while enabled. When tabs are expected to qualify, its caption says, for example, *Closing 6 tabs automatically at 10p.* The time is local. The caption counts candidates at the next scheduled check, while Close now counts candidates eligible now; the expanded text explains when more tabs cross the threshold before that check. With no projected candidates, the enabled title remains and the caption is hidden.
-
-Enabling schedules the next whole local hour and removes nothing immediately. Automatic cleanup checks normal windows only, always protecting each window's active tab—kept regardless of how long since it was active—plus pinned, audio-playing and last-in-window tabs. It also skips loading, hidden, protected/internal and known media-sharing pages. Sleeping tabs are not loaded. Both manual and automatic cleanup keep tabs with unknown age; manual cleanup honors the configured pinned/audio protections and stays within the invoking normal/private context.
-
-The menu and Settings share one saved threshold and opt-in. Disabling stops future removals. An open stale editor defers automatic cleanup. A full browser restart schedules a future check rather than replaying missed runs; after device sleep, one delayed check may run on wake. Scheduling uses the `alarms` permission and needs no additional website access.
-
-Manual closing is limited to the previewed set. Tabs that changed, became active or protected, or moved out of scope are kept. Failures retain actual partial counts where known. If the reply is lost, **Review remaining tabs** fetches a fresh list without repeating the close. Tabs are closed, not archived; native Reopen Closed Tab may help, but unsaved page state is not guaranteed to return.
-
-**Age tracking in this candidate:** Firefox uses the tab's native last-viewed time together with current-session observations. Chrome uses the tab's native last-activated time—the clock starts when you select a tab, not when you leave it. A tab left active for more than seven days is kept; once you switch away, it can qualify under a seven-day threshold. Chrome's native timestamp carries age across clean restarts. ATV also saves a bounded, timestamp-only journal in local storage to correct known older restored timestamps; corrections can only make a tab younger. The journal holds no tab IDs, URLs, hashes, titles, or private-window activity and needs no extra permission. Three clean Chromium restarts preserved age in the integrated tests, so the earlier reset-on-restart limitation no longer applies. Crash immunity is not promised: if an abrupt crash loses recent activity in both the browser and the extension, a restored tab can appear older than it really is and qualify too early. Unknown or inconsistent ages are kept. Chrome private-window age records stay in session storage only. Tests use accelerated age fixtures, not a real seven-day soak.
-
-## Development
+### Install from source
 
 ```bash
-npm install           # Install dev dependencies
-npm test              # Run unit tests (Vitest)
-npm run build         # Build dist/firefox/ and dist/chrome/
-npm start             # Build + launch Firefox with extension loaded
-npm run start:chrome  # Build + launch Chromium with extension loaded
-npm run package       # Build + create zip files in artifacts/
-npm run lint          # Lint Firefox extension (web-ext lint)
+git clone https://github.com/adlio/tabvacuum.git
+cd tabvacuum
+npm install
+npm run build
 ```
 
-`npm start` and `npm run start:chrome` use `web-ext run` to open a
-temporary browser profile with the extension installed. The browser
-auto-reloads when files in the dist directory change, so the workflow is:
-edit source, run `npm run build` in another terminal, and the browser
-picks up the changes.
+**Firefox**: open `about:debugging#/runtime/this-firefox`, click **Load Temporary Add-on...**, and select `dist/firefox/manifest.json`.
 
-The `npm run package` command produces upload-ready zip files in `artifacts/`.
+**Chrome**: open `chrome://extensions`, enable **Developer mode**, click **Load unpacked**, and select the `dist/chrome/` directory.
 
-See `docs/prd.md` for requirements, `docs/design.md` for architecture, and
-`docs/tasks.md` for the implementation task list.
+## Keyboard shortcuts
 
-## Tab search and browser tests
+| Action | Default shortcut |
+|---|---|
+| Search tabs | `Ctrl+Shift+.` (`Cmd+Shift+.` on macOS) |
+| Close duplicates | `Alt+Shift+D` |
+| Merge windows | `Alt+Shift+M` |
+| Sort tabs | `Alt+Shift+S` |
+| Toggle vertical tabs (Firefox only) | `Alt+Shift+V` |
+| Close stale tabs | *(unassigned — set manually)* |
+| Close blank tabs | *(unassigned — set manually)* |
 
-Search opens a centered command palette over the current web page, from the ATV toolbar menu or its keyboard command. The scope is **all windows** by default; change it to **current window only** on the Settings page. Normal and private-window results are kept separate. Typing only searches: it never hides, moves, closes, or selects browser tabs as a group. Arrow keys highlight; Enter selects the tab and focuses its window. Escape or a backdrop click dismisses and restores page focus. Tab and Shift+Tab stay inside the palette.
+Chrome only allows four suggested shortcuts per extension, so **Close stale tabs** and **Close blank tabs** ship without defaults. You can set or change any shortcut yourself:
 
-### Close tabs from search
+- **Firefox**: `about:addons` → gear icon → **Manage Extension Shortcuts**.
+- **Chrome**: `chrome://extensions/shortcuts`.
 
-Inline hints change with focus, so the controls are available without memorizing them:
+ATV never overwrites a shortcut your browser already has assigned, so after upgrading, check your browser's shortcut settings if a binding looks different than expected.
 
-- **Search field**: type to search, arrows to highlight, Enter to switch. Every row has an × button that closes only that row. Backspace/Delete and Cmd+A/Ctrl+A keep editing the query. Tab enters the tab menu, without selecting multiple tabs.
-- **Tab menu**: arrows or j/k move the highlight; Enter switches tabs. x or Delete closes the highlighted tab (Backspace also supports the Mac Delete key). Closing keeps the tab menu and query open, with the next row at the same position highlighted. `j, x, j, x, j, x` closes alternating original rows. Fast navigation/close keystrokes are processed in order; mode/focus changes or a partial failure cancel pending keystrokes.
-- **Select multiple**: press m in the tab menu or click Select multiple. Space (labelled Toggle Selection) or Enter toggles a checkbox; a selects every current result, including those below the scroll. Cmd+A on Mac or Ctrl+A elsewhere also works in this mode. With an empty query, select-all covers only the ten listed recent tabs. Tabs arriving later remain unchecked.
-- **Close selected**: x, Delete/Backspace or Close N tabs closes only the checked tabs. With nothing checked, these batch actions do nothing. A row's × always closes that row alone, even while other tabs are checked. Closing stays in multi-select mode, including with zero matches; held close keys never repeatedly close neighbours.
-- **Step back**: m, Done or Escape leaves multi-select and clears checks, returning to the tab menu. Another Escape returns to the query; another dismisses search. Focusing the query directly returns to search and clears checks. No browser-native tab multi-selection is changed.
+In Chrome you can set **Search tabs** to Cmd+K or Ctrl+K. Firefox accepts that key but keeps it for its own search bar, so Search won't open with it there; pick another key in Firefox.
 
-To close every current match: type `amazon`, then Tab → m → a → x (or Delete).
+## Tab search
 
-Closures follow the explicit Close action. The current/active tab may be closed, including as part of a batch. If it hosts the palette, search first prepares a replacement on a loaded, already-permitted surviving page in the same window. When that is unavailable, it uses a separate extension window. Before removing an active host in that fallback, it selects an already-loaded surviving tab in the original window when possible, even if that page cannot host the palette. If only sleeping tabs remain, the browser may load whichever tab it activates after the close. The replacement must authenticate and receive the query, mode, source choices, remaining checks and focus before any tabs in that batch close. No new permission prompt appears; existing optional website access can support the handoff even with Page contents off. If neither replacement becomes ready, nothing in the batch closes. Queued keys do not carry over during the handoff. Dismissing the replacement before it takes over cancels the close. Existing results retain their relative order while the query is unchanged, so a browser-selected neighboring tab does not jump ahead of the next close target. Editing the query ranks results afresh. Otherwise search stays in place. Configured pinned/audio protections and the last-tab-in-window safeguard still apply, with skips and failures explained inline. Existing automatic cleanup actions retain their active-tab protections. Use the browser's Reopen Closed Tab command to recover closed tabs; unsaved page state is not guaranteed to recover.
+Open search from the toolbar menu or its keyboard shortcut. It opens a centered search box over the current page — type to filter your open tabs by title or URL, use arrow keys (or j/k) to move the highlight, and press Enter to switch to a tab. Press **x** or click a row's **×** to close it without leaving search; press **m** to select several tabs and close them together.
 
-### Search sources (0.10.0)
+By default search covers every window; switch to the current window only from Settings.
 
-Search looks in four sources: **Tabs**, **Bookmarks**, **History** and **Contents** (the text of loaded pages). A row of buttons under the query shows which ones are on. Click a button to turn that source on or off for this search; at least one stays on. From the keyboard, press Shift+Tab from the query to reach the row, move with the arrow keys, and press Space or Enter to toggle. The query is kept when sources change.
+### Search sources
 
-**Scope words** change sources without leaving the query:
+Search can look in four places: **Tabs**, **Bookmarks**, **History**, and **Contents** (the text of pages you already have open). The buttons under the search box show which are on; click one to turn it on or off for this search, and at least one always stays on. From the keyboard, press Shift+Tab from the search box to reach the buttons, then use the arrow keys and Space or Enter. Your query is kept when you change sources.
+
+You can also switch sources by typing a **scope word** as the whole query, followed by a space:
 
 | Type | Searches |
 |---|---|
@@ -147,55 +78,51 @@ Search looks in four sources: **Tabs**, **Bookmarks**, **History** and **Content
 | `@contents` or `@c` | page contents only |
 | `@all` or `@a` | every source, page contents included |
 
-Type the word as the whole query, then a space, and it becomes a chip beside the query box, such as "Only bookmarks ×". Pasted text never converts, and queries such as `@types` stay text. Backspace right after the conversion puts the typed word back as text; otherwise Backspace in an empty query removes the chip. Typing `@` opens a list of the scope words; pick one with the arrow keys and Enter. A source that still needs access shows its enable action instead of being searched.
+The word turns into a label beside the search box, such as "Only bookmarks ×". Typing `@` lists the scope words: pick one with the arrow keys and Enter or Tab, so `@book` then Tab searches only bookmarks. Backspace right after the label appears puts the word back as text; otherwise Backspace in an empty search box removes the label. Pasted text never turns into a label, and ordinary queries such as `@types` stay text.
 
-**Default sources.** Search starts with Tabs only, including after upgrading. In a private window, History is left out, and Bookmarks is left out until access is granted. A button click or scope word lasts for that search; the next time Search opens, it is back to your default. When the sources on screen differ from your default, **Save as default** appears at the end of the row. Settings has a **Search by default** choice to view or reset it. Contents can be turned on for one search but can't be saved as the default.
+Results are grouped as open tabs, then bookmarks, then history, and each page appears once: an open tab that is also bookmarked shows as the tab with a ★. A source that's off shows how many extra results it would add, such as "Bookmarks 3" (or "50+" for bookmarks and "100+" for history). When nothing matches, search tells you what would, for example "No open tabs match. 3 bookmarks and 12 history pages do.", and **Include them** (or Enter) adds those sources for this search.
 
-**Counts.** A source button that's off shows how many rows turning it on would add, after repeats are removed, such as "Bookmarks 3". Bookmarks reads "50+" and History "100+" when more match than they list. When nothing matches, the list says what would match ("No open tabs match. 3 bookmarks and 12 history pages do.") and offers **Include them**; Enter does the same, and adds those sources for this search only. Bookmarks are counted only after bookmark access is granted, history is never counted in private windows, and Contents is never counted automatically.
+Search starts with Tabs only. Source changes last for one search; when the buttons differ from your default, **Save as default** keeps them for next time, and **Search by default** in Settings shows or resets that choice. Contents can be turned on for a single search but can't be saved as a default. In a private window, history isn't searched or counted.
 
-Results are grouped in this order: Open tabs, Bookmarks, History. Each row shows its source. An open tab that is also bookmarked appears once, as the tab, with a ★; a bookmark that is also in history appears once, as the bookmark.
+- **Bookmarks** are matched by title and URL, with each result showing its folder, such as "Bookmarks bar › Work". Enter opens the bookmark, or switches to it if it's already open. Search only reads bookmarks; it never edits or deletes them. The first time you turn Bookmarks on, the browser asks for bookmark access. In Firefox, search over a web page can't show that prompt, so it offers **Enable in Settings** instead: allow bookmark access there, return to search, and Bookmarks turns on. You can remove the access from Settings.
+- **History** searches the titles and URLs of pages you've visited, across your full stored history. Enter opens the page, or switches to it if it's already open. Search never deletes history.
+- **Contents** searches the text of pages already loaded in your tabs; it doesn't load sleeping tabs. It needs website access, which you grant from Settings (**Enable in Settings**, then **Allow website access**); granting access alone never starts a scan.
 
-- **Bookmarks** are matched on title and URL with the same fuzzy ranking as tabs, up to 50 results, each with its folder path in the browser's own folder names (for example "Bookmarks bar › Work" in Chrome). A bookmark saved in several folders appears once. Folders, separators, `javascript:` bookmarklets and non-HTTP(S) entries are skipped. The first time you turn Bookmarks on, Search shows **Allow bookmarks**, and the browser asks for access. In Firefox, Search over a web page can't show that prompt, so it offers **Enable in Settings** instead: allow bookmark access there, then return to Search and Bookmarks turns on. Search only reads bookmarks, although the browser's prompt also mentions changing them. Settings can remove bookmark access. Enter opens the bookmark in a new tab, or switches to it if the same page is already open. Bookmark rows have no × or checkbox, and Search never edits or deletes bookmarks. Bookmarks are available in private windows.
+See [`docs/design.md`](docs/design.md#centered-tab-search-r11) for the search architecture and the privacy/isolation mechanics, and [Search sources](docs/design.md#search-sources-r15-issue-24) for how sources, scope words and counts work.
 
-- **History** searches visited page titles and URLs using the browser's native matching across its full stored history, not just the last day. It retrieves up to the latest 100 matching unique pages, then ranks them below open tabs. Exact URLs are deduplicated without stripping query parameters or fragments. An already-open exact URL appears as the open tab rather than another history row; multiple real open tabs remain separate. History entries have no × or checkbox and can never be closed/deleted by search. Enter opens the page in a new tab, or focuses an eligible exact-URL tab if one is now open. History is unavailable in private search.
-- **Page contents** searches rendered text in loaded website tabs only. First choose **Enable in Settings**, then **Allow website access** and approve the browser prompt. Then turn on Contents in Search (or type `@c`); granting access alone does not start a scan. Settings also provides Remove website access. The browser retains this optional permission.
-- **Matching and coverage:** ordinary tab title/URL search keeps its fuzzy ranking. Contents requires all query terms to match literally, ignoring case, and adds a snippet without duplicating a tab already matched by title/URL. It reads main-document text only—not form controls, editable regions, hidden content, iframes or shadow roots. Sleeping/loading/protected tabs are skipped, not loaded. The status line reports searched/skipped counts and partially searched long pages. Each request examines at most 100 eligible tabs, with four scans at a time; each page is bounded to 100,000 text characters, 10,000 visited nodes and a 75ms traversal budget (1.5s request timeout). Expanded queries have a 256-character limit, explained inline; normal tab search remains available for longer queries.
-- **Responsive and local:** open-tab results appear immediately while extras load. Late results preserve the highlighted target; if it disappears, another tab is not silently armed for closing. Typing a new query, turning extras off, or ending search cancels pending scans. Scripts already running finish within their bounds and their cancelled results are discarded. Queries and snippets are not saved or sent off the device. There is no background content index.
+## Stale tabs
 
-The shadcn-inspired UI uses native CSS and JavaScript, with no framework or remote assets. Default tab-only queries stay in the search frame unless closing its host requires a handoff; that handoff temporarily transfers the query and UI state through the authorized background handler and session storage to the replacement frame. When an extra source is enabled, its query goes to the authorized background handler; content matching runs in the isolated world of the selected loaded pages and returns only matching snippets. Focus timestamps and short-lived launch metadata live in session storage, not persistent browsing history.
+Choose **Stale Tabs** from the toolbar menu to expand a review panel: set how long a tab can sit untouched (7 days by default), see how many qualify, and close them with **Close N tabs now**. Nothing closes until you confirm.
 
-### Permissions and privacy
+Turn on **Automatically close stale tabs** in the panel or in Settings to have ATV close qualifying tabs once an hour, with no further confirmation. It's off by default, including after an upgrade, and the toolbar tells you when it's on and roughly when the next automatic close will happen. Either mode always protects the active tab in every window, the last tab in a window, and (optionally) pinned or audio-playing tabs.
 
-- `activeTab` grants temporary access to the current page after you invoke search. `scripting` mounts the palette there. There are no required broad host permissions or always-running content scripts. Page-content search separately requests optional HTTP/HTTPS website access through Settings, and runs only when explicitly selected in the palette. Bookmark search uses the optional `bookmarks` permission, requested the first time you turn Bookmarks on.
-- The palette lives in an extension-origin iframe inside a closed shadow tree. The page cannot read its query, titles, or URLs. The launch token is not in the page DOM or iframe URL. Each privileged search request is checked against its token, tab, frame, and privacy context. The only message sent back to the page is a data-free dismissal signal.
-- On browser-internal pages, local files, and pages where injection fails, search opens in a separate extension-owned window, centered over the browser. That fallback has OS-managed window chrome. It closes after selection or Escape; it never navigates the source tab. Its short-lived token appears only in the extension-owned window URL, not a website URL, and is bound to that exact tab/frame.
-- Private access must be enabled in the browser's extension settings. Chrome uses split incognito execution to support the protected-page fallback. Chrome still shares extension session storage between its workers; distinct session keys prevent normal/private launches overwriting each other. Private results never appear in normal search.
-- Websites can notice that an overlay opened, remove it, or draw their own imitation; in-page UI cannot prevent a hostile site from interfering with its own page. The public frame resource also makes extension-installation fingerprinting possible. This does not grant access to tab data. Only the search HTML is web-accessible; unauthorized frames cannot obtain results or invoke cleanup/settings commands.
+Closing is not archiving — your browser's native "Reopen Closed Tab" command may bring a page back, but unsaved page state isn't guaranteed to survive. See [`docs/design.md`](docs/design.md#stale-tab-review-and-opt-in-scheduling-060-candidate-r4r7) for how age is tracked across restarts and the scheduling mechanics.
 
-Firefox 115+ and Chrome 127+ are supported by the manifests. Firefox's embedded frame has a restricted API surface, so an authorized visible search refreshes once per second there; Chromium refreshes on tab events. Persistent filtering and deep content indexing remain deferred.
+## Duplicate tabs
 
+**Close duplicate tabs** is a one-shot action: it finds tabs that already share a URL and closes the extras.
 
-### Browser test gate
+**Prevent duplicate tabs**, in Settings, stops a new duplicate before it settles in: turn it on and a new tab that opens a page you already have open switches you to that tab and closes the new one instead, about a quarter second after it opens. Copies you make on purpose are left alone — Duplicate Tab, a link to the same page, pages opened by ATV's own search, and reopening a closed tab within a minute (so Reopen Closed Tab undoes a switch) — and a bulk open (three or more tabs in quick succession) is never touched. Set **When it happens** to **Ask first** to get an "Already open" prompt with **Switch** and **Keep both** instead of an automatic switch. A **Never on these sites** list (one URL prefix, host name, or `/regex/` per line) excludes sites you don't want this for. No extra browser permission is needed for either mode.
 
-`npm run test:browsers` is the full browser gate. It builds `dist/` once, then runs every real-browser suite in order: search (Firefox and Chromium), stale-tab cleanup (Firefox and Chromium), the Chromium last-activated age journal/restart check, and toolbar action feedback (Firefox and Chromium). The suites drive the actual built extensions — in-page palettes, protected-page fallback windows, native toolbar menus, and local fixture tabs — in fresh profiles. Success paths use real browser APIs; fault cases and accelerated age fixtures are labelled in the results. Test pages bind only to loopback.
+See [`docs/design.md`](docs/design.md#duplicate-tab-prevention-r14-issue-20) for the detection rules and the duplicate/bulk heuristics.
 
-**Prerequisites.** Linux with Python 3, Xvfb, X11/XTest libraries, ffmpeg, Firefox, geckodriver, and Chromium installed. Set `KIROCREW_SCRATCH` (or `TMPDIR`) to a disposable test directory. Optional binary paths are `FIREFOX_BINARY`, `GECKODRIVER`, `CHROMIUM_BINARY`, and `XVFB_BINARY`. Firefox/geckodriver/Xvfb default to the session's `browsers/` install; Chromium defaults to Playwright's browser. On hosts with locally extracted Xvfb libraries, the harness also searches `browsers/usr/lib64` under scratch.
+## Settings
 
-**Focused reruns.** The gate builds once, and the focused scripts below do not rebuild — run `npm run build` first (or let the gate build), then rerun only what you need:
+Open from your browser's extension settings page (Aaron's Tab Vacuum → Preferences/Options).
 
-| Script | Covers |
-|---|---|
-| `npm run test:search:firefox` / `npm run test:search:chromium` | command palette: open, close-from-search, expanded History/Page-contents, and the privacy/lifecycle checks |
-| `npm run test:stale:firefox` / `npm run test:stale:chromium` | stale-tab review and automatic cleanup |
-| `npm run test:age:chromium` | Chromium last-activated age tracking and the restart-safety journal |
-| `npm run test:feedback:firefox` / `npm run test:feedback:chromium` | toolbar action feedback and the period search shortcut |
+- Tab search scope (all windows or current window only) and **Search by default** (the sources each new search starts with)
+- Bookmark access and website access for search, each with a button to allow or remove it
+- Stale tab threshold (default: 7 days) and automatic cleanup
+- Duplicate-detection URL normalization (ignore fragments, ignore query parameters)
+- Prevent duplicate tabs: on/off, Switch vs. Ask first, and the never-list
+- Protected-tab behavior (skip pinned, skip audio-playing)
+- Blank-tab categories to detect, plus your own additional URLs/patterns
 
-`npm run test:firefox` and `npm run test:chromium` keep their previous meaning: build, then run that browser's search suite. Narrow a search suite further by passing a flag, e.g. `npm run test:search:firefox -- --acceptance-only` (also `--closing-only` and `--expanded-only`).
+## Permissions and privacy
 
-**Screenshots and recordings.** Screenshots go under `tabvacuum-firefox/` and `tabvacuum-chromium/` in scratch. `RECORD_BROWSER=1 npm run test:chromium` additionally records the actual desktop flow to MP4; for action feedback, `RECORD_BROWSER=1` records a real frecency sort and asserts its returned result. Firefox uses its native Marionette actor for popup content because ordinary WebDriver frame APIs exclude these remote extension views. Physical shortcut keys are sent through XTest on the isolated X display. The action-feedback suite's success/no-op checks use real browser APIs on disposable tabs; busy-state screenshots deliberately delay the test transport, and failure cases inject transport errors or a notification-only failure. These checks establish notification API acceptance, not OS-banner visibility. This verifies Linux browser behavior; it does not claim OS-level macOS shortcut testing. The Firefox harness selects the privileged-inspection opt-in supported by the installed geckodriver, only for its throwaway profile.
+ATV only accesses the current page's content after you explicitly invoke search on it, and runs no content scripts that are always on. Search results, history matches, and duplicate-tab checks stay inside the extension — the web page you're viewing can't read your query, your other tab titles, or your URLs. Searching the text of your open pages and searching your bookmarks each need a separate, optional permission: website access is granted from Settings, and bookmark access when you first turn Bookmarks on (or from Settings). Your browser's bookmark prompt mentions changing bookmarks because browsers offer no read-only bookmark access, but ATV only reads them. Nothing is sent off your device, and there's no background index of anything you've browsed. Duplicate-tab prevention and stale-tab tracking use only permissions the extension already has (`tabs`, `storage`, `notifications`, `alarms`); no new permission is requested for either. Private-window results and activity are always kept separate from normal-window data and are never mixed together.
 
-**Continuous integration.** CI (`.github/workflows/ci.yml`) runs the unit tests (`vitest run`), the build (`node scripts/build.js`), and the Firefox `web-ext lint` only. The browser gate above runs locally and is not part of CI.
-
+For the full permission-by-permission breakdown and the isolation mechanics, see [`docs/design.md`](docs/design.md#centered-tab-search-r11).
 
 ## Credits
 
@@ -203,6 +130,10 @@ The **Toggle Vertical Tabs** feature adapts the flip-the-setting mechanism from 
 [Vertical Tab Keyboard Toggle](https://github.com/AndreiMiculita/vertical-tab-keyboard-toggle)
 add-on by Andrei-Lucian Miculita, used under the MIT License. See `LICENSE` for the
 upstream copyright notice.
+
+## Contributing
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for the development workflow, the full browser test suite, and CI details. Architecture and design decisions live in [`docs/design.md`](docs/design.md); requirements in [`docs/prd.md`](docs/prd.md).
 
 ## License
 
